@@ -1,0 +1,156 @@
+---
+title: Identity and IDs
+description: How KovaServe identifies entities — ULIDs across the surface, the Session ID exception, idempotency keys, and trace correlation.
+---
+
+KovaServe uses three distinct identity primitives across its surface:
+
+- **ULIDs** for almost every persistent entity — Run, Step, ModelCall, Checkpoint, ContextManifest, ContextSegment, ContextArtifact, MemoryEntry, ToolCatalog, Budget, PolicyScope, StateHandle, Organization, Project, Environment, Key, and others.
+- **Prefixed Session IDs** (`ses_<24hex>`) — the one deliberate exception, distinguishable at a glance from execution-scoped IDs.
+- **Idempotency keys** — caller-supplied strings that let clients safely retry mutating operations.
+
+A fourth primitive, the W3C `traceparent`, links every operation to its OpenTelemetry trace. It is identity for *correlation*, not identity for *addressing* an entity.
+
+## ULIDs are the default
+
+Almost every persistent entity in KovaServe is identified by a **bare 26-character Crockford ULID** with no prefix:
+
+```
+01J8X9Y2Z3K4M5N6P7Q8R9S0T1
+```
+
+Properties:
+
+- **Lexicographically sortable by creation time.** The first 48 bits encode a millisecond timestamp; sorting `id` strings sorts entities by creation order without an index.
+- **Crockford base32.** Uppercase alphanumeric, no `I`, `L`, `O`, or `U` to avoid ambiguity. Case-insensitive on input; the canonical form is uppercase.
+- **128 bits of entropy.** Collisions are not a practical concern within or across tenants.
+- **Length-stable.** Always 26 characters. Validators can reject malformed IDs cheaply.
+
+Entities that use bare ULIDs include `run_id`, `step_id`, `model_call_id`, `checkpoint_id`, `context_manifest_id`, `context_segment_id`, `context_artifact_id`, `compaction_record_id`, `memory_entry_id`, `tool_catalog_id` (semantically derived from a content hash but stored as a ULID handle), `budget_id`, `context_budget_id`, `policy_scope_id`, `state_handle_id`, `organization_id`, `project_id`, `environment_id`, `key_id`, and `event_id` envelope fields.
+
+## Why bare, not prefixed
+
+Most entities do **not** carry an entity-type prefix (e.g. `run_01J8X9...`). The reasons:
+
+- **Clients should not infer entity type from an ID.** The path the ID arrived on, the context it was returned in, or the API call being made carry the type. Prefixes encourage clients to parse the ID, which couples them to a representation that is not part of the contract.
+- **Storage and indexing efficiency.** A 26-character fixed-length string indexes more cheaply than a variable-length prefixed string and joins more cheaply across foreign keys.
+- **Cross-vendor convergence.** Vendors that use prefixes (`asst_`, `thread_`, `run_`) have ended up with prefix proliferation as their entity counts grew. KovaServe avoids that future cost.
+
+The single exception below is taken deliberately and only for one entity.
+
+## The Session ID exception
+
+A **Session ID** is the literal prefix `ses_` followed by 24 lowercase hex characters:
+
+```
+ses_a7f3c2b8d4e1f0925a1b6c3d
+```
+
+This is the only prefixed ID in the surface. It exists for one reason: Sessions are the long-lived continuity container that a developer pastes between systems — into log lines, support tickets, runbooks, dashboards. Distinguishing them at a glance from execution-scoped IDs (Run, Step, ModelCall, Checkpoint) materially reduces confusion.
+
+The 24-hex form is its own format, not a ULID with a prefix. Properties:
+
+- **Case-sensitive.** Lowercase canonical; uppercase is rejected on input.
+- **96 bits of entropy.** Sufficient for tenant-scoped uniqueness.
+- **Not lexicographically sortable by time.** Sessions are listed by `created_at`, not by ID.
+
+This is the only entity whose ID format developers need to remember as different from the rest. Every other ID — `run_id`, `step_id`, `model_call_id`, `checkpoint_id`, `context_manifest_id` — is a bare 26-character Crockford ULID. See [Sessions](/docs/concepts/sessions#id-format) for the field's full semantics.
+
+## ID format on the wire
+
+JSON responses always emit IDs in their canonical form: uppercase Crockford for ULIDs, lowercase hex for Session IDs.
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+  "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+  "context_manifest_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T7"
+}
+```
+
+Inputs are normalized before validation:
+
+- ULIDs are uppercased and validated against the Crockford alphabet.
+- Session IDs are lowercased and validated against the `ses_<24hex>` pattern.
+
+Malformed IDs return `400 Bad Request` with `error.code = "invalid_id"` before any tenant or scope resolution runs — the gateway rejects bad shapes early rather than letting them reach storage.
+
+## ID generation
+
+IDs are generated server-side by the Canonical Execution Service (and by the relevant subsystem owner for non-execution entities) at insert time. Clients do not generate or supply IDs for KovaServe entities.
+
+Two reasons:
+
+- **Monotonicity.** The ULID timestamp prefix is meaningful only when generated centrally; client-generated ULIDs from clock-skewed laptops would break sortability.
+- **Uniqueness guarantees.** A central generator is the source of truth; collisions cannot arise from client misbehavior.
+
+Clients **do** supply their own identifiers in two specific places: the `external_run_id` correlation field and idempotency keys (below).
+
+## Idempotency keys
+
+Mutating operations on the KovaServe-native control plane accept an `Idempotency-Key` header — a client-supplied string that lets a request be safely retried without producing duplicate side effects:
+
+```http
+POST /v1/ks/runs
+Authorization: Bearer ks_...
+Idempotency-Key: 6c1f8a30-2b1d-4e1a-9c0e-7d2c0ab1f2a8
+Content-Type: application/json
+
+{ "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0" }
+```
+
+Semantics:
+
+- The key is **scoped to the API key + endpoint**. Two different API keys may use the same string for unrelated requests; two different endpoints under the same API key may also reuse a string. Within a single `(api_key, endpoint)` pair, a key uniquely identifies one request.
+- The first request with a given key is processed normally. Subsequent requests with the same key, while the original is in flight or within the retention window, return the **original response** — same status code, same body — without re-executing the operation.
+- If the original request failed, the retried response carries the original failure. Retrying with the same key does not give the operation a second chance; clients that want a retry must use a new key.
+- Keys are retained for 24 hours from first use, after which the key is forgettable and re-using it starts a fresh request.
+- Keys are opaque strings, 1–255 characters, any UTF-8 characters except control bytes. UUIDs are conventional but not required.
+
+Idempotency keys are distinct from ULIDs — they exist on the request, not on any persistent entity, and they are not addressable. See [Idempotency](/docs/api/idempotency) for the full API contract.
+
+## `external_run_id` for runtime correlation
+
+A different kind of caller-supplied identifier is `external_run_id` on the [Run](/docs/concepts/runs):
+
+```json
+{
+  "external_run_id": "lg-task-9821",
+  "external_runtime": "langgraph"
+}
+```
+
+This is the runtime's own identifier for the work — a LangGraph task ID, a Temporal workflow ID, a custom job ID — recorded on the Run row so the runtime can look up "my task" → "KovaServe Run" without maintaining a separate mapping.
+
+`external_run_id` is **idempotency-keyed per `(tenant_id, external_runtime, external_run_id)`**. Reusing an `external_run_id` under the same tenant and runtime returns the existing Run rather than creating a duplicate. This makes it safe for runtimes that crash and replay their own work to call into KovaServe at the runtime's own granularity.
+
+`external_run_id` is not the same as the `Idempotency-Key` header. The header protects against duplicate HTTP requests in a short window; `external_run_id` protects against duplicate Runs across the runtime's whole lifetime.
+
+## Trace correlation
+
+Every request carries a W3C `traceparent` for OpenTelemetry correlation:
+
+```
+traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
+```
+
+The header is honored if supplied; otherwise the gateway generates one. The trace ID is recorded on the [ModelCall](/docs/concepts/model-calls) and propagated across the gateway → Canonical Execution Service → GCM → Router → Layer 1 path, so a single trace stitches together the gateway request, the manifest assembly, the routing decision, and the substrate execution.
+
+`traceparent` is identity for **correlation across systems**. It is not how you address a Run, a Step, or a ModelCall — those have their own ULIDs. The trace ID and span IDs do not appear on entity rows directly; they live in event envelopes and on the `traceparent` field stored in `model_calls.metadata`.
+
+## Identity is tenant-scoped
+
+Every KovaServe ID is scoped to its owning `(tenant_id, project_id)` pair. Cross-tenant access — read, write, transition, reference — returns `404 Not Found`, the same response as a genuinely missing entity. This is uniform across every entity in the system: probing another tenant's IDs leaks no information.
+
+The two consequences:
+
+- An ID alone is not an authorization token. The ID plus the API key's tenant scope determines what the caller can see.
+- ID collisions across tenants are not observable. Even if two tenants somehow generated the same ULID (they will not, but the system does not rely on the assumption), neither would see the other's row.
+
+## See also
+
+- [Sessions](/docs/concepts/sessions#id-format) — the `ses_<24hex>` exception
+- [Idempotency](/docs/api/idempotency) — the `Idempotency-Key` header contract
+- [Runs](/docs/concepts/runs) — `external_run_id` and runtime correlation
+- [Authentication](/docs/api/authentication) — API keys and the tenant scope IDs resolve under
+- [Errors](/docs/api/errors) — the error envelope returned for `invalid_id`, `not_found`, and idempotency conflicts

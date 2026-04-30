@@ -1,0 +1,180 @@
+---
+title: Sub-runs
+description: Composing Runs through parent and child lineage — parent_run_id, summary_artifact_id, and the dispatch and join lifecycle.
+---
+
+A **sub-run** is a [Run](/docs/concepts/runs) dispatched from another Run. It carries a `parent_run_id` pointing back at its parent and produces a `summary_artifact_id` on completion that the parent can fold into its next manifest as a single, bounded segment. Sub-runs are the only sanctioned way to compose Runs in KovaServe; they exist so a parent agent can offload bounded sub-tasks without inflating its own context with the child's full transcript.
+
+The Sub-Run primitive is owned by the **Canonical Execution Service** for lineage and by the **Context Engineering Subsystem** for the summary handoff. Together they implement a strict contract: each child Run has its own [ContextManifest](/docs/concepts/context-manifests), its own [Budget](/docs/concepts/budgets), and its own [ContextBudget](/docs/concepts/context-budgets); the parent only ever sees the child's compact summary.
+
+## Why sub-runs exist
+
+Long-running agents repeatedly hit the same problem: the parent has work that is best delegated — a focused investigation, a batch of file reads, a tool-heavy probe — but pulling the result back into the parent's prompt blows the parent's context window and corrupts its prefix cache. Without a primitive, runtimes invent ad-hoc workarounds: nested chat completions, side-channel state, manual summarization in application code.
+
+Sub-runs make that primitive explicit:
+
+- The child Run is a first-class entity with its own audit trail, cost accounting, and Checkpoints.
+- The parent's context grows by exactly one summary segment, not by the child's transcript.
+- The handoff is durable and inspectable — the `summary_artifact_id` is a real [ContextArtifact](/docs/concepts/context-artifacts), not an inline string.
+- Lineage is queryable: the parent's timeline shows the dispatch, the child's timeline is fully reconstructible, and the summary is linked from both.
+
+## Lineage shape
+
+Sub-run lineage is a tree, not a graph. A child has at most one parent. A child may itself dispatch sub-runs.
+
+```
+Run A (parent_run_id = null)
+├── Step  SUB_RUN_DISPATCH ─────────▶ Run B (parent_run_id = A.id)
+│                                     ├── Step ...
+│                                     ├── Step  SUB_RUN_DISPATCH ─▶ Run D (parent_run_id = B.id)
+│                                     │                              └── Step ...
+│                                     └── (terminal)
+│                                         summary_artifact_id = art_b
+│
+├── Step  SUB_RUN_JOIN  ◀──── art_b folded into next manifest
+│
+├── Step  SUB_RUN_DISPATCH ─────────▶ Run C (parent_run_id = A.id)
+│                                     └── (terminal)
+│                                         summary_artifact_id = art_c
+│
+└── Step  SUB_RUN_JOIN  ◀──── art_c folded into next manifest
+```
+
+Two fields carry the lineage on the Run row:
+
+| Field | Set on | Purpose |
+|---|---|---|
+| `parent_run_id` | the child | Pins the child to its dispatching Run. Set at dispatch and immutable. |
+| `summary_artifact_id` | the child | The ContextArtifact produced by the child's summary call. Set when the child posts its summary; remains `null` for the parent's lifetime. |
+
+A Run with `parent_run_id = null` is a **root Run**. A Run with `parent_run_id` set is a **sub-run** — the term is structural, not a separate entity type. Every Run row has the same shape regardless of position in the tree.
+
+## Dispatch
+
+The parent dispatches a child via `POST /v1/ks/runs/{id}/subruns`. The Canonical Execution Service performs four bindings atomically:
+
+1. **Lineage.** Creates the child Run with `parent_run_id` set to the dispatching Run.
+2. **Scope inheritance.** The child inherits the parent's [PolicyScope](/docs/concepts/policy-scopes) and ContextScope by default. The dispatch payload may pin a more restrictive PolicyScope, but never a broader one.
+3. **Budget allocation.** A fresh [Budget](/docs/concepts/budgets) and optional [ContextBudget](/docs/concepts/context-budgets) are allocated to the child from the dispatch payload. The child's Budget is independent — a runaway child cannot consume the parent's remaining cost or step budget.
+4. **Tenant pinning.** `tenant_id` and `project_id` are copied from the parent. A parent cannot dispatch into another tenant's project.
+
+The dispatch is recorded on the parent's timeline as a `SUB_RUN_DISPATCH` Step. The child enters `CREATED` with all the same lifecycle behavior as a root Run.
+
+```http
+POST /v1/ks/runs/01J8X9Y2Z3K4M5N6P7Q8R9S0T1/subruns
+Authorization: Bearer ks_...
+Content-Type: application/json
+
+{
+  "model": "qwen3-coder-30b",
+  "budget": {
+    "max_cost_cents": "0.5000",
+    "max_steps": 12,
+    "max_tool_calls": 8
+  },
+  "context_budget": {
+    "active_token_limit": 16000
+  }
+}
+```
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T7",
+  "parent_run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+  "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+  "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+  "policy_scope_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T3",
+  "budget_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T8",
+  "context_budget_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T9",
+  "summary_artifact_id": null,
+  "status": "CREATED",
+  "model": "qwen3-coder-30b",
+  "step_count": 0,
+  "created_at": "2026-04-30T12:01:00Z"
+}
+```
+
+## Context isolation
+
+The child Run executes its own Steps under its own ContextManifests, fully isolated from the parent. The parent's manifest is never visible inside the child's GCM; the child's per-call ContextManifests are never mixed into the parent's manifest. Two consequences follow:
+
+- **The child is free to grow its context to the limits its own ContextBudget allows.** A 60k-token investigation in the child does not pressure the parent's `active_token_limit`.
+- **Cache reuse is per-Run.** The child's `stable_context_id` is computed from the child's segments alone; it does not include the parent's prefix. This is intentional — sub-runs are not meant to share prefix cache with their parent. They are meant to do bounded work and hand back a summary.
+
+The parent and child do share PolicyScope (unless the child pinned a more restrictive one), share `tenant_id` and `project_id`, and may share Memory Store entries scoped at `user`, `tenant`, or `global`. They do not share `session` or `ephemeral` memory.
+
+## Summary handoff
+
+When the child reaches a terminal state (`COMPLETED`, `FAILED`, or `CANCELED`), the runtime posts a summary via `POST /v1/ks/runs/{child_id}/summary`. The summary is a runtime-produced compact representation of what the child accomplished — the result, the relevant artifacts, the conclusions worth carrying back to the parent. It is **not** the child's full transcript.
+
+```http
+POST /v1/ks/runs/01J8X9Y2Z3K4M5N6P7Q8R9S0T7/summary
+Authorization: Bearer ks_...
+Content-Type: application/json
+
+{
+  "summary": "Inspected billing module. Found three callers of the deprecated `charge_v1`...",
+  "artifacts": [
+    { "name": "callers.json", "mime_type": "application/json", "bytes_ref": "art_a1b2..." }
+  ]
+}
+```
+
+```json
+{
+  "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T7",
+  "summary_artifact_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0TA",
+  "size_tokens": 412,
+  "created_at": "2026-04-30T12:08:00Z"
+}
+```
+
+The Canonical Execution Service:
+
+1. Stores the summary as a [ContextArtifact](/docs/concepts/context-artifacts) (`name + version + mime_type + bytes`).
+2. Sets `summary_artifact_id` on the child Run row.
+3. Emits `ks.subrun.summary_attached` on the sub-run event stream.
+
+The artifact is now addressable from the parent, from audit, and from any future Run that wishes to reference the child's outcome.
+
+## Join
+
+The parent folds the child's summary into its next ModelCall by including the `summary_artifact_id` in its [ContextManifest](/docs/concepts/context-manifests). The runtime emits a `SUB_RUN_JOIN` Step before the next `MODEL_CALL` Step; GCM resolves the artifact reference into a single bounded segment with `context_type = sub_run_summary` and a digest tied to the child's `summary_artifact_id`.
+
+The parent's manifest grows by one segment whose token count is the summary's `size_tokens`, regardless of how many ModelCalls or how much context the child consumed. The child's transcript stays in the child's manifests, queryable on demand but never inlined.
+
+`SUB_RUN_JOIN` is also the point at which the parent's [ContextBudget](/docs/concepts/context-budgets) admits or rejects the summary segment. A summary that pushes the parent over its admission threshold is subject to the same `OFFLOAD_REQUIRED` / `COMPACT_REQUIRED` / `DEGRADE` / `HARD_STOP` decisions as any other segment.
+
+## Lifecycle and observability
+
+Three events on the sub-run stream make the lineage observable end-to-end:
+
+| Event | When |
+|---|---|
+| `ks.subrun.dispatched` | The child is created. Carries `run_id` (child) and `parent_run_id`. |
+| `ks.subrun.summary_attached` | The child posts its summary. Carries the `summary_artifact_id`. |
+| `ks.subrun.joined` | The parent's next manifest folds in the summary segment. Carries both Run IDs and the parent's manifest ID. |
+
+Every event in the system that touches a sub-run carries `parent_run_id` in its envelope, so dashboards and audit consumers can stitch the tree without joining through the Run table.
+
+## Tenancy and policy
+
+Sub-runs do not cross tenancy. A child's `tenant_id` and `project_id` are copied from the parent at dispatch and are not negotiable on the request. PolicyScope inheritance is one-way restrictive — the child may run under a tighter scope than the parent (e.g. a more restrictive tool policy), never a looser one. The Policy / Governance Layer evaluates the dispatch as a policy decision; a denied dispatch fails the parent's `SUB_RUN_DISPATCH` Step without creating a child Run.
+
+## What a sub-run is not
+
+- **Not a continuation of the parent.** The child is a Run in its own right with its own lifecycle, Budget, ContextBudget, and Checkpoints. The parent does not pause while the child executes; the parent decides when to dispatch and when to join.
+- **Not a fan-out coordinator.** A single dispatch produces one child. The parent may dispatch multiple children sequentially, joining each in turn through `SUB_RUN_JOIN` Steps.
+- **Not a function call.** There is no return-value contract beyond the summary artifact. The parent reads the summary like any other context segment; the child does not "return" anything else.
+- **Not a way to share prefix cache.** Cache identity is per-Run by design. Sub-runs trade cache reuse for context bounding — that trade is the point of the primitive.
+
+## See also
+
+- [Runs](/docs/concepts/runs) — the entity sub-runs extend
+- [Step types](/docs/concepts/step-types) — `SUB_RUN_DISPATCH` and `SUB_RUN_JOIN`
+- [Context manifests](/docs/concepts/context-manifests) · [Context artifacts](/docs/concepts/context-artifacts) — where the summary lives
+- [Budgets](/docs/concepts/budgets) · [ContextBudgets](/docs/concepts/context-budgets) — independent allocation per child
+- [PolicyScopes](/docs/concepts/policy-scopes) — restrictive-only inheritance
+- [Sub-run events](/docs/concepts/events/sub-run) — `dispatched`, `summary_attached`, `joined`
+- [`POST /v1/ks/runs/{id}/subruns`](/docs/api/runs/sub-runs) · [`POST /v1/ks/runs/{child_id}/summary`](/docs/api/runs/sub-runs)
