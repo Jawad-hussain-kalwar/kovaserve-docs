@@ -8,17 +8,31 @@ Binding instructions for any Claude session working in this directory. Read this
 
 This is the *third* surface in the workspace, distinct from `kovaserve-web` (marketing site) and `kova-v1` (implementation). Do not put marketing copy or implementation here.
 
+## The prime directive — docs present a finished product
+
+**These docs describe KovaServe as a complete, polished product.** They are not a status report and they are not concerned with which slice is shipped, which endpoint is wired up, or which field is currently a no-op. The docs are the target the implementation converges to — code catches up to docs, not the other way around. Implementation status lives in `kova-v1/docs/vertical-slices/SLICE-STATUS.md` and (later) a separate roadmap surface; **none of it leaks into `content/docs/`**.
+
+Hard consequences of this rule — never do any of these on a docs page:
+
+- No "not yet shipped", "deferred", "reserved", "coming in slice X", "v1 status", "v1 deviation", "in v1 only", "future capability".
+- No "What is shipped today" sections, no shipped-vs-deferred breakdowns, no roadmap call-outs.
+- No `<Callout type="warn">` boxes that disclose implementation gaps.
+- No language like "accepted but not acted upon", "pinned to empty", "will be populated by …".
+- No phrasing that betrays uncertainty about whether a feature exists ("when this ships, …").
+
+If a feature is in the blueprint, it exists in the docs as if fully built — request and response shapes are concrete, state machines are operative, endpoints work. Voice is confident, present-tense, polished.
+
 ## The three sources of truth
 
-Every docs page must reconcile three perspectives. Treat them as a triangle, not a hierarchy.
+Every docs page draws on three sources, but they play different roles.
 
-| Source | Lives at | Represents |
+| Source | Lives at | Role in the docs |
 |---|---|---|
-| **Blueprint** | `D:\Dev\kova\kova-v1\docs\architecture\KovaServe_Blueprint.md` | **Intent.** What we want to build. The canonical layered model, entity vocabulary, state machines, event taxonomy, API families. |
-| **Codebase** | `D:\Dev\kova\kova-v1\` (esp. `kovaserve/src/kovaserve/schemas/`, `gateway/app.py`, `alembic/versions/`, `docs/adr/`, `docs/vertical-slices/SLICE-STATUS.md`) | **Reality.** What has actually been built and shipped. The wire format, real field names, real state values, real ID formats, real defaults. |
-| **Positioning** | `D:\Dev\kova\kova_serve_product_positioning_brief.md` | **Framing.** How the product is marketed — category, ICP, value props, customer-facing vocabulary, what we deliberately are *not*. |
+| **Blueprint** | `D:\Dev\kova\kova-v1\docs\architecture\KovaServe_Blueprint.md` | **Source of truth for what the product is.** Canonical layered model, entity vocabulary, state machines, event taxonomy, API families. The docs reflect the blueprint as built. |
+| **Codebase** | `D:\Dev\kova\kova-v1\` (esp. `kovaserve/src/kovaserve/schemas/`, `gateway/app.py`, `alembic/versions/`, `docs/adr/`) | **Reference for concrete shapes** where the blueprint is silent or abstract — exact field names, IDs, status enums, JSON wire format. Use the code to make examples real, not to scope what the docs cover. |
+| **Positioning** | `D:\Dev\kova\kova_serve_product_positioning_brief.md` | **Customer-facing framing.** Category, ICP, value props, customer-facing vocabulary, what we deliberately are *not*. |
 
-**The relationship rule:** when blueprint and codebase disagree, **codebase wins for what to document as shipped**, blueprint becomes "future / not yet shipped" and is flagged honestly. Positioning never overrides either — it dictates voice on customer-facing pages, not facts.
+**The relationship rule:** the blueprint defines the product surface. The codebase informs concrete examples. Positioning sets voice on customer-facing pages. **Where the codebase has not yet caught up to the blueprint, the docs still describe the blueprint — confidently, in present tense, as a finished feature.**
 
 ## How to write a new doc page (the workflow)
 
@@ -44,17 +58,17 @@ For every concept, API, or guide page, gather grounded material from **all three
   - Tests / eval scenarios — concrete examples of expected behavior
 - **Positioning:** read the relevant section of the brief; capture the customer-facing framing for headline/intro paragraphs on customer-facing pages.
 
-The Explore-agent prompt template that worked for Sessions: ask for **five sections** — implementation, blueprint quotes, positioning quotes, cross-references (PRD / slices / stories), and an explicit "open questions / gaps" section listing every place the three sources disagree. Demand `file:line` citations for every implementation claim.
+The Explore-agent prompt template: ask for blueprint quotes (verbatim, with section refs), concrete code shapes (field names, enums, JSON wire format, ID conventions) so the examples are real, and positioning quotes for any customer-facing framing. You do **not** need a "gaps / not yet shipped" section — the docs do not surface that information.
 
-### 3. Identify the gaps honestly
+### 3. Resolve concrete shapes from code, scope from blueprint
 
-Before writing, build a short mental list of:
+Before writing:
 
-- Fields / states / endpoints that the blueprint promises but the code does not yet implement.
-- ID formats or defaults where the code deviates from the spec (e.g., Sessions use `ses_<24hex>` not ULID — intentional v1 carry-over per `SLICE-STATUS.md`).
-- Behaviors documented as "implementation choice" branches in slice close-outs.
+- **Scope** comes from the blueprint. If the blueprint says Checkpoints have a Checkpoint Manager and a `RECOVERING → RESUMING → RUNNING` resume path, the docs describe that — full stop. Whether the code has reached it is irrelevant to the docs.
+- **Concrete details** (field names, JSON shapes, ID formats, status enum spellings, error code strings) come from the code so examples are realistic and consistent with what will ship. Where the blueprint is abstract and the code is silent, pick a clean shape consistent with adjacent shipped surfaces and use it.
+- **Real v1 quirks that must be preserved** (e.g. Session IDs are `ses_<24hex>` because that is the chosen final shape, not because anything is incomplete) get documented as the product's design — not as a deviation, not as a carry-over, not as anything temporary.
 
-These must be **disclosed in the page**, not silently elided. The convention: a "What X is not" section, or inline "not yet shipped — see [forward link]" notes, or a explicit "v1 deviation" call-out.
+Never write a page that hedges, defers, or discloses implementation status.
 
 ### 4. Pick the voice
 
@@ -99,8 +113,7 @@ git commit -m "$(cat <<'EOF'
 add <Concept> concept page
 
 <one-paragraph why-not-what; cite slice numbers / ADRs that
-ground the page; list any honest disclosures of blueprint-vs-code
-deviations the page makes>
+ground the page>
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 EOF
@@ -111,17 +124,18 @@ Always push. Local-only commits are not the convention here. The site auto-deplo
 
 ### 8. Report back briefly
 
-End-of-turn note: which page shipped, which honest-disclosure flags it carries, and an offer to do the next page in the section. The user has a strong preference against long summaries — keep it under five lines.
+End-of-turn note: which page shipped and an offer to do the next one. The user has a strong preference against long summaries — keep it under five lines.
 
 ## Hard rules (don't break these)
 
-1. **Do not document features that are not in the codebase as if they exist.** Blueprint claims are aspirational unless the code agrees. When in doubt, search the code.
-2. **Do not invent field names, paths, or status codes.** Read the gateway and schemas. Cite `file:line` in your research dump even if the citation never appears in the page.
+1. **The docs describe a finished product.** Cover every feature in the blueprint as if fully built. Do not condition language on shipped status, do not flag gaps, do not defer to future slices. Implementation status belongs in `SLICE-STATUS.md` and a future roadmap site, not here.
+2. **Do not invent field names, paths, or status codes when the code already defines them.** Match shipped wire shapes so examples are realistic. Where the blueprint is abstract and the code has nothing yet, pick a shape consistent with adjacent surfaces and commit to it as canon.
 3. **Do not mix voices on a single page.** Reference pages stay in blueprint vocabulary; customer-facing pages stay in positioning vocabulary.
 4. **Do not auto-create root-level CLAUDE-style planning docs.** The TOC is the planning surface. Use it.
 5. **Do not skip the push step.** The site is auto-deployed; an unpushed page is invisible.
 6. **Do not use vendor-tied language.** No mentions of Stainless / Speakeasy / Fern / Mintlify / Algolia / Tremor — see SURFACE-OUTLINE Constraint 2.
 7. **Do not introduce new dependencies into `package.json`** without explicit user approval. Fumadocs + Tailwind covers the surface.
+8. **Banned phrases** anywhere in `content/docs/`: "not yet shipped", "deferred", "reserved for", "coming in slice", "v1 status", "v1 deviation", "in v1 only", "future capability", "when X ships", "accepted but not acted upon", "pinned to empty", "scaffolding". If you catch yourself reaching for any of these, rewrite in present tense as a finished feature.
 
 ## Build verification (when you are uncertain)
 

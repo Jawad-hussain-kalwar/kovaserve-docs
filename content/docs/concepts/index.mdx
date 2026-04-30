@@ -29,17 +29,17 @@ Organization                                    (billing root)
 
 | Entity | What it is |
 |---|---|
-| **Run** | The top-level durable execution objective. The unit of value. May have a `parent_run_id` (sub-run lineage). |
-| **Session** | A continuity container across turns or related runs. Tracks the current `ContextManifest`. |
-| **Step** | A typed unit of progression inside a Run. See [step types](/docs/concepts/runs-steps-model-calls#step-types). |
-| **ModelCall** | One substrate-bound model invocation belonging to a Step. Carries a `context_manifest_id`. |
-| **ContextManifest** | A durable per-call record of the context shape — segments, token counts, stable identity. The audit anchor for budgets, routing, checkpoints, and resume. |
-| **Checkpoint** | A resumable snapshot binding logical context first; KV cache export is an optimization layered on top. |
-| **StateHandle** | A typed reference to reusable execution state: `kv_prefix`, `context_manifest`, `checkpoint`, `artifact_bundle`, `memory_entry`, or `runtime_state`. |
-| **Budget** | A run-level execution budget controlling cost, tokens, steps, time, or tool count. |
-| **ContextBudget** | A per-run admission control object for active context size, evaluated before GPU dispatch. |
-| **PolicyScope** | Normalized governance binding across tenant / project / environment / deployment / runtime. |
-| **MemoryScope** | The retention class for context and state: `ephemeral`, `session`, `user`, `tenant`, or `global`. |
+| **[Run](/docs/concepts/runs)** | The top-level durable execution objective. The unit of value. May have a `parent_run_id` (sub-run lineage). |
+| **[Session](/docs/concepts/sessions)** | A continuity container across turns or related runs. Tracks the current `ContextManifest`. |
+| **[Step](/docs/concepts/steps)** | A typed unit of progression inside a Run. See [step types](/docs/concepts/step-types). |
+| **[ModelCall](/docs/concepts/model-calls)** | One substrate-bound model invocation belonging to a Step. Carries a `context_manifest_id`. |
+| **[ContextManifest](/docs/concepts/context-manifests)** | A durable per-call record of the context shape — segments, token counts, stable identity. The audit anchor for budgets, routing, checkpoints, and resume. |
+| **[Checkpoint](/docs/concepts/checkpoints)** | A resumable snapshot binding logical context first; KV cache export is an optimization layered on top. |
+| **[StateHandle](/docs/concepts/state-handles)** | A typed reference to reusable execution state: `kv_prefix`, `context_manifest`, `checkpoint`, `artifact_bundle`, `memory_entry`, or `runtime_state`. |
+| **[Budget](/docs/concepts/budgets)** | A run-level execution budget controlling cost, tokens, steps, time, or tool count. |
+| **[ContextBudget](/docs/concepts/context-budgets)** | A per-run admission control object for active context size, evaluated before GPU dispatch. |
+| **[PolicyScope](/docs/concepts/policy-scopes)** | Normalized governance binding across tenant / project / environment / deployment / runtime. |
+| **[MemoryScope](/docs/concepts/memory-scopes)** | The retention class for context and state: `ephemeral`, `session`, `user`, `tenant`, or `global`. |
 
 ## Three rules that govern the model
 
@@ -50,10 +50,10 @@ Organization                                    (billing root)
 ## Where to go next
 
 <Cards>
-  <Card title="Runs, Steps, ModelCalls" href="/docs/concepts/runs-steps-model-calls" description="The core hierarchy and its state machines." />
+  <Card title="Runs" href="/docs/concepts/runs" description="The unit of value — durable execution objectives." />
   <Card title="Sessions" href="/docs/concepts/sessions" description="Continuity containers across turns and related runs." />
   <Card title="Checkpoints" href="/docs/concepts/checkpoints" description="Logical-context-first resume; typed StateHandles." />
-  <Card title="Budgets and policy" href="/docs/concepts/budgets-and-policy" description="Active control objects for cost and admission." />
-  <Card title="Cost model" href="/docs/concepts/cost-model" description="Gross, net, and cache-savings accounting." />
-  <Card title="Tenancy" href="/docs/concepts/tenancy" description="Organization → Project → Environment → Key." />
+  <Card title="Context manifests" href="/docs/concepts/context-manifests" description="The durable per-call audit anchor." />
+  <Card title="Budgets" href="/docs/concepts/budgets" description="Run-level cost, token, step, and time control." />
+  <Card title="Context budgets" href="/docs/concepts/context-budgets" description="Admission control over context size." />
 </Cards>
