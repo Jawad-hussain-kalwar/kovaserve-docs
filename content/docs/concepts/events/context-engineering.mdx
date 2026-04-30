@@ -1,0 +1,173 @@
+---
+title: Context engineering events
+description: The context engineering stream — manifest, segment, artifact, compaction, ContextBudget, and tool-catalog lifecycle events covering the full execution-boundary context engineering surface.
+---
+
+The **context engineering events** stream covers the lifecycle of every context-engineering primitive: [manifests](/docs/concepts/context-manifests), [segments](/docs/concepts/context-segments), [artifacts](/docs/concepts/context-artifacts), [compaction records](/docs/concepts/compaction-records), [ContextBudget](/docs/concepts/context-budgets) admission decisions, and [tool catalog](/docs/concepts/tool-catalogs) registration.
+
+Subjects: `ks.context.*`. Persisted in the `execution_events` JetStream stream. Consumed via [`GET /v1/ks/events/context-engineering`](/docs/api/events/context-engineering).
+
+## Event types
+
+### Manifest events
+
+| Event | Trigger |
+|---|---|
+| `ks.context.manifest.created` | A new ContextManifest row is inserted. |
+| `ks.context.manifest.admitted` | Admission settles with `ALLOW` or `WARN`. The admitted manifest is the one that proceeds to dispatch. |
+
+### Segment events
+
+| Event | Trigger |
+|---|---|
+| `ks.context.segment.created` | A ContextSegment row is inserted. |
+| `ks.context.segment.evicted` | A segment is removed under retention or compaction. |
+
+### Artifact events
+
+| Event | Trigger |
+|---|---|
+| `ks.context.artifact.created` | A ContextArtifact row is inserted (object-storage upload completed). |
+| `ks.context.artifact.offloaded` | An inline segment was rewritten as an artifact reference under `OFFLOAD_REQUIRED`. |
+
+### Compaction events
+
+| Event | Trigger |
+|---|---|
+| `ks.context.compaction.started` | A CompactionRecord is opened. |
+| `ks.context.compaction.completed` | Compaction finished; output segments are usable. |
+
+### ContextBudget events
+
+| Event | Trigger |
+|---|---|
+| `ks.context.budget.warning` | Admission produced `WARN`. |
+| `ks.context.budget.offload_required` | Admission produced `OFFLOAD_REQUIRED`. |
+| `ks.context.budget.compact_required` | Admission produced `COMPACT_REQUIRED`. |
+| `ks.context.budget.degraded` | Admission produced `DEGRADE`. |
+| `ks.context.budget.hard_stop` | Admission produced `HARD_STOP`. |
+
+### Tool catalog events
+
+| Event | Trigger |
+|---|---|
+| `ks.context.tool_catalog.registered` | A new ToolCatalog version is registered. |
+| `ks.context.tool_catalog.invalidated` | A ToolCatalog is marked invalid (e.g., a referenced tool was removed). |
+
+## Key payload shapes
+
+### `ks.context.manifest.admitted`
+
+```json
+{
+  "context_manifest_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T7",
+  "decision": "ALLOW",
+  "transformations": [
+    {
+      "type": "artifact_offload",
+      "segment_ids": ["01J8X9Y2Z3K4M5N6P7Q8R9SG07"]
+    }
+  ],
+  "token_counts": {
+    "stable_tokens": 3640,
+    "volatile_tokens": 412,
+    "active_tokens": 4218,
+    "offloaded_tokens": 9412
+  },
+  "stable_context_id": "ctx_v1:9c2e..."
+}
+```
+
+### `ks.context.compaction.completed`
+
+```json
+{
+  "compaction_record_id": "01J8X9Y2Z3K4M5N6P7Q8R9CR01",
+  "source_manifest_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T7",
+  "source_segment_ids": ["01J...", "01J..."],
+  "output_segment_ids": ["01J..."],
+  "method": "runtime_summarize",
+  "model_id": "qwen3-coder-7b",
+  "token_counts": {
+    "before": 18420,
+    "after": 1284
+  },
+  "tokens_saved": 17136
+}
+```
+
+### `ks.context.artifact.offloaded`
+
+```json
+{
+  "artifact_id": "01J8X9Y2Z3K4M5N6P7Q8R9AR01",
+  "from_segment_id": "01J8X9Y2Z3K4M5N6P7Q8R9SG07",
+  "byte_count": 412384,
+  "preview_token_count": 124,
+  "trigger": "context_budget_offload_required"
+}
+```
+
+### `ks.context.budget.*`
+
+All ContextBudget events share a payload shape:
+
+```json
+{
+  "context_budget_id": "01J8X9Y2Z3K4M5N6P7Q8R9CB01",
+  "decision": "OFFLOAD_REQUIRED",
+  "dimension": "active_tokens",
+  "limit": 16384,
+  "consumed": 18420,
+  "consumed_pct": 112.43,
+  "transformation_planned": "artifact_offload"
+}
+```
+
+`decision` matches the event type's suffix. `transformation_planned` is the action the [admission](/docs/concepts/admission) service is about to apply.
+
+### `ks.context.tool_catalog.registered`
+
+```json
+{
+  "tool_catalog_id": "01J8X9Y2Z3K4M5N6P7Q8R9TC02",
+  "content_hash": "sha256:9c2e...",
+  "version": "2.1.0",
+  "tool_count": 14,
+  "supersedes_id": "01J8X9Y2Z3K4M5N6P7Q8R9TC01"
+}
+```
+
+## Sequence around a single ModelCall
+
+```
+ks.context.segment.created      (per inbound segment)
+ks.context.manifest.created     (GCM v2 produces the initial manifest)
+[optional] ks.context.budget.offload_required
+ks.context.artifact.offloaded   (one per offloaded segment)
+[optional] ks.context.budget.compact_required
+ks.context.compaction.started
+ks.context.compaction.completed
+ks.context.manifest.admitted    (final admitted shape)
+```
+
+The sequence may include zero, one, or multiple admission round-trips depending on transformations applied. The `ks.context.manifest.admitted` event always lands last for the call, with the final decision (`ALLOW` or `WARN`).
+
+## Identity fields
+
+The envelope's `context_manifest_id` is populated on every event tied to a specific manifest. `run_id`, `step_id`, and `model_call_id` are populated for events fired in the per-call hot path (manifest assembly, admission, compaction triggered during the call). Tool-catalog and standalone artifact events may have `run_id` and `model_call_id` null when the registration is not call-bound (e.g., a tool catalog registered via `POST /v1/ks/tool-catalogs` outside a Run).
+
+## Common consumers
+
+- **Context timeline UI.** Per-Run timeline of segment composition, manifest evolution, and admission decisions.
+- **Compaction lineage view.** Walks `ks.context.compaction.completed` events by `source_manifest_id` to draw the lineage tree.
+- **ContextBudget dashboards.** Aggregate `ks.context.budget.*` decisions per Project to surface budget tuning needs.
+- **Cache reuse audit.** Joins `ks.context.manifest.admitted.stable_context_id` against [state events](/docs/concepts/events/state) `kv.state.accessed.stable_context_id` to verify reuse predictions.
+
+## See also
+
+- [Context manifests](/docs/concepts/context-manifests) · [Context segments](/docs/concepts/context-segments) · [Context artifacts](/docs/concepts/context-artifacts)
+- [Compaction records](/docs/concepts/compaction-records) · [Compaction lineage](/docs/concepts/compaction-lineage)
+- [Context budgets](/docs/concepts/context-budgets) · [Admission](/docs/concepts/admission)
+- [Tool catalogs](/docs/concepts/tool-catalogs)
+- [`GET /v1/ks/events/context-engineering`](/docs/api/events/context-engineering)

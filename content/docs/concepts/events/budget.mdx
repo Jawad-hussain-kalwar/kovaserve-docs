@@ -1,0 +1,123 @@
+---
+title: Budget events
+description: The budget stream — Run-level Budget transitions covering budget.warning, budget.forecast_updated, and budget.hard_stop.
+---
+
+The **budget events** stream covers transitions on the Run-level [Budget](/docs/concepts/budgets) — the active control object that bounds cost, tokens, steps, time, and tool count for a single Run. Forecast updates land here on every Step admission; threshold crossings and hard stops emit dedicated events that drive admission rejection.
+
+Subjects: `ks.budget.*`. Persisted in the `execution_events` JetStream stream. Consumed via [`GET /v1/ks/events/budget`](/docs/api/events/budget).
+
+> The [ContextBudget](/docs/concepts/context-budgets) — admission control over context size — emits its own events under `ks.context.budget.*` on the [context engineering](/docs/concepts/events/context-engineering) stream. This page covers the Run-level Budget only.
+
+## Event types
+
+| Event | Trigger |
+|---|---|
+| `ks.budget.warning` | Budget transitions from `ACTIVE` to `WARNING` — consumption crossed `warning_threshold_pct`. |
+| `ks.budget.forecast_updated` | Forecast model updated. Emitted on every Step admission while the Run is `ACTIVE` or `WARNING`. |
+| `ks.budget.hard_stop` | Budget transitions to `HARD_STOP` — a strict-dimension limit was reached. |
+
+## Payload shapes
+
+### `ks.budget.warning`
+
+```json
+{
+  "budget_id": "01J8X9Y2Z3K4M5N6P7Q8R9BG01",
+  "dimension": "cost_cents",
+  "limit": "5.0000",
+  "consumed": "4.0240",
+  "consumed_pct": 80.48,
+  "threshold_pct": 80
+}
+```
+
+`dimension` ∈ `cost_cents`, `tokens`, `step_count`, `time_seconds`, `tool_calls`. Each Budget can warn on multiple dimensions; one event per dimension transition.
+
+### `ks.budget.forecast_updated`
+
+```json
+{
+  "budget_id": "01J8X9Y2Z3K4M5N6P7Q8R9BG01",
+  "forecast": {
+    "cost_cents": "4.8120",
+    "tokens": 945000,
+    "step_count": 96,
+    "time_seconds": 1740
+  },
+  "consumed": {
+    "cost_cents": "1.2400",
+    "tokens": 98412,
+    "step_count": 23,
+    "time_seconds": 412
+  },
+  "limits": {
+    "cost_cents": "5.0000",
+    "tokens": 1000000,
+    "step_count": 100,
+    "time_seconds": 1800
+  },
+  "exhaustion_estimate": {
+    "dimension": "step_count",
+    "at_step_count": 96
+  }
+}
+```
+
+The `exhaustion_estimate` field identifies which dimension is projected to exhaust first and at what point. Forecast updates do not advance the Budget state on their own — `WARNING` and `HARD_STOP` are driven by realized consumption.
+
+### `ks.budget.hard_stop`
+
+```json
+{
+  "budget_id": "01J8X9Y2Z3K4M5N6P7Q8R9BG01",
+  "dimension": "cost_cents",
+  "limit": "5.0000",
+  "consumed": "5.0000",
+  "stopped_at": "2026-04-30T12:14:32.001Z",
+  "rejected_step_id": "01J8X9Y2Z3K4M5N6P7Q8R9SP24"
+}
+```
+
+`rejected_step_id` is the Step admission that triggered the hard stop. The Step row is created with `status = FAILED` and `error.code = "budget_exceeded"`; no ModelCall row is created underneath.
+
+## Sequence
+
+A typical Run's budget timeline:
+
+```
+ks.budget.forecast_updated   (per Step admission)
+ks.budget.forecast_updated
+...
+ks.budget.warning            (threshold crossed)
+ks.budget.forecast_updated   (continuing under WARNING)
+...
+ks.budget.hard_stop          (limit reached; admission rejected)
+```
+
+A Run that completes within budget emits only `forecast_updated` events. A Run that crosses the warning threshold but completes before the limit emits one `warning` and continues with `forecast_updated`. A Run that hits the limit emits a `hard_stop` and the Run transitions to `FAILED`.
+
+## Identity fields
+
+The envelope's `run_id` is always populated; `step_id` is populated on `forecast_updated` (the Step that triggered the recompute) and on `hard_stop` (the rejected Step). `model_call_id` is null — Budget events fire at Step admission, before any ModelCall row exists.
+
+## Forecast and admission
+
+Forecasts inform UX (warning UI, dashboard projections, runtime hints) but never *cause* admission decisions on their own. The [Budget state machine](/docs/concepts/budget-state-machine) advances on realized consumption, not projected. A forecast that projects exhaustion ten Steps from now does not trigger `hard_stop` — only realized consumption does.
+
+This separation lets runtimes react to forecasts (compact context, drop optional segments, branch into a cheaper variant) without the Budget itself changing state.
+
+## Common consumers
+
+- **Runtime adaptation.** A LangGraph agent watching `ks.budget.forecast_updated` can ratchet down model size or skip optional Steps as exhaustion approaches.
+- **Dashboards.** Aggregate `ks.budget.warning` and `ks.budget.hard_stop` rates per Project as quality signals.
+- **External alerting.** Per-Run alerts triggered on `warning` or `hard_stop` integrate with PagerDuty or Slack via consumer-side webhook layers.
+- **Cost forecasting.** Cross-Run aggregation of `forecast_updated` data is the input to per-Project cost projections.
+
+## See also
+
+- [Budgets](/docs/concepts/budgets) — the entity these events project
+- [Budget state machine](/docs/concepts/budget-state-machine) — the FSM transitions land on
+- [Context budget events](/docs/concepts/events/context-engineering#context-budget-events) — the per-call admission counterpart
+- [Cost model](/docs/concepts/cost-model) — the realized consumption side
+- [`GET /v1/ks/events/budget`](/docs/api/events/budget)

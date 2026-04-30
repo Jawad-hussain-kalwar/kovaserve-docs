@@ -1,0 +1,135 @@
+---
+title: Checkpoint events
+description: The checkpoint stream — Checkpoint lifecycle events covering checkpoint.created, validated, restore_started, restore_completed, and restore_failed.
+---
+
+The **checkpoint events** stream covers the lifecycle of [Checkpoints](/docs/concepts/checkpoints) — the resumable snapshots that bind logical context first and KV state as an optional optimization. Every Checkpoint creation, validation, restore attempt, and restore outcome lands here.
+
+Subjects: `ks.checkpoint.*`. Persisted in the `execution_events` JetStream stream. Consumed via [`GET /v1/ks/events/checkpoint`](/docs/api/events/checkpoint).
+
+## Event types
+
+| Event | Trigger | Checkpoint state at emit |
+|---|---|---|
+| `ks.checkpoint.created` | Checkpoint row inserted; capture in flight. | `REQUESTED` → `CAPTURING` |
+| `ks.checkpoint.validated` | Compatibility validation completed. | `STORED` → `VALIDATED` |
+| `ks.checkpoint.restore_started` | Restore begins. | `RESTORING` |
+| `ks.checkpoint.restore_completed` | Restore reached `RESTORED`. | `RESTORED` |
+| `ks.checkpoint.restore_failed` | Restore failed; Checkpoint remains `VALIDATED`. | (failure terminal) |
+
+## Payload shapes
+
+### `ks.checkpoint.created`
+
+```json
+{
+  "checkpoint_id": "01J8X9Y2Z3K4M5N6P7Q8R9CK01",
+  "trigger": "runtime",
+  "trigger_reason": "before_file_write",
+  "context_manifest_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T7",
+  "state_handles": [
+    { "type": "context_manifest", "id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T7" },
+    { "type": "kv_prefix", "id": "01J8X9Y2Z3K4M5N6P7Q8R9KV01" },
+    { "type": "artifact_bundle", "id": "01J8X9Y2Z3K4M5N6P7Q8R9AB01" },
+    { "type": "runtime_state", "id": "01J8X9Y2Z3K4M5N6P7Q8R9RS01" }
+  ]
+}
+```
+
+`trigger` ∈ `runtime` (Layer 3 trigger rule), `manual` (operator), `budget_warning` (Budget threshold), `policy_advisory` (PolicyScope-driven, before risky tool call), `periodic`. `trigger_reason` is a free-form descriptor for human consumption — `before_file_write`, `pre_test_run`, `pre_unsafe_shell`, `analysis_phase_complete`.
+
+### `ks.checkpoint.validated`
+
+```json
+{
+  "checkpoint_id": "01J8X9Y2Z3K4M5N6P7Q8R9CK01",
+  "compatibility": {
+    "model_family": "qwen3",
+    "tokenizer_fingerprint": "qwen3-bpe-v2",
+    "renderer_version": "v1.4",
+    "context_share_scope": "project"
+  },
+  "stored_at": "2026-04-30T12:08:14.001Z",
+  "byte_count": 18567320,
+  "kv_export_present": true
+}
+```
+
+### `ks.checkpoint.restore_started`
+
+```json
+{
+  "checkpoint_id": "01J8X9Y2Z3K4M5N6P7Q8R9CK01",
+  "target_run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T9",
+  "restore_kind": "logical_first",
+  "kv_restore_planned": true
+}
+```
+
+`restore_kind` ∈ `logical_first` (manifest + artifacts; KV optional), `manifest_only` (KV restore not feasible). The target Run is the new Run created for the resume; the original Run's `run_id` is in the envelope.
+
+### `ks.checkpoint.restore_completed`
+
+```json
+{
+  "checkpoint_id": "01J8X9Y2Z3K4M5N6P7Q8R9CK01",
+  "target_run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T9",
+  "kv_restored": true,
+  "kv_restore_duration_ms": 412,
+  "manifest_reconstructed": false,
+  "warmness": "warm"
+}
+```
+
+If KV restore failed but logical reconstruction succeeded: `kv_restored: false`, `manifest_reconstructed: true`, `warmness: "cold"`.
+
+### `ks.checkpoint.restore_failed`
+
+```json
+{
+  "checkpoint_id": "01J8X9Y2Z3K4M5N6P7Q8R9CK01",
+  "target_run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T9",
+  "stage": "compatibility_check",
+  "error": {
+    "code": "tokenizer_fingerprint_mismatch",
+    "message": "checkpoint tokenizer 'qwen3-bpe-v1' incompatible with target 'qwen3-bpe-v2'"
+  }
+}
+```
+
+`stage` ∈ `compatibility_check`, `manifest_load`, `artifact_validation`, `kv_import`. A failed restore at `compatibility_check` is a hard stop — the resume cannot proceed against the target. A failed restore at `kv_import` is recoverable: the system falls back to manifest-first reconstruction and emits `restore_completed` with `manifest_reconstructed: true`.
+
+## Sequence
+
+A typical Checkpoint create-then-restore sequence:
+
+```
+ks.checkpoint.created           (Run X creates checkpoint at Step 14)
+ks.checkpoint.validated         (capture completed, compatibility verified)
+
+# ... time passes; original Run fails or is resumed elsewhere ...
+
+ks.checkpoint.restore_started   (target Run Y begins restore)
+ks.checkpoint.restore_completed (Y is RESTORED; transitions to RUNNING)
+```
+
+A failed restore replaces the final event with `restore_failed`.
+
+## Identity fields
+
+The envelope's `checkpoint_id` is populated on every event. `run_id` carries the *originating* Run on `created` and `validated`; on restore events it carries the originating Run, while `payload.target_run_id` carries the resuming Run. The two are different ULIDs — resume creates a new Run.
+
+## Common consumers
+
+- **Recovery dashboards.** Aggregate `ks.checkpoint.restore_completed` outcomes (KV-restored vs. manifest-reconstructed) per Project to surface restore quality.
+- **Run timeline.** Checkpoint events sit on the Run timeline alongside Step events; the UI shows a checkpoint marker at the originating Step.
+- **Audit.** `ks.checkpoint.restore_failed` events are the audit trail for resume incidents — `stage` and `error.code` identify the cause.
+- **Operator tooling.** `ks.checkpoint.created` rate per Run is a signal of how frequently runtime trigger rules fire.
+
+## See also
+
+- [Checkpoints](/docs/concepts/checkpoints) — the entity these events project
+- [Checkpoint state machine](/docs/concepts/checkpoint-state-machine) — the FSM transitions land on
+- [Resume flow](/docs/concepts/resume-flow) — the `RECOVERING → RESUMING → RUNNING` path that consumes restore events
+- [State handles](/docs/concepts/state-handles) — the typed references in `payload.state_handles`
+- [`GET /v1/ks/events/checkpoint`](/docs/api/events/checkpoint)

@@ -1,0 +1,165 @@
+---
+title: State events
+description: The kv_events stream — substrate KV cache lifecycle events covering store, access, partial match, demote, promote, restore, transfer, evict, and invalidate transitions on the open inference substrate.
+---
+
+The **state events** stream — `kv_events` — covers the lifecycle of reusable KV state on the open inference substrate (Layer 1). Every meaningful KV transition — a cache miss that stored new state, a hit that reused it, a tier movement, an eviction — emits one event. The [KV Index Service](/docs/concepts/kv-index) consumes this stream to maintain its near-real-time projection.
+
+Subjects: `kv.state.*`. Persisted in the **`kv_events` JetStream stream** — operationally separate from the `execution_events` stream because substrate volume is high and retention semantics differ. Consumed via [`GET /v1/ks/events/state`](/docs/api/events/state).
+
+## Event types
+
+| Event | Trigger |
+|---|---|
+| `kv.state.stored` | Substrate created a new reusable state entry (cold prefill landed). |
+| `kv.state.accessed` | Substrate served a request from cache; full or partial reuse. |
+| `kv.state.partial_match` | Substrate matched a prefix up to N tokens before divergence. |
+| `kv.state.demoted` | Tier movement: state moved from a hotter tier to a cooler one. |
+| `kv.state.promoted` | Tier movement: state moved to a hotter tier. |
+| `kv.state.restored` | Restore from durable export completed; state is live in HBM. |
+| `kv.state.transferred` | State copied or moved between nodes. |
+| `kv.state.evicted` | State removed under tier pressure or TTL. |
+| `kv.state.invalidated` | State invalidated because its compatibility key (model, tokenizer, renderer) changed. |
+
+## Payload shapes
+
+### `kv.state.stored`
+
+```json
+{
+  "stable_prefix_id": "sha256:a7f3...",
+  "stable_context_id": "ctx_v1:9c2e...",
+  "token_count": 4218,
+  "byte_count": 1856732,
+  "tier": "hbm",
+  "compatibility": {
+    "model_id": "qwen3-coder-30b",
+    "tokenizer_fingerprint": "qwen3-bpe-v2",
+    "renderer_version": "v1.4"
+  }
+}
+```
+
+### `kv.state.accessed`
+
+```json
+{
+  "stable_prefix_id": "sha256:a7f3...",
+  "stable_context_id": "ctx_v1:9c2e...",
+  "cached_tokens": 3640,
+  "match": "exact",
+  "warmness": "hot",
+  "tier": "hbm"
+}
+```
+
+`match` is `exact` for a full-prefix match, `partial` when divergence occurred (paired with a `kv.state.partial_match` event carrying divergence detail).
+
+### `kv.state.partial_match`
+
+```json
+{
+  "stable_prefix_id": "sha256:a7f3...",
+  "matched_tokens": 1842,
+  "total_input_tokens": 4218,
+  "divergence_offset": 1842
+}
+```
+
+### `kv.state.demoted` / `kv.state.promoted`
+
+```json
+{
+  "stable_prefix_id": "sha256:a7f3...",
+  "from_tier": "hbm",
+  "to_tier": "host_ram",
+  "duration_ms": 84,
+  "byte_count": 1856732
+}
+```
+
+Tier values: `hbm`, `host_ram`, `nvme`, `object_store`.
+
+### `kv.state.restored`
+
+```json
+{
+  "stable_prefix_id": "sha256:a7f3...",
+  "from_tier": "object_store",
+  "to_tier": "hbm",
+  "duration_ms": 412,
+  "byte_count": 1856732,
+  "outcome": "succeeded"
+}
+```
+
+A failed restore replaces `outcome` with `failed` and carries `error.code` and `error.message`.
+
+### `kv.state.transferred`
+
+```json
+{
+  "stable_prefix_id": "sha256:a7f3...",
+  "from_node_id": "node-gpu-2",
+  "to_node_id": "node-gpu-3",
+  "byte_count": 1856732,
+  "duration_ms": 124
+}
+```
+
+### `kv.state.evicted`
+
+```json
+{
+  "stable_prefix_id": "sha256:a7f3...",
+  "tier": "host_ram",
+  "reason": "pressure",
+  "byte_count": 1856732
+}
+```
+
+`reason` ∈ `pressure`, `ttl`, `manual`, `compatibility`.
+
+### `kv.state.invalidated`
+
+```json
+{
+  "stable_prefix_id": "sha256:a7f3...",
+  "reason": "model_version_change",
+  "previous_compatibility": {
+    "model_id": "qwen3-coder-30b",
+    "renderer_version": "v1.3"
+  }
+}
+```
+
+## Identity fields
+
+The envelope's `node_id` is always populated for state events — every KV transition is local to one substrate node. The `model_id` is populated when the transition is model-bound (most events). `run_id` and `model_call_id` are populated only on `kv.state.accessed` events that fired during a specific request — eviction and tier movement carry no Run linkage because they happen independently of the request that originally stored the state.
+
+The `stable_prefix_id` and `stable_context_id` in payload tie events to the [manifest identity](/docs/concepts/context-manifests) that produced them. A consumer reconstructing "what happened to this manifest's cache" filters by these payload fields, not by `run_id`.
+
+## Why a separate stream
+
+`kv_events` lives in its own JetStream stream because:
+
+- **Volume.** Substrate cache transitions outnumber control-plane transitions by orders of magnitude on hot workloads.
+- **Retention.** State events default to 24 hours retention; control-plane events default to 7 days. A separate stream makes the divergence cheap.
+- **Ingestion path.** State events are published directly by the substrate Node Agent over local gRPC, not through the control-plane gateway.
+
+The separation is operational. Consumers query the same envelope and the same correlation fields across both streams.
+
+## Common consumers
+
+- **KV Index Service.** Primary consumer; maintains the across-time projection of state residency by `stable_prefix_id` / `stable_context_id`.
+- **Tiering / State Manager.** Reacts to `demoted` / `promoted` / `evicted` to plan future placement.
+- **Routing audit.** Joins `ks.route.selected` against `kv.state.accessed` to verify routing predictions matched substrate reality.
+- **Cache hit-rate dashboards.** Aggregate `kv.state.accessed` versus `kv.state.stored` per Project, Environment, and stable-context lineage.
+
+## See also
+
+- [KV cache](/docs/concepts/kv-cache) — the substrate mechanism
+- [KV index](/docs/concepts/kv-index) — the across-time projection consuming this stream
+- [Cached tokens](/docs/concepts/cached-tokens) — the per-call accounting that joins to `kv.state.accessed`
+- [Event envelope](/docs/concepts/event-envelope)
+- [`GET /v1/ks/events/state`](/docs/api/events/state)

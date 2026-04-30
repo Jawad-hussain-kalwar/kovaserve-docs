@@ -1,0 +1,128 @@
+---
+title: Routing events
+description: The routing stream — Cache-Aware Router decisions, fallback usage, and operator overrides covering route.planned, route.selected, route.fallback_used, and route.override_applied.
+---
+
+The **routing events** stream covers placement decisions made by the [Cache-Aware Router](/docs/concepts/manifest-aware-routing). Every routing decision emits a sequence of events that record the candidates considered, the chosen route, and any fallback or override applied.
+
+Subjects: `ks.route.*`. Persisted in the `execution_events` JetStream stream. Consumed via [`GET /v1/ks/events/routing`](/docs/api/events/routing).
+
+## Event types
+
+| Event | Trigger |
+|---|---|
+| `ks.route.planned` | Router has scored candidates and produced a ranked plan. Emitted before dispatch. |
+| `ks.route.selected` | A specific node has been selected and dispatch is committed. |
+| `ks.route.fallback_used` | Primary route failed; a ranked fallback took over. |
+| `ks.route.override_applied` | An operator-supplied override redirected the route. |
+
+## Payload shapes
+
+### `ks.route.planned`
+
+```json
+{
+  "candidates": [
+    {
+      "node_id": "node-gpu-2",
+      "score": 0.91,
+      "warmness": "hot",
+      "expected_cached_tokens": 3640,
+      "expected_restore_cost_ms": 0
+    },
+    {
+      "node_id": "node-gpu-3",
+      "score": 0.62,
+      "warmness": "warm",
+      "expected_cached_tokens": 1842,
+      "expected_restore_cost_ms": 84
+    }
+  ],
+  "context_share_scope": "project",
+  "stable_context_id": "ctx_v1:9c2e...",
+  "context_budget_state": "ACTIVE"
+}
+```
+
+### `ks.route.selected`
+
+```json
+{
+  "node_id": "node-gpu-2",
+  "score": 0.91,
+  "warmness": "hot",
+  "rationale": {
+    "manifest_reuse_estimate_tokens": 3640,
+    "restore_cost_ms": 0,
+    "queue_depth": 2,
+    "scope_filter": "project",
+    "session_affinity": false
+  },
+  "resume_feasible": true
+}
+```
+
+`rationale` is the structured explanation of the decision — a consumer can reconstruct why this node won over alternatives without re-running the scorer.
+
+### `ks.route.fallback_used`
+
+```json
+{
+  "primary_node_id": "node-gpu-2",
+  "fallback_node_id": "node-gpu-3",
+  "reason": "primary_unavailable",
+  "primary_failure": {
+    "code": "node_overloaded",
+    "message": "queue depth exceeded threshold"
+  }
+}
+```
+
+`reason` ∈ `primary_unavailable`, `primary_rejected`, `primary_admission_failed`.
+
+### `ks.route.override_applied`
+
+```json
+{
+  "override_source": "placement_hint",
+  "override_value": {
+    "preferred_node_id": "node-gpu-4"
+  },
+  "selected_node_id": "node-gpu-4",
+  "would_have_selected": "node-gpu-2"
+}
+```
+
+`override_source` ∈ `placement_hint` (runtime-supplied), `operator_pin` (admin), `policy_constraint` (PolicyScope-driven).
+
+## Sequence
+
+A typical ModelCall produces:
+
+```
+ks.route.planned        (candidates scored)
+ks.route.selected       (final pick)
+[optional] ks.route.fallback_used     (if primary failed)
+[optional] ks.route.override_applied  (if override fired)
+```
+
+`ks.route.override_applied` is emitted *before* `ks.route.selected` when the override decided the pick. The consumer order is: planned → override_applied → selected → (optionally) fallback_used.
+
+## Identity fields
+
+The envelope carries `run_id`, `step_id`, `model_call_id`, `context_manifest_id` populated. `node_id` is populated to the *selected* node on `selected` and `fallback_used`; on `planned` it is null because no node has been picked yet. The `payload` carries the full candidate list for `planned` and the explanatory fields for the others.
+
+## Common consumers
+
+- **Routing-quality dashboards.** Compare `expected_cached_tokens` from `selected` against realized [`cached_tokens`](/docs/concepts/cached-tokens) on `ks.model_call.completed`. Persistent divergence is a routing-quality signal.
+- **Run timeline.** Routing events sit between `ks.step.started` and `ks.model_call.started`, showing the placement step in the per-Run timeline.
+- **Operator audit.** `ks.route.override_applied` events are the audit trail for operator overrides — every override is logged with source and selected target.
+- **Fallback monitoring.** `ks.route.fallback_used` rate is a primary substrate-health signal.
+
+## See also
+
+- [Manifest-aware routing](/docs/concepts/manifest-aware-routing) — the subsystem these events project
+- [KV index](/docs/concepts/kv-index) — the lookup feeding scorer inputs
+- [Placement hints](/docs/concepts/placement-hints) — runtime-supplied overrides
+- [State events](/docs/concepts/events/state) — the substrate-side counterpart that confirms predictions
+- [`GET /v1/ks/events/routing`](/docs/api/events/routing)

@@ -126,18 +126,18 @@ Living roadmap for `docs.kovaserve.com`. Source of structure for `content/docs/`
 
 ### Events — Blueprint §8.3 (10 streams) + §8.4 envelope
 
-- [ ] `concepts/events.mdx` — overview, envelope, taxonomy
-- [ ] `concepts/event-envelope.mdx` — minimum envelope
-- [ ] `concepts/events/execution.mdx`
-- [ ] `concepts/events/state.mdx` — `kv_events` stream
-- [ ] `concepts/events/routing.mdx`
-- [ ] `concepts/events/policy.mdx`
-- [ ] `concepts/events/budget.mdx`
-- [ ] `concepts/events/checkpoint.mdx`
-- [ ] `concepts/events/runtime.mdx`
-- [ ] `concepts/events/context-engineering.mdx`
-- [ ] `concepts/events/memory.mdx`
-- [ ] `concepts/events/sub-run.mdx`
+- [x] `concepts/events.mdx` — overview, envelope, taxonomy
+- [x] `concepts/event-envelope.mdx` — minimum envelope
+- [x] `concepts/events/execution.mdx`
+- [x] `concepts/events/state.mdx` — `kv_events` stream
+- [x] `concepts/events/routing.mdx`
+- [x] `concepts/events/policy.mdx`
+- [x] `concepts/events/budget.mdx`
+- [x] `concepts/events/checkpoint.mdx`
+- [x] `concepts/events/runtime.mdx`
+- [x] `concepts/events/context-engineering.mdx`
+- [x] `concepts/events/memory.mdx`
+- [x] `concepts/events/sub-run.mdx`
 
 ### Product modes — Blueprint Part 9
 

@@ -52,6 +52,8 @@
     "organizations",
     "projects",
     "environments",
-    "keys"
+    "keys",
+    "event-envelope",
+    "events"
   ]
 }

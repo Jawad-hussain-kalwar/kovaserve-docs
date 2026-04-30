@@ -1,0 +1,136 @@
+---
+title: Runtime events
+description: The runtime stream — Layer 3 runtime activity events covering tool invocations, process lifecycle, file writes, and branch creation.
+---
+
+The **runtime events** stream covers Layer 3 runtime activity: tool invocations, process lifecycle, file writes, and branch creation. It is the runtime-native projection of "what the agent did" beyond model calls — the surface the runtime UI uses to draw a coding agent's timeline alongside the [execution](/docs/concepts/events/execution) and [routing](/docs/concepts/events/routing) layers.
+
+Subjects: `ks.tool.*`, `ks.process.*`, `ks.file.*`, `ks.branch.*`. Persisted in the `execution_events` JetStream stream. Consumed via [`GET /v1/ks/events/runtime`](/docs/api/events/runtime).
+
+## Event types
+
+| Event | Trigger |
+|---|---|
+| `ks.tool.invocation.started` | Tool call begins. |
+| `ks.tool.invocation.completed` | Tool call finishes — success, failure, or cancellation. |
+| `ks.process.started` | Sandbox process spawned. |
+| `ks.process.waiting` | Process waiting on I/O or external input (this is an event, not a [StepType](/docs/concepts/step-types)). |
+| `ks.file.write.applied` | Workspace file mutation committed. |
+| `ks.branch.created` | Branch operation produced a new Run lineage from a Checkpoint. |
+
+## Payload shapes
+
+### `ks.tool.invocation.started`
+
+```json
+{
+  "tool_name": "shell",
+  "tool_catalog_id": "01J8X9Y2Z3K4M5N6P7Q8R9TC01",
+  "invocation_id": "01J8X9Y2Z3K4M5N6P7Q8R9TI01",
+  "arguments_summary": "git diff --stat HEAD~1",
+  "tool_context_disposition": "summary_required",
+  "checkpoint_recommended": false
+}
+```
+
+`tool_context_disposition` is the result of [Tool Context Governance](/docs/concepts/tool-context-disposition). `arguments_summary` is a redacted summary; full arguments are persisted on the [tool catalog](/docs/concepts/tool-catalogs) row addressable by `invocation_id`.
+
+### `ks.tool.invocation.completed`
+
+```json
+{
+  "invocation_id": "01J8X9Y2Z3K4M5N6P7Q8R9TI01",
+  "outcome": "succeeded",
+  "duration_ms": 1240,
+  "result_disposition": "artifact_ref",
+  "artifact_id": "01J8X9Y2Z3K4M5N6P7Q8R9AR01",
+  "result_summary_tokens": 124,
+  "exit_code": 0
+}
+```
+
+`outcome` ∈ `succeeded`, `failed`, `canceled`, `blocked` (policy-blocked at execution time). `result_disposition` is the disposition applied to the result — see [tool context disposition](/docs/concepts/tool-context-disposition).
+
+### `ks.process.started`
+
+```json
+{
+  "process_id": "01J8X9Y2Z3K4M5N6P7Q8R9PR01",
+  "sandbox_id": "01J8X9Y2Z3K4M5N6P7Q8R9SB01",
+  "command": "pytest tests/",
+  "workspace_id": "01J8X9Y2Z3K4M5N6P7Q8R9WS01"
+}
+```
+
+### `ks.process.waiting`
+
+```json
+{
+  "process_id": "01J8X9Y2Z3K4M5N6P7Q8R9PR01",
+  "wait_kind": "stdin",
+  "since_ms": 412
+}
+```
+
+`wait_kind` ∈ `stdin`, `network`, `signal`, `external_approval`. This event has no corresponding StepType — events and step types are separate enumerations.
+
+### `ks.file.write.applied`
+
+```json
+{
+  "workspace_id": "01J8X9Y2Z3K4M5N6P7Q8R9WS01",
+  "path": "src/handler.py",
+  "operation": "modify",
+  "diff_artifact_id": "01J8X9Y2Z3K4M5N6P7Q8R9DF01",
+  "byte_count_delta": 412
+}
+```
+
+`operation` ∈ `create`, `modify`, `delete`, `rename`. The full diff is persisted as a [ContextArtifact](/docs/concepts/context-artifacts) addressable by `diff_artifact_id`.
+
+### `ks.branch.created`
+
+```json
+{
+  "from_checkpoint_id": "01J8X9Y2Z3K4M5N6P7Q8R9CK01",
+  "branched_run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T9",
+  "branch_kind": "manual",
+  "inherited_budget_id": "01J8X9Y2Z3K4M5N6P7Q8R9BG02"
+}
+```
+
+`branch_kind` ∈ `manual` (operator), `runtime` (runtime-triggered for parallel exploration), `recovery` (forked from a `RECOVERING` Run).
+
+## Identity fields
+
+The envelope carries `run_id`, `step_id`, and `model_call_id` populated when the activity sits inside a Step that produced a ModelCall (typical `ks.tool.*` events). `ks.process.*` and `ks.file.*` events are tied to `run_id` and `step_id` but not to a specific ModelCall — they are runtime-side activity that runs between or alongside model calls. `ks.branch.created`'s envelope `run_id` is the originating Run; `payload.branched_run_id` is the new Run.
+
+## Sequence around a tool call
+
+```
+ks.step.started                (parent Step — typically TOOL_EXECUTE)
+ks.tool.invocation.started     (this page)
+[optional] ks.process.started  (if the tool spawns a sandbox process)
+[optional] ks.process.waiting  (if the process waits)
+[optional] ks.file.write.applied (one per file mutation)
+ks.tool.invocation.completed   (this page)
+ks.step.completed              (parent Step finishes)
+```
+
+Tools that produce no process or file activity emit only the two `ks.tool.invocation.*` events bracketing their Step.
+
+## Common consumers
+
+- **Coding-agent timeline UI.** Renders tool calls, process spawns, file diffs, and branch points alongside model calls for the runtime wedge UX.
+- **Workspace audit.** `ks.file.write.applied` events are the audit log for workspace mutations — every mutation has an addressable diff artifact.
+- **Branch lineage view.** `ks.branch.created` populates the branch tree visualization; consumers walk `from_checkpoint_id` → `branched_run_id` to render lineage.
+- **Tool-policy feedback.** `ks.tool.invocation.completed` outcomes (especially `blocked`) feed the tool-governance dashboard for [PolicyScope](/docs/concepts/policy-scopes) tuning.
+
+## See also
+
+- [Step types](/docs/concepts/step-types) — including `TOOL_EXECUTE`, `FILE_READ`, `FILE_WRITE`, `PROCESS_START`
+- [Tool context disposition](/docs/concepts/tool-context-disposition) — the disposition values in payload
+- [Tool catalogs](/docs/concepts/tool-catalogs) — the immutable tool-definition source
+- [Branches](/docs/concepts/branches) — the Run lineage primitive
+- [Context artifacts](/docs/concepts/context-artifacts) — the offload target for diffs and tool outputs
+- [`GET /v1/ks/events/runtime`](/docs/api/events/runtime)

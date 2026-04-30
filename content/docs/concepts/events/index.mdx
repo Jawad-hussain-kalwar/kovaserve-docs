@@ -1,0 +1,117 @@
+---
+title: Events
+description: The KovaServe event taxonomy — eleven streams covering execution, state, routing, policy, budget, checkpoint, runtime, context engineering, memory, and sub-run lineage, all carried with a uniform envelope on NATS JetStream.
+---
+
+KovaServe emits a structured event for every meaningful state transition across the control plane and the substrate. Events are the across-time projection of the system — every dashboard, every audit, every metering aggregation, and every consumer integration is built against them.
+
+Events are durable, replayable, and pulled — consumers read at their own pace. They are not push notifications; they are the source-of-truth log of what happened.
+
+## The taxonomy
+
+Events are organized into eleven named streams. Each stream covers one subsystem's lifecycle and uses a stable subject prefix on NATS JetStream:
+
+| Stream | Subject prefix | Coverage |
+|---|---|---|
+| [Execution](/docs/concepts/events/execution) | `ks.run.*`, `ks.step.*`, `ks.model_call.*` | Run, Step, and ModelCall lifecycle. |
+| [State](/docs/concepts/events/state) | `kv.state.*` | KV substrate cache lifecycle (separate stream). |
+| [Routing](/docs/concepts/events/routing) | `ks.route.*` | Cache-aware routing decisions. |
+| [Policy](/docs/concepts/events/policy) | `ks.policy.*` | Policy evaluation, denial, and degraded admission. |
+| [Budget](/docs/concepts/events/budget) | `ks.budget.*` | Run-level Budget warnings, forecasts, and hard stops. |
+| [Checkpoint](/docs/concepts/events/checkpoint) | `ks.checkpoint.*` | Checkpoint create, validate, restore. |
+| [Runtime](/docs/concepts/events/runtime) | `ks.tool.*`, `ks.process.*`, `ks.file.*`, `ks.branch.*` | Layer 3 runtime activity: tool invocations, processes, files, branches. |
+| [Context engineering](/docs/concepts/events/context-engineering) | `ks.context.*` | Manifest, segment, artifact, compaction, ContextBudget, tool catalog. |
+| [Memory](/docs/concepts/events/memory) | `ks.memory.*` | MemoryEntry write, read, expire, delete. |
+| [Sub-run](/docs/concepts/events/sub-run) | `ks.subrun.*` | Sub-run dispatch, summary attach, join. |
+
+The `execution_events` JetStream stream uses the broad subject filter `ks.>` so new event families can be added under the same stream config without migration. The `kv_events` stream uses `kv.>` and is operationally separate — substrate lifecycle is high-volume and isolated for retention and ingestion reasons.
+
+## What every event carries
+
+Every event — regardless of stream — carries the same minimum [event envelope](/docs/concepts/event-envelope): identity, tenancy, correlation, and timestamp fields. The envelope makes events joinable across streams without normalization at consume time.
+
+```json
+{
+  "event_id": "01J8X9Y2Z3K4M5N6P7Q8R9EVT1",
+  "event_type": "ks.run.started",
+  "timestamp": "2026-04-30T12:00:00Z",
+  "organization_id": "01J8X9Y2Z3K4M5N6P7Q8R9ORG1",
+  "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9PRJ1",
+  "environment_id": "01J8X9Y2Z3K4M5N6P7Q8R9ENV1",
+  "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+  "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+  "payload": { "...": "stream-specific fields" }
+}
+```
+
+Stream-specific fields live under `payload`. The envelope is closed; new fields require ADR-driven extension.
+
+## How events are produced
+
+Every state transition in the control plane and the substrate emits exactly one event. Producers write to JetStream synchronously on the same transaction that wrote the underlying row — events are durable when the row is durable, and they cannot be lost without losing the row that caused them.
+
+| Transition | Event |
+|---|---|
+| Run row inserted | `ks.run.created` |
+| Run transitions `RUNNING` | `ks.run.started` |
+| ModelCall row inserted | `ks.model_call.started` |
+| ModelCall completes | `ks.model_call.completed` |
+| Manifest admission settles | `ks.context.manifest.admitted` |
+| KV cache lookup hits | `kv.state.accessed` |
+| Tool invocation begins | `ks.tool.invocation.started` |
+| Budget threshold crossed | `ks.budget.warning` |
+
+The mapping is one-to-one and deterministic — given a Run's history, the event sequence is reproducible from the database.
+
+## How events are consumed
+
+Events are pulled, not pushed. The consumer endpoint is cursor-paginated:
+
+```http
+GET /v1/ks/events/execution?after=01J8X9Y2Z3K4M5N6P7Q8R9EVT0&limit=100
+Authorization: Bearer ks_...
+```
+
+```json
+{
+  "data": [
+    { "event_id": "...", "event_type": "ks.run.started", "...": "..." },
+    { "event_id": "...", "event_type": "ks.step.created", "...": "..." }
+  ],
+  "next_cursor": "01J8X9Y2Z3K4M5N6P7Q8R9EVT3"
+}
+```
+
+| Stream | Endpoint |
+|---|---|
+| Execution | `GET /v1/ks/events/execution` |
+| State | `GET /v1/ks/events/state` |
+| Routing | `GET /v1/ks/events/routing` |
+| Policy | `GET /v1/ks/events/policy` |
+| Budget | `GET /v1/ks/events/budget` |
+| Checkpoint | `GET /v1/ks/events/checkpoint` |
+| Runtime | `GET /v1/ks/events/runtime` |
+| Context engineering | `GET /v1/ks/events/context-engineering` |
+| Memory | `GET /v1/ks/events/memory` |
+| Sub-run | `GET /v1/ks/events/sub-run` |
+
+Filters available on every endpoint: `run_id`, `session_id`, `step_id`, `model_call_id`, `event_type[]`, `since` (timestamp), `limit`. Tenancy is implicit — the resolved [AuthContext](/docs/concepts/identity-and-ids) bounds visibility to the caller's Organization.
+
+## Retention and replay
+
+Events are retained 7 days by default in managed cloud, configurable per Organization. Private deployments choose retention at install time — JetStream supports unlimited file-backed storage.
+
+Within the retention window, events are replayable: a consumer that drops a cursor can rewind by `event_id` and re-read. Beyond the window, the substrate `kv_events` stream rolls; the rest of the streams are durable to S3-compatible storage configured at deployment time.
+
+## What events are not
+
+- **Not webhooks.** KovaServe does not push events to consumer URLs in v1. Consumers pull from the cursor-paginated endpoints. The v1 surface explicitly excludes a webhook management API.
+- **Not metrics.** Metrics are exposed via Prometheus on `/metrics`. Events carry the per-transition record; metrics carry rolling counters.
+- **Not the source of truth for cost.** Cost is on `usage_records` with [pricing snapshots](/docs/concepts/pricing-snapshots) — the audit anchor. Events convey transitions; they do not redefine economics.
+- **Not push to all clients.** Pulled cursor-paginated reads are the only public consumption surface in v1.
+
+## See also
+
+- [Event envelope](/docs/concepts/event-envelope) — the minimum fields every event carries
+- Per-stream pages — [execution](/docs/concepts/events/execution), [state](/docs/concepts/events/state), [routing](/docs/concepts/events/routing), [policy](/docs/concepts/events/policy), [budget](/docs/concepts/events/budget), [checkpoint](/docs/concepts/events/checkpoint), [runtime](/docs/concepts/events/runtime), [context engineering](/docs/concepts/events/context-engineering), [memory](/docs/concepts/events/memory), [sub-run](/docs/concepts/events/sub-run)
+- [`GET /v1/ks/events/index`](/docs/api/events/index) — combined cursor across streams

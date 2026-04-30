@@ -1,0 +1,117 @@
+---
+title: Memory events
+description: The memory stream — MemoryEntry lifecycle events covering memory.entry.written, memory.entry.read, memory.entry.expired, and memory.entry.deleted.
+---
+
+The **memory events** stream covers the lifecycle of [MemoryEntry](/docs/concepts/memory-entries) rows in the [Memory Store Service](/docs/concepts/memory-store). Every read, write, expiry, and deletion lands here so consumers can audit cross-session memory access and surface memory utilization in dashboards.
+
+Subjects: `ks.memory.*`. Persisted in the `execution_events` JetStream stream. Consumed via [`GET /v1/ks/events/memory`](/docs/api/events/memory).
+
+## Event types
+
+| Event | Trigger |
+|---|---|
+| `ks.memory.entry.written` | A MemoryEntry row was inserted or updated (`PUT /v1/ks/memory/entries`). |
+| `ks.memory.entry.read` | A MemoryEntry row was read (`GET /v1/ks/memory/entries` or via `MEMORY_READ` step). |
+| `ks.memory.entry.expired` | A MemoryEntry transitioned to expired by TTL. |
+| `ks.memory.entry.deleted` | A MemoryEntry was deleted (`DELETE /v1/ks/memory/entries/{id}`). |
+
+## Payload shapes
+
+### `ks.memory.entry.written`
+
+```json
+{
+  "memory_entry_id": "01J8X9Y2Z3K4M5N6P7Q8R9ME01",
+  "scope_type": "user",
+  "scope_id": "user_a8c4f2d1",
+  "namespace": "preferences",
+  "key": "preferred_language",
+  "operation": "update",
+  "value_byte_count": 184,
+  "ttl_seconds": null,
+  "step_id_origin": "01J8X9Y2Z3K4M5N6P7Q8R9SP24"
+}
+```
+
+`scope_type` ∈ `ephemeral`, `session`, `user`, `tenant`, `global` — see [memory scopes](/docs/concepts/memory-scopes). `operation` ∈ `insert`, `update`. `step_id_origin` is the [Step](/docs/concepts/steps) that triggered the write — populated for `MEMORY_WRITE` step types, null for direct API writes.
+
+The full value is **not** in the event payload. The `memory_entry_id` is the addressable handle; consumers fetch the value through the API if authorized.
+
+### `ks.memory.entry.read`
+
+```json
+{
+  "memory_entry_id": "01J8X9Y2Z3K4M5N6P7Q8R9ME01",
+  "scope_type": "user",
+  "scope_id": "user_a8c4f2d1",
+  "namespace": "preferences",
+  "key": "preferred_language",
+  "value_byte_count": 184,
+  "step_id_origin": "01J8X9Y2Z3K4M5N6P7Q8R9SP25"
+}
+```
+
+### `ks.memory.entry.expired`
+
+```json
+{
+  "memory_entry_id": "01J8X9Y2Z3K4M5N6P7Q8R9ME01",
+  "scope_type": "session",
+  "scope_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+  "namespace": "scratchpad",
+  "key": "running_summary",
+  "expired_at": "2026-04-30T13:00:00Z",
+  "ttl_seconds_at_write": 3600
+}
+```
+
+Expiry events are emitted by the Memory Store's TTL sweeper. They are not tied to a specific Step or ModelCall — `step_id` and `model_call_id` are null in the envelope.
+
+### `ks.memory.entry.deleted`
+
+```json
+{
+  "memory_entry_id": "01J8X9Y2Z3K4M5N6P7Q8R9ME01",
+  "scope_type": "user",
+  "scope_id": "user_a8c4f2d1",
+  "namespace": "preferences",
+  "key": "preferred_language",
+  "deleted_at": "2026-04-30T13:00:00Z",
+  "deletion_reason": "user_request"
+}
+```
+
+`deletion_reason` ∈ `user_request`, `scope_revocation`, `compliance_request`, `admin_action`.
+
+## Identity fields
+
+The envelope's `run_id`, `step_id`, and `model_call_id` are populated when the memory event fired during a Run's execution (typical for `MEMORY_READ` and `MEMORY_WRITE` step types). Direct API writes through `PUT /v1/ks/memory/entries` may not carry a Run linkage — `run_id` is null for unattached writes.
+
+The `scope_type` and `scope_id` in the payload are the canonical key for downstream filtering: a consumer querying "everything in user `user_a8c4f2d1`'s memory" filters by these payload fields.
+
+## Why values are out of band
+
+Memory entry values can be large (the Memory Store backs Anthropic's memory tool and LangGraph's `Store`), and they can carry sensitive data. The events carry the addressable `memory_entry_id` and `value_byte_count`, never the value bytes. This makes the event stream cheap to retain, replicate, and consume without leaking the underlying data — and it forces every consumer that needs the value to go through the authenticated API path that respects [PolicyScope](/docs/concepts/policy-scopes) `data_boundary` constraints.
+
+## Common consumers
+
+- **Memory access audit.** `ks.memory.entry.read` events under `compliance_request` deletion or under sensitive `namespace` paths surface in audit dashboards.
+- **TTL management.** `ks.memory.entry.expired` rate per scope tells operators whether TTL settings are well-tuned.
+- **Cross-session continuity dashboards.** Aggregate `ks.memory.entry.written` and `read` to show memory utilization per user, per session, per tenant.
+- **Compliance deletion verification.** A `compliance_request` deletion produces an addressable event that proves the deletion happened at a specific timestamp.
+
+## Tenancy and scope
+
+Every memory event carries the `(organization_id, project_id, environment_id)` of the request that produced it. The `scope_type = "tenant"` events span Projects within the Organization; `scope_type = "global"` events span Organizations within the deployment under admin control — see [memory scopes](/docs/concepts/memory-scopes) for the full retention model.
+
+A consumer's visibility into memory events is bounded by its [AuthContext](/docs/concepts/identity-and-ids): a Project-bound key sees events for its Project plus Organization-wide tenant-scope writes. Cross-Organization memory events are never visible.
+
+## See also
+
+- [Memory](/docs/concepts/memory) — the overview
+- [Memory scopes](/docs/concepts/memory-scopes) — the retention model
+- [Memory entries](/docs/concepts/memory-entries) — the row shape
+- [Memory store](/docs/concepts/memory-store) — the service surface
+- [Step types](/docs/concepts/step-types) — `MEMORY_READ` and `MEMORY_WRITE`
+- [`GET /v1/ks/events/memory`](/docs/api/events/memory)

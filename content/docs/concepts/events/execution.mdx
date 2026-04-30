@@ -1,0 +1,159 @@
+---
+title: Execution events
+description: The execution stream — Run, Step, and ModelCall lifecycle events covering creation, started, paused, recovering, resumed, completed, and failed transitions.
+---
+
+The **execution events** stream covers the lifecycle of [Runs](/docs/concepts/runs), [Steps](/docs/concepts/steps), and [ModelCalls](/docs/concepts/model-calls). It is the primary timeline of "what happened to my work" — every consumer that builds a Run explorer, a timeline UI, or an external trace reconstructs it from this stream.
+
+NATS subjects: `ks.run.*`, `ks.step.*`, `ks.model_call.*`. Persisted in the `execution_events` JetStream stream under the `ks.>` filter. Consumed via [`GET /v1/ks/events/execution`](/docs/api/events/execution).
+
+## Event types
+
+| Event | Trigger | Run state at emit |
+|---|---|---|
+| `ks.run.created` | Run row inserted. | `CREATED` |
+| `ks.run.started` | Run transitions out of `CREATED` into `RUNNING` (after admission). | `RUNNING` |
+| `ks.run.paused` | Run transitions to `PAUSED` (operator or runtime request). | `PAUSED` |
+| `ks.run.recovering` | Run enters `RECOVERING` after failure or operator-triggered resume. | `RECOVERING` |
+| `ks.run.resumed` | Run transitions from `RESUMING` back to `RUNNING`. | `RUNNING` |
+| `ks.run.completed` | Run transitions to `COMPLETED`. | `COMPLETED` |
+| `ks.run.failed` | Run transitions to `FAILED`. | `FAILED` |
+| `ks.step.created` | Step row inserted (post-admission). | (parent Run) |
+| `ks.step.started` | Step transitions to `STARTED`. | (parent Run) |
+| `ks.step.completed` | Step transitions to `SUCCEEDED`, `FAILED`, `SKIPPED`, or `CANCELED`. | (parent Run) |
+| `ks.model_call.started` | ModelCall row inserted; substrate dispatch begins. | (parent Run) |
+| `ks.model_call.completed` | ModelCall finishes — success, failure, or cancellation. | (parent Run) |
+
+The Run state listed is the *resulting* state — the event marks the transition into it. Events are emitted in the same database transaction that updates the row, so the event existence implies the row state.
+
+## Payload shapes
+
+### `ks.run.created`
+
+```json
+{
+  "external_run_id": "lg-task-9821",
+  "external_runtime": "langgraph",
+  "policy_scope_id": "01J8X9Y2Z3K4M5N6P7Q8R9P0K0",
+  "budget_id": "01J8X9Y2Z3K4M5N6P7Q8R9BG01",
+  "context_budget_id": "01J8X9Y2Z3K4M5N6P7Q8R9CB01"
+}
+```
+
+### `ks.run.started`
+
+```json
+{
+  "started_at": "2026-04-30T12:00:01.214Z"
+}
+```
+
+### `ks.run.recovering` / `ks.run.resumed`
+
+```json
+{
+  "from_state": "FAILED",
+  "checkpoint_id": "01J8X9Y2Z3K4M5N6P7Q8R9CK01",
+  "kv_restore_feasible": true
+}
+```
+
+`ks.run.resumed`'s payload also carries `resumed_at`.
+
+### `ks.run.completed` / `ks.run.failed`
+
+```json
+{
+  "outcome": "SUCCEEDED",
+  "completed_at": "2026-04-30T12:14:32.001Z",
+  "step_count": 23,
+  "model_call_count": 41,
+  "cost_cents": "1.4280",
+  "cache_savings_cents": "0.5860"
+}
+```
+
+`ks.run.failed`'s payload replaces `outcome` with `error.code` and `error.message`.
+
+### `ks.step.created` / `ks.step.started`
+
+```json
+{
+  "step_type": "MODEL_CALL",
+  "context_manifest_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T7",
+  "tool_catalog_id": "01J8X9Y2Z3K4M5N6P7Q8R9TC01"
+}
+```
+
+### `ks.step.completed`
+
+```json
+{
+  "outcome": "SUCCEEDED",
+  "duration_ms": 612,
+  "model_call_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T3"
+}
+```
+
+### `ks.model_call.started`
+
+```json
+{
+  "model_id": "qwen3-coder-30b",
+  "context_manifest_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T7",
+  "node_id": "node-gpu-2",
+  "stream": false
+}
+```
+
+### `ks.model_call.completed`
+
+```json
+{
+  "duration_ms": 412,
+  "prompt_tokens": 4218,
+  "completion_tokens": 312,
+  "total_tokens": 4530,
+  "cached_tokens": 3640,
+  "cost_cents": "0.0420",
+  "gross_cost_cents": "0.0680",
+  "cache_savings_cents": "0.0260",
+  "cost_status": "ok",
+  "outcome": "SUCCEEDED"
+}
+```
+
+A failed ModelCall replaces `outcome: "SUCCEEDED"` with `outcome: "FAILED"` and carries `error.code` and `error.message`.
+
+## Ordering guarantees
+
+Within a single Run, events are emitted in transition order:
+
+```
+ks.run.created
+ks.run.started
+ks.step.created (Step 1)
+ks.step.started (Step 1)
+ks.model_call.started (Step 1's ModelCall)
+ks.model_call.completed
+ks.step.completed (Step 1)
+...
+ks.run.completed
+```
+
+Cross-Run ordering is not guaranteed — two Runs running concurrently produce interleaved events. Within a Run, `event_id` lexicographic order matches transition order.
+
+## Common consumers
+
+- **Run timeline UI.** Filters by `run_id` and merges with [routing](/docs/concepts/events/routing), [context engineering](/docs/concepts/events/context-engineering), and [runtime](/docs/concepts/events/runtime) events.
+- **External tracing.** Consumes `ks.model_call.completed` for cost and token aggregation alongside OTel spans correlated by `trace_id`.
+- **Run-completion webhooks.** External integrations subscribe to `ks.run.completed` and `ks.run.failed` (via the consumer's own webhook layer over the pull endpoint).
+- **SLO dashboards.** Aggregate `ks.run.failed` rate and `ks.run.completed` duration for run-completion SLOs.
+
+## See also
+
+- [Run state machine](/docs/concepts/run-state-machine) — the 12-state FSM these events project
+- [Step state machine](/docs/concepts/step-state-machine) — the Step FSM
+- [ModelCall](/docs/concepts/model-calls) — the entity `ks.model_call.*` projects
+- [Event envelope](/docs/concepts/event-envelope) — the wrapping fields
+- [`GET /v1/ks/events/execution`](/docs/api/events/execution)

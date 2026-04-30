@@ -1,0 +1,113 @@
+---
+title: Policy events
+description: The policy stream — PolicyScope evaluation outcomes covering policy.evaluated, policy.denied, and policy.degraded_mode_applied.
+---
+
+The **policy events** stream covers evaluation outcomes from the [Policy / Governance Layer](/docs/concepts/policy-scopes). Every admission produces at least one `ks.policy.evaluated` event; denied or degraded outcomes produce additional events that surface the rationale for audit.
+
+Subjects: `ks.policy.*`. Persisted in the `execution_events` JetStream stream. Consumed via [`GET /v1/ks/events/policy`](/docs/api/events/policy).
+
+## Event types
+
+| Event | Trigger |
+|---|---|
+| `ks.policy.evaluated` | PolicyScope evaluated for a request. Emitted on every admission. |
+| `ks.policy.denied` | Evaluation produced `DENY`. Emitted in addition to `evaluated`. |
+| `ks.policy.degraded_mode_applied` | Evaluation produced `DEGRADED_ALLOW` and the degraded path took over. |
+
+## Payload shapes
+
+### `ks.policy.evaluated`
+
+```json
+{
+  "policy_scope_id": "01J8X9Y2Z3K4M5N6P7Q8R9P0K0",
+  "decision": "ALLOW",
+  "checks": {
+    "model_acl": "allow",
+    "rate_limit": "allow",
+    "context_share_scope": "project",
+    "data_boundary": "tenant_local",
+    "deployment_restriction": "allow"
+  }
+}
+```
+
+`decision` ∈ `ALLOW`, `DENY`, `DEGRADED_ALLOW`. Every check is enumerated in the `checks` object so a consumer can see which dimensions passed.
+
+### `ks.policy.denied`
+
+```json
+{
+  "policy_scope_id": "01J8X9Y2Z3K4M5N6P7Q8R9P0K0",
+  "denial_reason": "model_not_in_acl",
+  "matched_rule": "tenant.model_acl",
+  "details": {
+    "requested_model": "qwen3-ultra-405b",
+    "allowed_models": ["qwen3-coder-30b", "qwen3-coder-7b"]
+  },
+  "http_status": 403
+}
+```
+
+`denial_reason` ∈ `model_not_in_acl`, `rate_limit_exceeded`, `tokens_per_second_exceeded`, `deployment_not_allowed`, `environment_restricted`, `data_boundary_violation`, `key_revoked`, `key_expired`, `organization_suspended`, `project_archived`, `environment_archived`, `key_mode_environment_mismatch`.
+
+The `matched_rule` field identifies which overlay layer produced the denial — `tenant.<field>`, `project.<field>`, `environment.<field>`, or `key.<field>`. This is the audit anchor for policy disputes: it identifies which policy edit would change the outcome.
+
+### `ks.policy.degraded_mode_applied`
+
+```json
+{
+  "policy_scope_id": "01J8X9Y2Z3K4M5N6P7Q8R9P0K0",
+  "degraded_dimension": "model_size",
+  "from_value": "qwen3-coder-30b",
+  "to_value": "qwen3-coder-7b",
+  "reason": "context_budget_degrade"
+}
+```
+
+`degraded_dimension` ∈ `model_size`, `max_tokens`, `optional_segments_dropped`, `context_window`. `reason` identifies which subsystem requested the degrade — typically `context_budget_degrade` from [admission](/docs/concepts/admission), or `budget_warning` from the run-level [Budget](/docs/concepts/budgets).
+
+## Sequence
+
+```
+ks.policy.evaluated   (always)
+[optional] ks.policy.denied               (if decision = DENY)
+[optional] ks.policy.degraded_mode_applied (if decision = DEGRADED_ALLOW)
+```
+
+`ks.policy.denied` is emitted *in addition to* `ks.policy.evaluated` rather than replacing it. The pattern matches the rest of the streams — `evaluated` is the base record; specialized events are extensions.
+
+## Ordering with admission
+
+Policy evaluation runs at admission time, before the [ContextBudget admission](/docs/concepts/admission). The full per-request sequence is:
+
+```
+ks.policy.evaluated                   (governance)
+[optional] ks.policy.denied            (if denied — reject and stop)
+ks.context.manifest.admitted          (context engineering, if policy passed)
+[optional] ks.policy.degraded_mode_applied (if context budget triggered DEGRADE)
+ks.route.planned                       (routing)
+...
+```
+
+A `DENY` short-circuits the rest of the sequence — no manifest admission, no routing, no model call.
+
+## Identity fields
+
+The envelope's `run_id`, `step_id`, and `model_call_id` are populated when the policy evaluation is tied to a specific Step or ModelCall. For per-request rate-limit checks (gateway-level, before Run resolution), `run_id` is null and `step_id` is null — the event ties only to the tenancy triple, the resolved `policy_scope_id`, and the `key_id`.
+
+## Common consumers
+
+- **Compliance audit.** `ks.policy.denied` events are the binding audit trail for "why was this request denied" disputes — the `matched_rule` field is the citation.
+- **Operator dashboards.** Aggregate `ks.policy.evaluated` outcomes over time to surface tenants that frequently hit limits.
+- **Degraded-mode tracking.** `ks.policy.degraded_mode_applied` rate is a signal that PolicyScope or [ContextBudget](/docs/concepts/context-budgets) limits need to be revisited.
+- **SDK error mapping.** Clients map `denial_reason` to actionable error messages without scraping HTTP-level error bodies.
+
+## See also
+
+- [Policy scopes](/docs/concepts/policy-scopes) — the entity these events project
+- [Admission](/docs/concepts/admission) — the next gate after policy evaluation
+- [Tenancy](/docs/concepts/tenancy) — the hierarchy PolicyScopes resolve through
+- [Budget events](/docs/concepts/events/budget) — the run-level counterpart
+- [`GET /v1/ks/events/policy`](/docs/api/events/policy)
