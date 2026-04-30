@@ -1,0 +1,128 @@
+---
+title: Tenancy
+description: The KovaServe tenancy hierarchy — Organization → Project → Environment → Key — and how it scopes identity, policy, budgets, cache reuse, and data residency on every request.
+---
+
+**Tenancy** is the four-level hierarchy that scopes every resource, every policy decision, every cost record, and every cache reuse boundary in KovaServe. It is the identity foundation that the rest of the canonical model resolves against.
+
+```
+Organization                                    (billing root)
+└── Project                                     (logical app boundary)
+    └── Environment                             (prod / staging / dev)
+        └── Key                                 (Bearer credential)
+```
+
+Every request resolves to exactly one path through this hierarchy at admission time. The path is denormalized onto the [Run](/docs/concepts/runs) row, frozen on every [ModelCall](/docs/concepts/model-calls), and stamped onto the envelope of every [event](/docs/concepts/events). Tenancy is what makes "this is my data" enforceable end-to-end.
+
+## What each level owns
+
+| Level | Owns |
+|---|---|
+| [Organization](/docs/concepts/organizations) | Billing relationship, contract terms, top-level model ACLs, top-level rate limits, top-level data-boundary policy. |
+| [Project](/docs/concepts/projects) | A coherent application or product line — its [Sessions](/docs/concepts/sessions), [Runs](/docs/concepts/runs), [ContextArtifacts](/docs/concepts/context-artifacts), [memory](/docs/concepts/memory) entries, [tool catalogs](/docs/concepts/tool-catalogs), and policy overlays. |
+| [Environment](/docs/concepts/environments) | Stage isolation: production, staging, development. Independent traffic, independent deployments, independent cache namespaces. |
+| [Key](/docs/concepts/keys) | The Bearer credential that authenticates the request. Bound to one `(organization, project, environment)` triple. |
+
+## Hierarchy resolution
+
+Every request carries a Bearer key. The gateway resolves the key through the hierarchy at admission time:
+
+```
+Authorization: Bearer ks_...
+        │
+        ▼  hash and look up
+   key.id  ── bound to ──▶  key.organization_id, key.project_id, key.environment_id
+        │
+        ▼  load
+   PolicyScope (overlay: Organization → Project → Environment → Key)
+        │
+        ▼
+   AuthContext { organization_id, project_id, environment_id, key_id }
+```
+
+The resolved `AuthContext` is propagated to every module on every internal call. No module operates without it. See [identity and IDs](/docs/concepts/identity-and-ids) for the ID format on each level (bare 26-character Crockford ULIDs across the surface).
+
+## What tenancy scopes
+
+The tenancy path scopes — strictly — the following:
+
+| Surface | Scoping |
+|---|---|
+| Resource visibility | A Run, Session, Checkpoint, or ContextArtifact created under one path is visible only to keys whose path resolves to the same `organization_id` (with project- and environment-narrowing applied per [PolicyScope](/docs/concepts/policy-scopes)). |
+| Cache reuse | The [Cache-Aware Router](/docs/concepts/manifest-aware-routing) only considers replicas whose cache origin agrees with the resolved `context_share_scope`. Defaults to project — the same project's runs reuse cache; cross-project does not. |
+| KV state | KV exports and ContextArtifact bytes are stored under tenant-scoped paths. Cross-organization access is impossible by construction, not by check. |
+| Memory entries | [MemoryEntry](/docs/concepts/memory-entries) rows are namespaced by `(organization_id, project_id, scope_type, scope_id, namespace, key)`. The [`tenant`](/docs/concepts/memory-scopes) memory scope spans projects within an Organization; [`global`](/docs/concepts/memory-scopes) spans Organizations within a deployment under admin control only. |
+| Cost and metering | Every `usage_records` row carries `organization_id` and `project_id`. Run-level, project-level, and organization-level totals are sums over rows. |
+| Events | Every event envelope carries `organization_id`, `project_id`, and `environment_id` (see [event envelope](/docs/concepts/event-envelope)). |
+| Rate limits | Configured at any level; the most-specific applicable limit wins. Organization-level limits cap the sum of all projects beneath. |
+
+Cross-organization access — read, write, transition, reference — returns `404 Not Found`, identical to the response for a genuinely missing entity. ID probing leaks no information.
+
+## Wire shape
+
+A request and its resolved tenancy path:
+
+```http
+POST /v1/ks/runs
+Authorization: Bearer ks_...
+Content-Type: application/json
+
+{
+  "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+  "budget": { "cost_cents_limit": 5000 }
+}
+```
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+  "organization_id": "01J8X9Y2Z3K4M5N6P7Q8R9ORG1",
+  "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9PRJ1",
+  "environment_id": "01J8X9Y2Z3K4M5N6P7Q8R9ENV1",
+  "key_id": "01J8X9Y2Z3K4M5N6P7Q8R9KEY1",
+  "status": "CREATED",
+  "created_at": "2026-04-30T12:00:00Z"
+}
+```
+
+The four IDs travel together through the rest of the Run's lifetime — onto every Step, every ModelCall, every Checkpoint, every event.
+
+## Managed cloud and private deployments
+
+The tenancy hierarchy is identical across managed cloud and private deployment. A Run created against `https://api.kovaserve.com` and a Run created against an in-tenant private deployment both resolve through the same four levels, write the same four ID columns, and produce the same event envelopes.
+
+The deployment topology differs (managed cloud is multi-tenant; private is single-organization), but the model does not. A workload that starts on managed cloud and migrates to private infrastructure carries the same hierarchy with the same IDs.
+
+## Inheritance and overlay
+
+Policies and limits can be configured at any level. Resolution overlays the levels in order:
+
+```
+Organization defaults
+  ▼ overlay
+Project overrides
+  ▼ overlay
+Environment overrides
+  ▼ overlay
+Key restrictions
+  ▼
+Resolved value (frozen on the Run)
+```
+
+A more-specific level can narrow but not widen. A Project policy that adds a model when the Organization excludes it has no effect; the Organization exclusion wins. See [PolicyScope](/docs/concepts/policy-scopes#resolution) for the full overlay rule.
+
+The resolved values are denormalized onto the Run row at creation time. Subsequent changes at any level do not retroactively modify in-flight Runs — see [PolicyScope](/docs/concepts/policy-scopes) for the freezing semantics.
+
+## What tenancy is not
+
+- **Not authorization on its own.** Tenancy scopes resources. [PolicyScope](/docs/concepts/policy-scopes) decides whether the authenticated identity is allowed to act on those resources.
+- **Not network isolation.** Tenancy is a logical model. Network-level isolation (VPC, region pinning) is a deployment property carried in `data_boundary` on the resolved PolicyScope.
+- **Not user identity.** A Key is a service credential. End-user identity is the application's concern; KovaServe records the Key that produced each request and the application is responsible for mapping users to Keys.
+- **Not editable on a live Run.** A Run's resolved `(organization_id, project_id, environment_id, key_id)` is frozen at creation. Re-parenting is not an operation.
+
+## See also
+
+- [Organizations](/docs/concepts/organizations) · [Projects](/docs/concepts/projects) · [Environments](/docs/concepts/environments) · [Keys](/docs/concepts/keys) — the four levels in detail
+- [PolicyScope](/docs/concepts/policy-scopes) — the governance binding resolved through the hierarchy
+- [Identity and IDs](/docs/concepts/identity-and-ids) — ID format for each level
+- [Authentication](/docs/api/authentication) — Bearer keys and the scope they resolve to

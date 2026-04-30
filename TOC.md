@@ -118,11 +118,11 @@ Living roadmap for `docs.kovaserve.com`. Source of structure for `content/docs/`
 
 ### Tenancy — Blueprint §5.14
 
-- [ ] `concepts/tenancy.mdx` — overview of the hierarchy
-- [ ] `concepts/organizations.mdx`
-- [ ] `concepts/projects.mdx`
-- [ ] `concepts/environments.mdx`
-- [ ] `concepts/keys.mdx` — keys and key scopes
+- [x] `concepts/tenancy.mdx` — overview of the hierarchy
+- [x] `concepts/organizations.mdx`
+- [x] `concepts/projects.mdx`
+- [x] `concepts/environments.mdx`
+- [x] `concepts/keys.mdx` — keys and key scopes
 
 ### Events — Blueprint §8.3 (10 streams) + §8.4 envelope
 

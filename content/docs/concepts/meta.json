@@ -47,6 +47,11 @@
     "cached-tokens",
     "cost-model",
     "pricing-snapshots",
-    "cost-per-completed-run"
+    "cost-per-completed-run",
+    "tenancy",
+    "organizations",
+    "projects",
+    "environments",
+    "keys"
   ]
 }
