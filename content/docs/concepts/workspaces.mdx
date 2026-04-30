@@ -1,0 +1,197 @@
+---
+title: Workspaces
+description: A Workspace is the structured filesystem a runtime Run operates against — source binding, mutation log, snapshots, branch lineage, read/write policy — and the surface that makes file and process actions reproducible, branchable, and auditable.
+---
+
+A **Workspace** is the structured filesystem a [Run](/docs/concepts/runs) in [KovaServe runtime mode](/docs/concepts/managed-runtime) operates against. Every Run that touches files has exactly one Workspace, and every `FILE_READ`, `FILE_WRITE`, and `PROCESS_START` Step targets it. The Workspace gives the runtime a structured model — source binding, mutation log, snapshots, branch lineage, read/write policy — instead of an opaque mounted directory.
+
+```
+┌─ Workspace ────────────────────────────────────────────────┐
+│                                                            │
+│  source binding ─────▶ git@github.com:acme/payments        │
+│                        ref = main, commit = a3f2c81        │
+│                                                            │
+│  workspace root      ▶ /workspace                          │
+│                                                            │
+│  read/write policy   ▶ writable: /workspace                │
+│                        read-only: /etc, /usr               │
+│                        denied:    /workspace/.kova-secrets │
+│                                                            │
+│  mutation log        ▶ FILE_WRITE Step 12: src/refund.py   │
+│                        FILE_WRITE Step 17: tests/...       │
+│                        ...                                 │
+│                                                            │
+│  snapshots           ▶ snap_01.. (Checkpoint at Step 14)   │
+│                        snap_02.. (manual at Step 21)       │
+│                                                            │
+│  branch lineage      ▶ branched from snap_01.. by Run X    │
+│                                                            │
+└────────────────────────────────────────────────────────────┘
+```
+
+The Workspace / Artifact Manager is the [Layer 3 subsystem](/docs/concepts/runtime-architecture#workspace--artifact-manager) that owns the lifecycle.
+
+## What a Workspace records
+
+| Field | Purpose |
+|---|---|
+| `id` | ULID. |
+| `run_id` | The Run the Workspace is bound to. A Run owns at most one Workspace. |
+| `session_id` | The Session, when the Workspace persists across Runs in a Session. |
+| `source` | The source binding — Git URL + ref + resolved commit, or a registered tarball, or an explicitly empty workspace. |
+| `root` | The mount path inside the [sandbox](/docs/concepts/sandboxes) (default `/workspace`). |
+| `read_write_policy` | Writable paths, read-only paths, denied paths. |
+| `mutation_log_count` | How many `FILE_WRITE` Steps have committed mutations. |
+| `snapshots[]` | Snapshot ids and the Step boundaries they were captured at. |
+| `branch_lineage` | If this Workspace is a branch, the parent Workspace id and the snapshot it was seeded from. |
+| `created_at` | When the Workspace was provisioned. |
+| `archived_at` | When the Workspace was archived (after Run completion + retention). |
+
+The Workspace itself is the metadata surface. The bytes on disk live inside the sandbox; the byte snapshots live in object storage.
+
+## Source binding
+
+A Workspace's source binding determines what the workspace looks like at provisioning time. The accepted shapes:
+
+| Source type | Provisioning |
+|---|---|
+| `git` | `git clone <url>` + `git checkout <ref>`. The resolved commit hash is recorded so the Workspace is reproducible regardless of subsequent ref movement. |
+| `tarball` | A previously registered [WorkspaceArtifact](/docs/concepts/workspace-artifacts) of type `workspace_snapshot`. |
+| `branch` | Seeded from a parent Workspace's snapshot (set by the [branch flow](/docs/concepts/branch-flow); not a directly-creatable type). |
+| `empty` | Empty `/workspace`. Used by document-review and ops-style runs that build the workspace from tool outputs. |
+
+## Read/write policy
+
+The policy is a list of path rules evaluated in order. The runtime rejects a `FILE_WRITE` that targets a path outside the writable scope before any bytes hit disk.
+
+```json
+{
+  "writable_paths":  ["/workspace"],
+  "read_only_paths": ["/etc", "/usr", "/workspace/vendor"],
+  "denied_paths":    ["/workspace/.kova-secrets", "/workspace/**/.env"]
+}
+```
+
+| Rule | Effect |
+|---|---|
+| `writable_paths` | Reads and writes allowed. The default for the workspace root. |
+| `read_only_paths` | Reads allowed; writes denied. |
+| `denied_paths` | All access denied; surfaces a `policy denied` failure on the Step. |
+
+Denied access produces a [policy event](/docs/concepts/events/policy) and a `POLICY_DENY` failure class on the Step.
+
+## Mutation log
+
+The mutation log is the ordered record of every `FILE_WRITE` Step that committed bytes to the Workspace. Each entry records:
+
+| Field | Purpose |
+|---|---|
+| `step_id` | The Step that produced the mutation. |
+| `paths[]` | Paths written. |
+| `diff_artifact_id` | The [WorkspaceArtifact](/docs/concepts/workspace-artifacts) holding the diff. |
+| `applied_at` | When the bytes were committed. |
+
+The mutation log is what makes the [timeline](/docs/concepts/runtime-observability) able to show "this Run changed these files in this order, and here is the diff for each." It is also what makes a Run reproducible from its source commit + the mutation sequence.
+
+## Snapshots
+
+A Workspace snapshot is the byte-level state of the writable scope at a moment in time. Snapshots are produced:
+
+- on every [Checkpoint](/docs/concepts/checkpoints) when the [sandbox](/docs/concepts/sandboxes) profile sets `snapshot_policy = on_checkpoint`
+- on explicit operator request via `POST /v1/ks/runtime/workspaces/{id}/snapshot`
+- before [branches](/docs/concepts/branches), so the child Run starts from the parent's filesystem state
+
+Snapshots are stored in object storage as `workspace_snapshot` [WorkspaceArtifacts](/docs/concepts/workspace-artifacts) and surface as `runtime_state` [StateHandles](/docs/concepts/state-handles) on Checkpoints. Two child Runs branched from the same snapshot evolve independently.
+
+## Wire shape
+
+A Workspace bound to a Git source:
+
+```json
+{
+  "id":         "01J8X9Y2Z3K4M5N6P7Q8R9WSP1",
+  "run_id":     "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+  "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+  "source": {
+    "type":   "git",
+    "url":    "git@github.com:acme/payments.git",
+    "ref":    "main",
+    "commit": "a3f2c81b9e0d4f5a6b7c8d9e0f1a2b3c4d5e6f7a"
+  },
+  "root":  "/workspace",
+  "read_write_policy": {
+    "writable_paths":  ["/workspace"],
+    "read_only_paths": ["/etc", "/usr"],
+    "denied_paths":    ["/workspace/.kova-secrets"]
+  },
+  "mutation_log_count": 4,
+  "snapshots": [
+    { "id": "01J8X9Y2Z3K4M5N6P7Q8R9SNP1", "step_id": "01J8X9Y2Z3K4M5N6P7Q8R9STP4", "captured_at": "2026-04-30T12:08:00Z" }
+  ],
+  "branch_lineage": null,
+  "created_at": "2026-04-30T12:00:00Z"
+}
+```
+
+A Workspace seeded from a branch:
+
+```json
+{
+  "id":     "01J8X9Y2Z3K4M5N6P7Q8R9WSP2",
+  "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+  "source": {
+    "type": "branch",
+    "parent_workspace_id": "01J8X9Y2Z3K4M5N6P7Q8R9WSP1",
+    "snapshot_id":         "01J8X9Y2Z3K4M5N6P7Q8R9SNP1"
+  },
+  "root": "/workspace",
+  "read_write_policy": {
+    "writable_paths":  ["/workspace"],
+    "read_only_paths": ["/etc", "/usr"],
+    "denied_paths":    ["/workspace/.kova-secrets"]
+  },
+  "branch_lineage": {
+    "parent_workspace_id": "01J8X9Y2Z3K4M5N6P7Q8R9WSP1",
+    "parent_run_id":       "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    "snapshot_id":         "01J8X9Y2Z3K4M5N6P7Q8R9SNP1"
+  },
+  "created_at": "2026-04-30T12:30:00Z"
+}
+```
+
+## Persistence across Runs
+
+A Workspace's persistence is governed by the [sandbox profile](/docs/concepts/sandboxes) on the agent spec:
+
+| Sandbox `persistence` | Workspace lifetime |
+|---|---|
+| `none` | A fresh Workspace per Step. Rare; used only by stateless tool runs. |
+| `run` | One Workspace for the duration of the Run. The default. |
+| `session` | The Workspace persists across Runs in the same Session — useful for agents that pick up where the last Run left off. |
+
+A Workspace's archival is governed by the project's snapshot retention setting and the [PolicyScope](/docs/concepts/policy-scopes) `data_boundary`.
+
+## Endpoints
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /v1/ks/runtime/workspaces/{id}` | Fetch the Workspace metadata, mutation log count, and snapshot list. |
+| `POST /v1/ks/runtime/workspaces/{id}/snapshot` | Capture a snapshot on demand. Returns a `workspace_snapshot` WorkspaceArtifact id. |
+
+The Workspace itself is created implicitly when a Run is created with a `workspace.source` block — there is no separate "create workspace" call in the common path.
+
+## What a Workspace is not
+
+- **Not a [ContextArtifact](/docs/concepts/context-artifacts).** ContextArtifacts hold raw context bytes (tool outputs, file diffs, retrieved documents) referenced *from* context segments. A Workspace is the runtime's filesystem; its bytes become ContextArtifacts only when a `FILE_READ` brings them into context.
+- **Not a Git working tree.** The Git binding is one source type. Workspaces also support tarballs, branches, and empty roots.
+- **Not a long-lived shared mount.** Two Runs do not share a live Workspace. Cross-Run continuity goes through Session-scoped persistence + snapshots, not concurrent access.
+- **Not the sandbox.** The Workspace is what is mounted *into* a [sandbox](/docs/concepts/sandboxes); the sandbox is the execution boundary around it.
+
+## See also
+
+- [KovaServe runtime mode](/docs/concepts/managed-runtime) · [Runtime architecture](/docs/concepts/runtime-architecture)
+- [Workspace artifacts](/docs/concepts/workspace-artifacts) — the catalog of stdout, stderr, diffs, snapshots, test reports
+- [Sandboxes](/docs/concepts/sandboxes) — the execution boundary the Workspace mounts into
+- [Step types](/docs/concepts/step-types) — `FILE_READ`, `FILE_WRITE`, `PROCESS_START`
+- [Branches](/docs/concepts/branches) · [Branch flow](/docs/concepts/branch-flow) — branching from a Workspace snapshot
+- [Checkpoints](/docs/concepts/checkpoints) — checkpoints carry workspace snapshots as `runtime_state` StateHandles

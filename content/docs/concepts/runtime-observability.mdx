@@ -1,0 +1,176 @@
+---
+title: Runtime observability
+description: The runtime-native view of a Run — typed step timeline, model and tool actions, file diffs, checkpoint tree, branch lineage, failure classification, retry and resume reasons. Richer than BYO mode and a major Layer 3 surface.
+---
+
+**Runtime observability** is the Layer 3 surface that turns a Run's canonical execution record and its runtime artifacts into something a human or operator can read and act on. It is the runtime-native view of *what happened* — typed step timeline, model calls, tool invocations, file diffs, process actions, [WorkspaceArtifacts](/docs/concepts/workspace-artifacts), [Checkpoint](/docs/concepts/checkpoints) tree, [branch lineage](/docs/concepts/branch-flow), failure classification, retry and resume reasons.
+
+This is one of Layer 3's distinguishing surfaces. A [BYO runtime](/docs/concepts/byo-runtime) integration sees the canonical run, step, modelcall, and event records, but the runtime-native timeline — the *coding-agent UX* — is what makes [KovaServe runtime mode](/docs/concepts/managed-runtime) materially better than running an opaque agent loop on top of a thin SDK.
+
+```
+┌─ Run timeline view ──────────────────────────────────────────────────┐
+│                                                                      │
+│  ▣ 01  CREATED                          12:00:00                     │
+│  ▣ 02  THINK         "draft plan"       12:00:04                     │
+│  ▣ 03  TOOL_EXECUTE  read_file          12:00:08    ↪ stdout         │
+│  ▣ 04  MODEL_CALL    400 in / 1240 out  12:00:14    ↪ output.json    │
+│  ▣ 05  FILE_WRITE    src/refund.py      12:00:18    ↪ diff           │
+│  ▣ 06  CHECKPOINT    before risky action 12:00:19    ↪ snapshot      │
+│  ▣ 07  TOOL_EXECUTE  run_tests          12:01:42    ↪ test_report    │
+│       ...                                                            │
+│  ▣ 14  COMPLETED                         12:14:33    cost: 1.42 ¢    │
+│                                                                      │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+The Timeline / Event Projection Service is the [Layer 3 subsystem](/docs/concepts/runtime-architecture) that produces these views.
+
+## What the timeline shows
+
+| Surface | What it presents |
+|---|---|
+| Typed step list | Every [Step](/docs/concepts/steps) with its [type](/docs/concepts/step-types), timing, status, and short summary. |
+| Model actions | Every [ModelCall](/docs/concepts/model-calls) — model id, manifest id, prompt token / completion token / `cached_tokens` breakdown, cost, route rationale. |
+| Tool actions | Every [ToolInvocation](/docs/concepts/tool-invocations) — tool name, class, arguments (subject to redaction), result disposition, outcome, duration. |
+| Process actions | Every `PROCESS_START` Step — command, captured stdout/stderr artifacts, exit code, duration. |
+| File actions | Every `FILE_READ` and `FILE_WRITE` Step — paths, [diffs](/docs/concepts/workspace-artifacts), policy decisions. |
+| Artifacts | The [WorkspaceArtifact](/docs/concepts/workspace-artifacts) catalog inline with the producing Step — clickable, downloadable, streamable for stdout/stderr. |
+| Checkpoint tree | Every [Checkpoint](/docs/concepts/checkpoints) the Run produced, with the [trigger reason](/docs/concepts/runtime-architecture#checkpoint-integration-module) and the snapshot artifact attached. |
+| Branch lineage | The full [branch graph](/docs/concepts/branch-flow) rooted at this Run — parent Run, branch points, child Runs spawned, summary handoffs. |
+| Sub-run lineage | [Sub-run](/docs/concepts/sub-runs) dispatches and joins, with summary segments inline. |
+| Budget burn | Run-level [Budget](/docs/concepts/budgets) and [ContextBudget](/docs/concepts/context-budgets) consumption over time, with admission decisions marked. |
+| Policy decisions | [PolicyScope](/docs/concepts/policy-scopes) evaluations — allows, degrades, denies — surfaced inline at the Step that triggered them. |
+| Failure classification | The terminal Step's [failure class](/docs/concepts/runtime-execution-semantics#failure-classification), surfaced prominently. |
+| Retry / resume reasons | When a Step retried or the Run resumed, the *why* — transient substrate failure, lease loss, explicit operator action, budget warning. |
+
+## Endpoints
+
+The runtime exposes two timeline-shaped endpoints:
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /v1/ks/runtime/runs/{id}/timeline` | The structured timeline JSON — Steps, ModelCalls, ToolInvocations, artifacts, checkpoints, branches, budget burn, policy decisions. |
+| `GET /v1/ks/runtime/runs/{id}/artifacts` | The [WorkspaceArtifact](/docs/concepts/workspace-artifacts) catalog — flat listing with cursor pagination. |
+
+The dashboard renders the timeline endpoint into the runtime-native UI; the same endpoint is what the [`kova` CLI](/docs/cli/runs/tail) and any custom consumer would call.
+
+## Wire shape
+
+```http
+GET /v1/ks/runtime/runs/01J8X9Y2Z3K4M5N6P7Q8R9S0T1/timeline
+Authorization: Bearer ks_...
+```
+
+```json
+{
+  "run_id":  "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+  "status":  "COMPLETED",
+  "started_at":   "2026-04-30T12:00:00Z",
+  "completed_at": "2026-04-30T12:14:33Z",
+  "cost":   { "cost_cents": "1.4280", "gross_cost_cents": "2.0140", "cache_savings_cents": "0.5860" },
+  "outcome": "SUCCEEDED",
+  "steps": [
+    {
+      "id":         "01J8X9Y2Z3K4M5N6P7Q8R9STP3",
+      "type":       "TOOL_EXECUTE",
+      "started_at": "2026-04-30T12:00:08.000Z",
+      "completed_at":"2026-04-30T12:00:09.140Z",
+      "status":     "SUCCEEDED",
+      "tool_invocation_id": "01J8X9Y2Z3K4M5N6P7Q8R9TIV1",
+      "tool_name":  "read_file",
+      "tool_class": "file",
+      "artifacts":  [
+        { "id": "01J8X9Y2Z3K4M5N6P7Q8R9ART1", "type": "stdout", "byte_size": 4218 }
+      ]
+    },
+    {
+      "id":         "01J8X9Y2Z3K4M5N6P7Q8R9STP4",
+      "type":       "MODEL_CALL",
+      "started_at": "2026-04-30T12:00:14.000Z",
+      "completed_at":"2026-04-30T12:00:17.840Z",
+      "status":     "SUCCEEDED",
+      "model_call": {
+        "id":                  "01J8X9Y2Z3K4M5N6P7Q8R9MCL1",
+        "model_id":            "kova/llama-3.1-70b-instruct",
+        "context_manifest_id": "01J8X9Y2Z3K4M5N6P7Q8R9CMF1",
+        "prompt_tokens":       4218,
+        "completion_tokens":   1240,
+        "cached_tokens":       3920,
+        "cost_cents":          "0.0840",
+        "cache_savings_cents": "0.4180",
+        "node_id":             "01J8X9Y2Z3K4M5N6P7Q8R9NDE1"
+      }
+    },
+    {
+      "id":         "01J8X9Y2Z3K4M5N6P7Q8R9STP6",
+      "type":       "CHECKPOINT",
+      "trigger":    "before_file_write",
+      "checkpoint_id": "01J8X9Y2Z3K4M5N6P7Q8R9CKP1",
+      "snapshot_artifact_id": "01J8X9Y2Z3K4M5N6P7Q8R9SNP1"
+    }
+  ],
+  "checkpoints":  [ ... ],
+  "branches":     [ ],
+  "sub_runs":     [ ],
+  "budget_burn":  { "cost_cents_used": "1.4280", "cost_cents_limit": "5000.0000" }
+}
+```
+
+The timeline is paginated when a Run has hundreds of Steps — `?cursor=...&limit=...` follows the standard [pagination](/docs/api/pagination) contract.
+
+## Streaming the timeline
+
+For an in-flight Run, `Accept: text/event-stream` upgrades the endpoint to an event stream that emits new Steps, ModelCalls, ToolInvocations, and artifact captures as they happen. The dashboard uses this for live tailing; the CLI exposes it as `kova runs tail <run_id>`.
+
+## Failure classification surfaces
+
+When a Run terminates in `FAILED`, the timeline foregrounds the failure class on the terminal Step — see [failure classification](/docs/concepts/runtime-execution-semantics#failure-classification). The class is what makes the dashboard distinguish "the agent's tool plan was unsafe" from "the budget hit hard stop" from "the substrate had a transient failure that exhausted retries" from "the sandbox was killed for memory."
+
+| Class | Surface treatment |
+|---|---|
+| `BUDGET_HARD_STOP` | Budget burn pane is highlighted; the offending [budget event](/docs/concepts/events/budget) is linked. |
+| `CONTEXT_BUDGET_HARD_STOP` | The admission decision and the offending [ContextBudget event](/docs/concepts/events/budget) are linked. |
+| `POLICY_DENY` | The policy decision and the policy-scope chain that produced it are linked. |
+| `TOOL_BLOCKED` | The blocked [ToolInvocation](/docs/concepts/tool-invocations) and the disposition policy that blocked it are linked. |
+| `SUBSTRATE_FAILURE` | The retried ModelCalls and the substrate node id are linked. |
+| `SANDBOX_FAILURE` | The sandbox id and the resource that breached are linked. |
+| `RUNTIME_ERROR` | The Worker id, the offending Step, and the runtime-local state at crash time are linked (operator-only). |
+
+## Branch and sub-run lineage
+
+When a Run has child Runs (via [branch](/docs/concepts/branches) or [sub-run dispatch](/docs/concepts/sub-runs)), the timeline shows the lineage inline:
+
+- A `BRANCH` Step links to the child Run and the snapshot artifact the child was seeded from.
+- A `SUB_RUN_DISPATCH` Step links to the child Run; the matching `SUB_RUN_JOIN` Step shows the child's `summary_artifact_id` segment with a click-through to the full child transcript.
+
+Branches and sub-runs are presented as foldable subtrees so the parent Run's timeline stays readable.
+
+## Operator vs. developer views
+
+The timeline is the same data, surfaced two ways:
+
+| View | Role | Adds |
+|---|---|---|
+| Developer | Default view | Step list, model and tool actions, artifacts, checkpoints, budget burn, branch and sub-run lineage. |
+| Operator | Privileged view | Worker id, lease history, sandbox resource consumption, full runtime-local state at any Step boundary, raw `kv_events` for substrate-side state lifecycle, and route rationale per ModelCall. |
+
+Operator surfaces depend on the resolved [PolicyScope](/docs/concepts/policy-scopes) and the deployment's role bindings.
+
+## Relationship to [events](/docs/concepts/events)
+
+The timeline is *projected* from the canonical event streams — `ks.run.*`, `ks.step.*`, `ks.model_call.*`, `ks.tool.invocation.*`, `ks.process.*`, `ks.file.write.applied`, `ks.checkpoint.*`, `ks.branch.created`, `ks.subrun.*`, `ks.budget.*`, `ks.context.budget.*`, `ks.policy.*` — not from a separate timeline log. A consumer that wants the same data outside the runtime UI subscribes to the events directly and rebuilds whatever shape it wants.
+
+## What runtime observability is not
+
+- **Not a tracing replacement.** OpenTelemetry export is available separately ([guide](/docs/guides/opentelemetry-export)); the timeline is product UX, not a span store.
+- **Not a metrics dashboard.** Aggregate metering rolls up through the [cost-per-completed-run](/docs/concepts/cost-per-completed-run) surface and the metering API; the timeline is per-Run.
+- **Not a substitute for evaluation.** Eval and quality scoring happen in separate surfaces; the timeline is what the Run *did*, not whether the Run *was good*.
+
+## See also
+
+- [Runtime architecture](/docs/concepts/runtime-architecture) — the Timeline / Event Projection Service
+- [KovaServe runtime mode](/docs/concepts/managed-runtime) — the product mode the timeline is the major UX surface of
+- [Runtime execution semantics](/docs/concepts/runtime-execution-semantics) — the Step-by-Step contract the timeline visualizes
+- [Workspace artifacts](/docs/concepts/workspace-artifacts) — the catalog the timeline surfaces inline
+- [Events](/docs/concepts/events) · [Runtime events](/docs/concepts/events/runtime) — the source streams the timeline projects from
+- [OpenTelemetry export](/docs/guides/opentelemetry-export) — the separate tracing surface
