@@ -1,0 +1,161 @@
+---
+title: Tool context disposition
+description: The ToolContextDisposition decision — `inline_full | inline_preview | summary_required | artifact_ref | drop | blocked` — applied to every tool definition and tool output before it enters context.
+---
+
+A **ToolContextDisposition** is the per-tool decision the **Tool Context Governance** subsystem applies to every tool definition and every tool output before it enters a [ContextManifest](/docs/concepts/context-manifests). It is a closed enum with six values:
+
+| Disposition | Meaning |
+|---|---|
+| `inline_full` | The full definition or output is inlined into the manifest. |
+| `inline_preview` | A preview (typically the first 512 chars or a structured digest) is inlined; the full payload is offloaded as a [ContextArtifact](/docs/concepts/context-artifacts). |
+| `summary_required` | A compact summary must be produced (by the runtime or the managed compactor); the summary enters context with a [CompactionRecord](/docs/concepts/compaction-records). |
+| `artifact_ref` | Only the artifact reference enters context — no inline payload, no preview. The model sees a pointer it can dereference through a tool call. |
+| `drop` | The output is recorded for audit but does not enter context. |
+| `blocked` | The output cannot enter context **and** is not retained. The tool call is treated as a policy denial. |
+
+ToolContextDispositions are KovaServe-novel — no vendor exposes a summary-vs-full pattern, and this fills a real gap for tool-heavy long-running runs where raw outputs would otherwise overwhelm the context window.
+
+## When dispositions are computed
+
+Dispositions are produced at two moments in the hot path:
+
+1. **At manifest assembly time, for tool definitions.** When a [ToolCatalog](/docs/concepts/tool-catalogs) is referenced, every definition's `cache_disposition` default is evaluated against the resolved policy; the policy may override `inline_full` to `inline_preview` or even `drop` depending on risk.
+2. **At tool result registration time, for tool outputs.** When the runtime calls `POST /v1/ks/tools/results` with a fresh tool output, governance evaluates the output against the policy and returns the disposition.
+
+The decision is recorded on the originating segment so the manifest's `admission.transformations[]` carries the lineage.
+
+## Inputs
+
+The Tool Context Governance evaluator considers:
+
+| Input | Source |
+|---|---|
+| Tool definition | The catalog row (`risk_level`, `cache_disposition` default, schema). |
+| Output size in tokens and bytes | Computed at registration. |
+| Output type | Tool result MIME type. |
+| `policy_scope.tool_policy_ref` | The policy bound by the resolved [PolicyScope](/docs/concepts/policy-scopes). |
+| `context_budget` headroom | Whether inlining would push the manifest past `tool_result_token_limit`. |
+| `risk_level` | From the definition; `high` defaults to stricter dispositions. |
+| Run history | Whether this tool has produced repeated identical outputs (deduping pressure). |
+
+## Outputs
+
+A disposition decision returns a structured record:
+
+```json
+{
+  "disposition": "inline_preview",
+  "risk_level": "medium",
+  "checkpoint_recommended": true,
+  "context_disposition": {
+    "max_inline_tokens": 512,
+    "artifact_required": true,
+    "redaction_policy": "redact_secrets"
+  },
+  "reason": "tool_result_token_limit_pressure"
+}
+```
+
+| Field | Purpose |
+|---|---|
+| `disposition` | The chosen value. |
+| `risk_level` | Carried through from the definition or escalated by the policy. |
+| `checkpoint_recommended` | Whether the runtime should checkpoint before invoking this tool. Used for irreversible writes. |
+| `context_disposition` | Structured carrier for inline-size limits, whether an artifact is required, and the redaction policy applied. |
+| `reason` | Tag explaining why the disposition was chosen — used by dashboards and audit. |
+
+## How each disposition is applied
+
+| Disposition | Effect on the next manifest |
+|---|---|
+| `inline_full` | The full payload becomes a `tool_output` segment in the active breakpoint. Token-counted, byte-counted, retained per segment retention. |
+| `inline_preview` | Preview becomes a `tool_output` segment with `artifact_ref_id` pointing at the artifact holding the full payload. The model sees the preview; it can resolve the artifact through a tool call. |
+| `summary_required` | The runtime (or managed compactor) produces a summary. The summary becomes a `tool_output_summary` segment. A [CompactionRecord](/docs/concepts/compaction-records) is registered with the original output as a source. |
+| `artifact_ref` | A short reference segment is added — name, mime_type, byte_count, artifact id. No payload, no preview. |
+| `drop` | No segment is added. The artifact is written for audit (per `audit_dropped_outputs` policy) but the manifest does not reference it. |
+| `blocked` | The tool call is rejected at registration. The runtime sees a policy denial; nothing enters context, nothing is retained. |
+
+## Policy evaluation
+
+The evaluator runs deterministic rules on top of the input set. The policy file (referenced by `policy_scope.tool_policy_ref`) is a structured rule set:
+
+```yaml
+default: inline_preview
+rules:
+  - match:
+      tool_name: shell_exec
+      risk_level: high
+    decision: summary_required
+    checkpoint_recommended: true
+  - match:
+      mime_type: image/*
+    decision: artifact_ref
+  - match:
+      output_token_count_gt: 4000
+    decision: summary_required
+  - match:
+      tool_name: read_secrets
+    decision: blocked
+```
+
+Rules are evaluated in declaration order; first match wins. The evaluator records which rule fired in the `reason` field.
+
+## Risk and checkpoint advisories
+
+`risk_level` is informational on definitions but actionable on dispositions:
+
+| `risk_level` | Default behavior |
+|---|---|
+| `low` | No checkpoint advisory. |
+| `medium` | `checkpoint_recommended: true` for first invocation in a Run. |
+| `high` | `checkpoint_recommended: true` always; `summary_required` or stricter disposition unless explicitly allowed. |
+
+`checkpoint_recommended` is read by the runtime, which decides whether to take a [Checkpoint](/docs/concepts/checkpoints) before invocation. The advisory is non-binding — it appears in the disposition record and on dashboards but the runtime is free to ignore it under explicit operator override.
+
+## Wire surface
+
+```http
+POST /v1/ks/tools/check-policy
+Authorization: Bearer ks_...
+Content-Type: application/json
+
+{
+  "tool_catalog_id": "01J8X9Y2Z3K4M5N6P7Q8R9TC01",
+  "tool_name": "shell_exec",
+  "output_size_tokens": 8200,
+  "output_mime_type": "text/plain",
+  "context_budget_headroom_tokens": 4000
+}
+```
+
+```json
+{
+  "disposition": "summary_required",
+  "risk_level": "high",
+  "checkpoint_recommended": true,
+  "context_disposition": {
+    "max_inline_tokens": 0,
+    "artifact_required": true
+  },
+  "reason": "high_risk_tool"
+}
+```
+
+The runtime calls `check-policy` ahead of registering a tool result when it wants to plan transformations (compaction, artifact upload) before the registration call.
+
+## What ToolContextDispositions are not
+
+- **Not the runtime's decision.** Dispositions are produced by Layer 2 governance. The runtime supplies inputs and reacts to outputs.
+- **Not advisory.** `blocked` rejects the tool call. The other values are mandatory shapes for inclusion in context.
+- **Not free-form.** The six values are closed.
+- **Not retroactive.** A disposition applies to the registration it is computed for; previously registered outputs keep their original disposition.
+
+## See also
+
+- [Tool catalogs](/docs/concepts/tool-catalogs) — the source of `cache_disposition` defaults and `risk_level`
+- [Tool governance](/docs/concepts/tool-governance) — the policy enforcement model
+- [Policy scopes](/docs/concepts/policy-scopes) — `tool_policy_ref` lives here
+- [Compaction records](/docs/concepts/compaction-records) — produced under `summary_required`
+- [Context artifacts](/docs/concepts/context-artifacts) — produced under `inline_preview` and `artifact_ref`
+- [`POST /v1/ks/tools/check-policy`](/docs/api/tools/catalogs/get)
