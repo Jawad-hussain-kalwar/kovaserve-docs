@@ -1,0 +1,167 @@
+---
+title: Branch flow
+description: The step-by-step transition from a Checkpoint into a branched child Run — parent BRANCHING window, child RECOVERING → RESUMING → RUNNING, budget allocation, scope inheritance.
+---
+
+The **branch flow** is the ordered sequence the Checkpoint Manager and Canonical Execution Service run to fork a [branch](/docs/concepts/branches) from a [Checkpoint](/docs/concepts/checkpoints). It is closely related to the [resume flow](/docs/concepts/resume-flow) — both restore a Run from a frozen Checkpoint — but the lineage and side-effects on the parent differ.
+
+The defining differences from resume:
+
+- The parent Run is preserved and (if non-terminal) continues to run.
+- The child Run carries a `branch_from` pointer in addition to `restored_from`.
+- Budget consumption resets on the child; configuration is inherited but counters start at zero.
+- The parent transitions briefly through `BRANCHING` on the [Run state machine](/docs/concepts/run-state-machine) for the metadata window.
+
+## The transitions
+
+```
+Parent Run (non-terminal):
+
+  ... ─▶ RUNNING ─▶ BRANCHING ─▶ RUNNING
+                     │
+                     │ (branch metadata window)
+                     │
+Child Run:           ▼
+  CREATED ─▶ READY ─▶ RECOVERING ─▶ RESUMING ─▶ RUNNING
+                                              └──▶ FAILED
+```
+
+If the parent is already terminal (`COMPLETED`, `FAILED`, `CANCELED`) when the branch is requested, no transition is recorded against the parent — the parent row is frozen. The branch lineage is recorded only on the child.
+
+## The flow
+
+### 1. Validate the source Checkpoint
+
+The Checkpoint must be `VALIDATED` or `RESTORED`. A `CAPTURE_FAILED` or `VALIDATION_FAILED` Checkpoint is rejected with `error.code = "checkpoint_not_restorable"`. The Checkpoint Manager increments the in-flight restore ref-count and transitions the Checkpoint to `RESTORING` (or keeps it in `RESTORING` if it is already there from a concurrent branch or resume).
+
+### 2. Validate scope and inheritance
+
+The branch request runs under the requesting API key's scope. The control plane verifies:
+
+- The requesting key has permission to read the parent Run and the source Checkpoint.
+- The requested [PolicyScope](/docs/concepts/policy-scopes) for the child is no more permissive than the parent's. A branch cannot escape its parent's scope.
+- The requested [Budget](/docs/concepts/budgets) limits are no higher than the parent's configuration. Budgets can only narrow on a branch, never expand.
+- The optional override [Session](/docs/concepts/sessions) belongs to the same `(tenant_id, project_id)` as the parent.
+
+Any violation rejects the branch with `400 Bad Request` and an explicit `error.code`.
+
+### 3. Mark the parent `BRANCHING`
+
+If the parent is non-terminal, its state advances to `BRANCHING` for the metadata window. This is observable on the parent's timeline and on every event tagged to the parent during the window. The parent is **not** paused — its in-flight Steps continue. `BRANCHING` is purely an annotation that signals "a fork is being created."
+
+A terminal parent skips this step.
+
+### 4. Create the child Run row
+
+The Canonical Execution Service writes a new Run row with:
+
+| Field | Value |
+|---|---|
+| `id` | Fresh 26-char ULID. |
+| `state` | `CREATED`, advancing to `READY` immediately. |
+| `branch_from` | Parent Run's `id`. |
+| `restored_from` | Source Checkpoint's `id`. |
+| `parent_run_id` | Inherited from parent **only if** the request explicitly opts in — by default a branch is its own root, not a sub-run. |
+| `session_id` | Parent's `session_id`, or the override session if provided. |
+| `policy_scope_ref` | Parent's `policy_scope_ref`, or a narrower scope if requested. |
+| `budget` | Parent's Budget shape (limits inherited, consumed-to-date reset to zero), or a narrower override. |
+| `context_budget` | Same inheritance pattern as Budget. |
+
+The child enters its own `RECOVERING` state — from this point the flow follows the same six-step restore plan as a plain resume.
+
+### 5. Run the restore plan
+
+Steps 1–6 of the [resume flow](/docs/concepts/resume-flow) execute against the child Run:
+
+1. Load checkpoint manifest.
+2. Validate `ContextManifest` and `ContextArtifacts`.
+3. Validate model / tokenizer / renderer / scope compatibility (against the child's scope, which may be narrower than the parent's).
+4. Plan KV restore (optional).
+5. Reconstruct active context (manifest replay if KV unavailable).
+6. Route and transition `RECOVERING → RESUMING → RUNNING`.
+
+If the child's narrower scope is incompatible with the Checkpoint's compatibility vector — for example, branching into a more restrictive `context_share_scope` than the original — the Checkpoint Manager rejects with `checkpoint_incompatible` before any KV work begins.
+
+### 6. Release the parent
+
+The parent transitions `BRANCHING → RUNNING` once the child Run row is durable and has begun its restore plan. Crucially, the parent's release does **not** wait for the child to reach `RUNNING` — the parent is decoupled from the child's restore latency. The child completing its restore is recorded against the [Checkpoint state machine](/docs/concepts/checkpoint-state-machine) (`RESTORING → RESTORED` when the last in-flight restore completes), not against the parent FSM.
+
+A terminal parent skips this step.
+
+## What the child sees
+
+| Element | Inherited from parent | Reset / fresh |
+|---|---|---|
+| Frozen `ContextManifest` snapshot | Yes — from the Checkpoint, identical to a resume. | — |
+| Referenced `ContextArtifacts` | Yes — re-resolved. | — |
+| Compaction lineage | Yes — same view as a resume. | — |
+| KV cache state | Best-effort, same as resume. | — |
+| Budget shape | Yes (overridable downward). | Consumed counters: zero. |
+| ContextBudget shape | Yes (overridable downward). | Consumption: zero. |
+| PolicyScope | Yes (overridable narrower). | — |
+| ToolCatalog | Yes. | — |
+| Session binding | Default: parent's Session. Overridable. | — |
+| `current_manifest_id` on the bound Session | Set to the Checkpoint's manifest snapshot at branch time. | — |
+| Observability surface | New. The child has its own timeline; events are tagged to the child only. | All event counters reset. |
+| `branch_from` | Set to the parent's `id`. | — |
+| Identity | New `run_id`, new `created_at`, fresh idempotency space. | — |
+
+## Failure paths
+
+| Failure | Outcome |
+|---|---|
+| Source Checkpoint not restorable | Reject before the parent transitions. Parent stays in `RUNNING`; no child row. |
+| Scope violation (request asks for more permissive scope than parent) | Reject with `400 Bad Request`. No state changes. |
+| Budget violation (request asks for higher limit than parent) | Reject with `400 Bad Request`. |
+| Restore step 1–3 fails on the child | Child lands in `FAILED`. Parent is released from `BRANCHING` regardless. The Checkpoint records a `RESTORE_FAILED` for this attempt. |
+| KV restore fails (step 4) | Soft fall-through to manifest replay; child still reaches `RUNNING`. |
+
+## Wire shape
+
+```http
+POST /v1/ks/runs/01J8X9Y2Z3K4M5N6P7Q8R9S0T1/branch
+Authorization: Bearer ks_...
+Content-Type: application/json
+
+{
+  "checkpoint_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T7",
+  "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+  "budget": {
+    "cost_cents_limit": 5000,
+    "step_count_limit": 100
+  },
+  "policy_scope_ref": "01J8X9Y2Z3K4M5N6P7Q8R9P0K0",
+  "resume_marker": "step:7"
+}
+```
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9S0V2",
+  "branch_from": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+  "restored_from": "01J8X9Y2Z3K4M5N6P7Q8R9S0T7",
+  "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+  "state": "RECOVERING",
+  "restore_plan": {
+    "kv_restore": "warm",
+    "manifest_replay": "ready",
+    "target_node_id": "01J8X9Y2Z3K4M5N6P7Q8R9N002"
+  },
+  "policy_scope": "project:01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+  "budget": {
+    "cost_cents_limit": 5000,
+    "cost_cents_consumed": 0,
+    "step_count_limit": 100,
+    "step_count_consumed": 0
+  }
+}
+```
+
+## See also
+
+- [Branches](/docs/concepts/branches) — the entity-level concept
+- [Checkpoints](/docs/concepts/checkpoints) — the surface every branch forks from
+- [Resume flow](/docs/concepts/resume-flow) — the non-forking variant of the same restore plan
+- [Run state machine](/docs/concepts/run-state-machine) — `BRANCHING` on the parent
+- [Checkpoint state machine](/docs/concepts/checkpoint-state-machine) — `RESTORING` ref-counting across concurrent branches
+- [`POST /v1/ks/runs/{id}/branch`](/docs/api/runs/branch)

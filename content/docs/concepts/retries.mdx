@@ -1,0 +1,89 @@
+---
+title: Retries
+description: Runtime retry semantics — which Steps retry in place, which require resume, and how retry interacts with the Step state machine.
+---
+
+A **retry** is the re-execution of a [Step](/docs/concepts/steps) that previously failed, without rolling the [Run](/docs/concepts/runs) back to a [Checkpoint](/docs/concepts/checkpoints) or restarting from zero. Retries are a runtime concern; the control plane provides the framing (Step state, idempotency, lineage) and lets the runtime decide whether a given failure is retryable.
+
+The contract: **only safe and idempotent Steps retry in place.** Anything else is escalated to a [resume](/docs/concepts/resume-flow) from the most recent Checkpoint, or to terminal `FAILED`.
+
+## Retryability by Step type
+
+The 19-value [StepType](/docs/concepts/step-types) enum partitions cleanly along the retry axis. The runtime is responsible for knowing which classes are safe; the control plane records the choice on the Step row for audit.
+
+| Class | Step types | Default retryability |
+|---|---|---|
+| Pure model interaction | `MODEL_CALL`, `THINK`, `OBSERVE` | Retry in place. The substrate is idempotent at the request level; re-issuing a `MODEL_CALL` produces a fresh ModelCall with a fresh `request_id`. |
+| Read-only side effects | `FILE_READ`, `MEMORY_READ` | Retry in place. Multiple reads of the same target are safe. |
+| Pure planning | `TOOL_PLAN` | Retry in place. Planning produces output; it does not commit. |
+| Write-side tool execution | `TOOL_EXECUTE`, `FILE_WRITE`, `PROCESS_START` | Retry only if the runtime has marked the tool as idempotent (via `tool_definition.idempotent: true` in the [ToolCatalog](/docs/concepts/tool-catalogs)). Otherwise: escalate to resume from a prior Checkpoint, or fail. |
+| Memory write | `MEMORY_WRITE` | Retry in place. Memory writes are versioned and last-write-wins under the same `(scope, namespace, key)`. |
+| Compaction | `COMPACT` | Retry in place. Compaction is idempotent at the lineage level — re-running produces a fresh `CompactionRecord` and the runtime can choose which to keep. |
+| Sub-run lifecycle | `SUB_RUN_DISPATCH`, `SUB_RUN_JOIN` | Retry in place at the join (`SUB_RUN_JOIN` reads the child's already-attached summary). Dispatch is retryable only when the child Run was never created — the control plane returns `409 Conflict` on a duplicate dispatch with the same idempotency key. |
+| Lifecycle markers | `CHECKPOINT`, `PAUSE`, `RESUME`, `BRANCH`, `COMPLETE`, `FAIL` | Not retried. These are explicit lifecycle transitions; their failure path is to back out the lifecycle change, not to repeat it. |
+
+## Step state during a retry
+
+Retry is a transition on the [Step state machine](/docs/concepts/step-state-machine):
+
+```
+Step n.attempt 1:  PENDING → STARTED → FAILED
+                                          │
+                                          ▼ retry
+Step n.attempt 2:  PENDING → STARTED → SUCCEEDED
+```
+
+Each retry attempt is a **new** Step row with `attempt_number` incremented and `previous_step_id` pointing at the failed predecessor. The original failed Step row is never mutated — `FAILED` is terminal on the Step FSM. This preserves the audit trail: the timeline shows attempt 1 failed, attempt 2 succeeded, and the lineage is direct.
+
+| Field | Value on a retry |
+|---|---|
+| `id` | Fresh ULID. |
+| `attempt_number` | Predecessor's `attempt_number + 1`. |
+| `previous_step_id` | Predecessor's `id`. |
+| `step_type` | Same as predecessor. |
+| `idempotency_key` | Inherited from predecessor when the underlying operation is keyed; otherwise fresh. |
+| `state` | `PENDING` on creation. |
+
+The Step's parent [Run](/docs/concepts/runs) does not change state during retry — the Run remains in `RUNNING`. Retries are entirely inside the Step layer.
+
+## Idempotency keys
+
+For Step types that interact with external systems (`TOOL_EXECUTE`, `FILE_WRITE`, `PROCESS_START`, `SUB_RUN_DISPATCH`, `MEMORY_WRITE`), the runtime supplies an `idempotency_key`. The control plane records it on the Step row and forwards it to the executing surface.
+
+| Surface | Key behavior |
+|---|---|
+| Tool gateway | The same key returns the cached prior result if one exists; otherwise executes and caches. |
+| Memory Store | The same `(scope, namespace, key, idempotency_key)` is a no-op on a duplicate write. |
+| Sub-run dispatch | Duplicate dispatch returns the prior child Run's id with `409 Conflict` and `error.code = "duplicate_dispatch"`. |
+
+A retry that supplies the **same** idempotency key as the failed predecessor receives the same answer the predecessor would have if it had succeeded. A retry that supplies a **fresh** key re-executes from scratch. The runtime chooses based on whether it wants to re-attempt the original operation or replace it.
+
+## When retry is not safe
+
+The runtime escalates to a [resume](/docs/concepts/resume-flow) from the most recent Checkpoint when:
+
+- The failed Step is non-idempotent and no idempotency key was supplied at the gateway.
+- The failed Step's side effects landed partially (e.g. a `FILE_WRITE` that completed half the bytes before crashing). The Checkpoint immediately preceding the failure is the safe re-entry point.
+- The failure cause indicates the Step's preconditions are no longer valid (a `MODEL_CALL` that failed with `ContextBudget HARD_STOP`, a `TOOL_EXECUTE` that failed with `policy_denied` after a policy roll-forward).
+
+Resume from a Checkpoint creates a new Run with `restored_from` pointing at the Checkpoint, not a new Step within the same Run. The decision boundary is sharp: if a fresh Step row in the same Run is not enough, the next escalation tier is a fresh Run with a Checkpoint anchor.
+
+## Retry budgets
+
+Retries count against the Run-level [Budget](/docs/concepts/budgets) like any other Step. A Run that exhausts its `step_count` budget on retries cannot continue retrying — `Budget.HARD_STOP` is enforced on every Step admission, retry or not.
+
+[ContextBudget](/docs/concepts/context-budgets) admission is also re-run on every retry. A retry of a `MODEL_CALL` with a manifest that has grown past `active_token_limit` since the original attempt will be rejected at admission and must compact or offload first.
+
+## What retries are not
+
+- **Not idempotency on their own.** Retry replays a Step; the operation underneath the Step must itself be idempotent (or carry an idempotency key) for the retry to be safe.
+- **Not a substitute for [Checkpoints](/docs/concepts/checkpoints).** Retry handles transient failures within a Step. Checkpoints handle bigger failures that span multiple Steps or require resume on a different node.
+- **Not invisible.** Every retry is a new Step row, fully traceable. There is no "retry count" hidden inside a single Step.
+
+## See also
+
+- [Steps](/docs/concepts/steps) — the entity each retry attempt produces
+- [Step state machine](/docs/concepts/step-state-machine) — the FSM that retries operate on
+- [Step types](/docs/concepts/step-types) — the canonical 19-value enum and its retry classes
+- [Resume flow](/docs/concepts/resume-flow) — the escalation tier above retry
+- [Budgets](/docs/concepts/budgets) — Run-level limits that bound retry count

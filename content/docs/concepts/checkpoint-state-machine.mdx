@@ -1,0 +1,133 @@
+---
+title: Checkpoint state machine
+description: The Checkpoint FSM — REQUESTED, CAPTURING, STORED, VALIDATED, RESTORING, RESTORED — plus capture, validation, and restore failure terminals.
+---
+
+The **Checkpoint state machine** is the lifecycle every [Checkpoint](/docs/concepts/checkpoints) travels from the moment it is requested through capture, validation, restore, and any failure path. It is enforced by the **Checkpoint Manager**; illegal transitions are rejected at the service layer.
+
+## The graph
+
+```
+REQUESTED ─▶ CAPTURING ─┬─▶ STORED ─▶ VALIDATED ─┬─▶ RESTORING ─▶ RESTORED
+                         │                        │
+                         │                        └─▶ RESTORE_FAILED
+                         │
+                         ├─▶ CAPTURE_FAILED
+                         │
+                         └─▶ STORED ─▶ VALIDATION_FAILED
+```
+
+Forward states form a strict line — each must reach the next before the chain can continue. Failure terminals (`CAPTURE_FAILED`, `VALIDATION_FAILED`, `RESTORE_FAILED`) are durable and frozen; a Checkpoint that lands in any of them is not eligible for restore and must be re-captured from a live Run.
+
+## States
+
+### `REQUESTED`
+
+A Checkpoint has been requested at a Step boundary — either by the runtime (`POST /v1/ks/checkpoints`), by a runtime-supplied checkpoint trigger (before a risky tool call, on budget warning, on a periodic interval), or by an operator. No bytes have moved yet. The Checkpoint row exists; `state_handles` is empty; `storage_refs` is empty.
+
+`REQUESTED` is the only state in which a Checkpoint can be canceled cleanly; once `CAPTURING` begins, cancellation requires unwinding partial writes.
+
+**Transitions out:** `CAPTURING` (capture begins).
+
+### `CAPTURING`
+
+The Checkpoint Manager is freezing the manifest snapshot, gathering [StateHandle](/docs/concepts/state-handles)s, and writing bytes to object storage. During capture:
+
+- The `ContextManifest` is snapshotted as a `context_manifest` StateHandle.
+- Referenced [ContextArtifacts](/docs/concepts/context-artifacts) are validated as readable; their object-storage URIs are recorded as `artifact_bundle` StateHandles.
+- Relevant [CompactionRecord](/docs/concepts/compaction-records)s are referenced.
+- KV cache export is requested from the Layer 1 Node Agent if the runtime asked for `include_kv: true`. Export is best-effort — failure to export KV does not fail the Checkpoint.
+- Runtime-local state, when present, is captured as a `runtime_state` StateHandle.
+
+The Run holding this Checkpoint is in `CHECKPOINTING` on the [Run state machine](/docs/concepts/run-state-machine) for the duration of capture.
+
+**Transitions out:** `STORED` (all logical bytes durable), `CAPTURE_FAILED`.
+
+### `STORED`
+
+All bytes required for logical-context restore — manifest snapshot, artifact references, compaction lineage refs — are durable in object storage. KV exports, if attempted, are also durable at this point or have been silently skipped. The compatibility vector is recorded.
+
+`STORED` is a transient state. The Checkpoint Manager runs validation immediately after.
+
+**Transitions out:** `VALIDATED` (validation succeeds), `VALIDATION_FAILED`.
+
+### `VALIDATED`
+
+The Checkpoint Manager has verified that the manifest, artifacts, compaction records, and any KV exports are coherent: every artifact is readable from object storage and matches its recorded hash; the compatibility vector is well-formed; the manifest's segment list resolves cleanly; KV exports, if present, are decodable.
+
+`VALIDATED` is the **eligible-for-restore** state. A Checkpoint must reach `VALIDATED` before any Run can resume from it. It is also the state Checkpoints sit in long-term, between capture and any subsequent restore.
+
+**Transitions out:** `RESTORING` (a new Run is restoring from this Checkpoint).
+
+### `RESTORING`
+
+A new Run is reconstructing context (and optionally KV state) from this Checkpoint. The resuming Run is in `RECOVERING → RESUMING` on the [Run state machine](/docs/concepts/run-state-machine); the Checkpoint stays in `RESTORING` for the entire window.
+
+A single `VALIDATED` Checkpoint can be restored from many times — each restore creates a new Run, but the underlying Checkpoint row persists. Concurrent restores from the same Checkpoint are permitted; the Checkpoint state is ref-counted internally so it does not leave `RESTORING` until the last in-flight restore completes.
+
+**Transitions out:** `RESTORED` (resume succeeds, last in-flight restore complete), `RESTORE_FAILED`, `VALIDATED` (when partial restores complete and others remain in flight; final completion lands in `RESTORED`).
+
+### `RESTORED`
+
+Every restore from this Checkpoint has completed successfully and the resumed Runs have reached `RUNNING`. `RESTORED` is the post-restore eligible state — a Checkpoint that has been restored from at least once and currently has no in-flight restores.
+
+`RESTORED` is **not** terminal. Subsequent restores from the same Checkpoint move it back into `RESTORING` and out again on completion. The state simply records "this Checkpoint has been used."
+
+**Transitions out:** `RESTORING` (another restore begins).
+
+### `CAPTURE_FAILED` (terminal)
+
+Capture failed before durability. The cause is recorded in `error_reason` (object storage write failure, runtime-state collection failure, missing referenced artifact, etc.). No partial bytes remain — the Checkpoint Manager unwinds aborted writes. The Run holding the Checkpoint exits `CHECKPOINTING` back to `RUNNING`; it is not implicated by the capture failure.
+
+### `VALIDATION_FAILED` (terminal)
+
+Bytes are durable but coherence checks failed. The most common causes are corrupted artifact contents (hash mismatch), an unreadable manifest snapshot, or a compatibility vector that fails its own well-formedness check. Validation failure does not delete the bytes — they remain in object storage for offline inspection — but the Checkpoint is marked unrestorable.
+
+### `RESTORE_FAILED` (terminal for this restore attempt)
+
+A specific restore attempt failed. The Checkpoint itself is not poisoned: a `RESTORE_FAILED` outcome belongs to the resuming Run, not to the Checkpoint row. If other restores from the same Checkpoint are still in flight or succeed later, the Checkpoint returns to `RESTORING` or `RESTORED` accordingly. The `RESTORE_FAILED` event is preserved for audit on the resuming Run's [Run state machine](/docs/concepts/run-state-machine), which transitions to `FAILED`.
+
+## Drivers
+
+| Driver | Effect |
+|---|---|
+| `POST /v1/ks/checkpoints` | Creates the row in `REQUESTED`; capture begins immediately. |
+| Runtime checkpoint trigger | Same as the explicit API — `REQUESTED` row, immediate capture. |
+| Capture worker completion | `CAPTURING → STORED` on success, `CAPTURING → CAPTURE_FAILED` on durability failure. |
+| Validation pass | `STORED → VALIDATED` on coherence success, `STORED → VALIDATION_FAILED` on hash / shape failure. |
+| Restore request (`kovaserve.checkpoint_id` on inference, or `POST /v1/ks/runs` with `restore_from`) | `VALIDATED → RESTORING` (or `RESTORED → RESTORING` on a subsequent restore). |
+| Resumed Run reaches `RUNNING` | `RESTORING → RESTORED` when the last in-flight restore completes. |
+| Resumed Run lands in `FAILED` during restore | This restore attempt records `RESTORE_FAILED`; Checkpoint state moves to `RESTORED` if other restores are clean, otherwise back to `VALIDATED`. |
+
+## Restore order is logical-first
+
+State transitions during restore follow the [resume flow](/docs/concepts/resume-flow) — manifest validation first, KV restore as an optimization, manifest replay as the always-available fallback. The FSM does not branch on whether KV restore was used; `RESTORING → RESTORED` succeeds whenever steps 1–3 of the resume order succeed, regardless of KV availability.
+
+## Validated transitions
+
+The Checkpoint Manager rejects any transition not listed below.
+
+| From → To | Allowed |
+|---|---|
+| `REQUESTED → CAPTURING` | yes (capture begins) |
+| `CAPTURING → STORED` | yes (durability complete) |
+| `CAPTURING → CAPTURE_FAILED` | yes |
+| `STORED → VALIDATED` | yes |
+| `STORED → VALIDATION_FAILED` | yes |
+| `VALIDATED → RESTORING` | yes (restore begins) |
+| `RESTORED → RESTORING` | yes (subsequent restore) |
+| `RESTORING → RESTORED` | yes (restore succeeds, no in-flight peers) |
+| `RESTORING → VALIDATED` | yes (no peers, no completed restores) |
+| `RESTORING → RESTORE_FAILED` | yes (this restore attempt failed) |
+| anything from `CAPTURE_FAILED` / `VALIDATION_FAILED` | rejected |
+| `REQUESTED → STORED` (skipping `CAPTURING`) | rejected |
+| `VALIDATED → RESTORED` (without restoring) | rejected |
+| Restoring from a non-`VALIDATED` / non-`RESTORED` Checkpoint | rejected with `error.code = "checkpoint_not_restorable"` |
+
+## See also
+
+- [Checkpoints](/docs/concepts/checkpoints) — the entity this FSM governs
+- [State handles](/docs/concepts/state-handles) — the typed references captured during `CAPTURING`
+- [Resume flow](/docs/concepts/resume-flow) — `RECOVERING → RESUMING → RUNNING` from the resuming Run's side
+- [Run state machine](/docs/concepts/run-state-machine) — `CHECKPOINTING` and `RECOVERING / RESUMING`
+- [`POST /v1/ks/checkpoints`](/docs/api/checkpoints/create) · [`POST /v1/ks/checkpoints/{id}/restore`](/docs/api/checkpoints/restore)

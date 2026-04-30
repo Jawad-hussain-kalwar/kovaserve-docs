@@ -1,0 +1,154 @@
+---
+title: Resume flow
+description: The logical-context-first restore order — RECOVERING → RESUMING → RUNNING — and how a resumed Run reconstructs from a Checkpoint.
+---
+
+The **resume flow** is the ordered sequence the Checkpoint Manager runs to bring a new [Run](/docs/concepts/runs) back to `RUNNING` from a [Checkpoint](/docs/concepts/checkpoints). Its defining property is **logical-context-first**: the run is reconstructed from the [ContextManifest](/docs/concepts/context-manifests) and its referenced [ContextArtifacts](/docs/concepts/context-artifacts) before any KV cache restore is attempted. KV restore is an optimization layered on top — the resume succeeds whenever the logical-context steps succeed, regardless of KV availability.
+
+A resumed Run is **functionally indistinguishable** from a Run that came back via KV restore. Only the latency profile differs.
+
+## The transitions
+
+The resuming Run travels three states on the [Run state machine](/docs/concepts/run-state-machine):
+
+```
+CREATED ─▶ READY ─▶ RECOVERING ─▶ RESUMING ─▶ RUNNING
+                              └──▶ PAUSED
+                              └──▶ FAILED
+```
+
+| State | What is happening |
+|---|---|
+| `RECOVERING` | Manifest validation, artifact validation, compatibility check, KV restore planning. No substrate dispatch yet. |
+| `RESUMING` | Active context reconstruction: KV import if planned and feasible, otherwise manifest replay. The first ModelCall of the resumed Run is admitted at the end of this window. |
+| `RUNNING` | Normal execution. The resumed Run is now indistinguishable from a fresh Run, except for the `restored_from` reference on its first Step. |
+
+`RECOVERING` and `RESUMING` together are the resume window. A resumed Run that lands in `FAILED` from either is recorded with the failed step recorded as part of the [Checkpoint state machine](/docs/concepts/checkpoint-state-machine) audit trail.
+
+## Restore order
+
+The Checkpoint Manager runs the same six-step plan on every restore. Steps 1–3 are required; step 4 is optional; steps 5–6 are unconditional once 1–3 succeed.
+
+```
+1. Load checkpoint manifest
+2. Validate ContextManifest + ContextArtifacts
+3. Validate model / tokenizer / renderer compatibility
+4. Plan KV restore                    ◀── optional optimization
+5. Reconstruct active context         ◀── manifest replay if KV restore unavailable
+6. Route + transition Run RECOVERING → RESUMING → RUNNING
+```
+
+### 1. Load checkpoint manifest
+
+The Checkpoint row is read. If it is `CAPTURE_FAILED` or `VALIDATION_FAILED`, restore is rejected immediately with `error.code = "checkpoint_not_restorable"`. Only `VALIDATED` and `RESTORED` Checkpoints are eligible. The `context_manifest` [StateHandle](/docs/concepts/state-handles) carried by the Checkpoint is resolved to the frozen manifest snapshot.
+
+### 2. Validate `ContextManifest` and referenced `ContextArtifacts`
+
+Every artifact referenced by the manifest must be readable from object storage and must match its recorded hash. A missing or corrupted artifact rejects restore — there is no partial-restore path that proceeds with placeholder content. This is the step that makes manifest replay worth depending on: if the artifacts are present and intact, the resumed Run will see the same prompt as the captured Run, byte for byte, regardless of what happens with KV.
+
+Compaction lineage referenced from the manifest is also validated here. A `CompactionRecord` whose source segments have been evicted past retention is treated as opaque — its output segments still resolve, but the lineage graph is truncated.
+
+### 3. Validate model / tokenizer / renderer compatibility
+
+The Checkpoint's compatibility vector is checked against the target deployment.
+
+| Component | Mismatch behavior |
+|---|---|
+| `model_family` | Reject restore. The resumed Run cannot run on an incompatible family. |
+| `model_id` | Allow if `model_family` matches — a minor version roll forward is supported. |
+| `tokenizer_fingerprint` | KV restore skipped silently; manifest replay proceeds. The resumed prompt is re-tokenized under the new fingerprint. |
+| `renderer_version` | KV restore skipped if outside the forward-compatible allow-list; manifest replay proceeds. |
+| `policy_scope` | Reject restore if scope does not satisfy the original. The same Checkpoint cannot be restored under a more permissive scope or a foreign tenant. |
+
+Hard rejections produce `RUN_FAILED` with explicit reason. Soft rejections (KV-only) are recorded on the resume event but do not block the flow.
+
+### 4. Plan KV restore (optional)
+
+If a `kv_prefix` StateHandle is present, the Checkpoint Manager queries the [KV Index](/docs/concepts/kv-index) for compatible replicas. Three outcomes are possible:
+
+- **Hot or warm replica found.** The KV import is scheduled at that replica. The router will prefer this placement.
+- **Only cold or evicted state found.** KV import is deferred; the planner falls through to manifest replay.
+- **No replica found.** KV import is skipped entirely; manifest replay proceeds.
+
+KV restore is **never** required for correctness. Step 4 is allowed to fail in any way; the resume flow proceeds.
+
+### 5. Reconstruct active context
+
+If KV restore was planned and the import succeeds at the target replica, the resumed Run begins with the imported KV state warm. If KV restore was skipped or failed, the resumed Run reconstructs the prompt from the manifest's segment list — every segment resolves either inline or via its `artifact_ref_id`, in canonical ADR-003 ordering, under the captured renderer version.
+
+This step always succeeds when steps 1–3 succeeded. It is the universal fallback path; the rest of the system is designed so this path is exercised on every restore on the staging plane regardless of KV availability, ensuring it does not bit-rot.
+
+### 6. Route and transition
+
+The [Cache-Aware Router](/docs/concepts/manifest-aware-routing) selects placement using `resume_feasible`, `restore_cost_estimate`, manifest reuse score, and budget pressure. The resumed Run is then transitioned:
+
+- `READY → RECOVERING` at the start of step 1.
+- `RECOVERING → RESUMING` at the start of step 5.
+- `RESUMING → RUNNING` once the first ModelCall of the resumed Run is admitted.
+
+The Checkpoint is in `RESTORING` for the entire window and moves to `RESTORED` when the resumed Run reaches `RUNNING`.
+
+## What survives, what restarts
+
+| Element | Survives the resume |
+|---|---|
+| Frozen `ContextManifest` snapshot | Yes — used to seed the resumed Run's first Step. |
+| Referenced `ContextArtifacts` | Yes — re-resolved from object storage. |
+| Compaction lineage | Yes — the resumed Run sees the same compacted segments the captured Run saw. |
+| KV cache state | Best-effort — restored when compatible, skipped silently otherwise. |
+| Layer 3 runtime state (workspace, sandbox FS) | Yes when a `runtime_state` StateHandle is present; restored before the first runtime step executes. |
+| `Session.current_manifest_id` | Set to the Checkpoint's manifest snapshot before the resumed Run's first ModelCall. See [current manifest](/docs/concepts/current-manifest). |
+| `Run` row identity | New. The resumed Run has a fresh `run_id` and a `restored_from` reference to the Checkpoint. |
+
+## Wire shape
+
+Resume is triggered either through the inference path (`kovaserve.checkpoint_id` on `POST /v1/chat/completions`) or through the explicit Run-creation path:
+
+```http
+POST /v1/ks/runs
+Authorization: Bearer ks_...
+Content-Type: application/json
+
+{
+  "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+  "restore_from": "01J8X9Y2Z3K4M5N6P7Q8R9S0T7",
+  "resume_marker": "step:7"
+}
+```
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9S0V1",
+  "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+  "state": "RECOVERING",
+  "restored_from": "01J8X9Y2Z3K4M5N6P7Q8R9S0T7",
+  "restore_plan": {
+    "kv_restore": "warm",
+    "manifest_replay": "ready",
+    "target_node_id": "01J8X9Y2Z3K4M5N6P7Q8R9N002"
+  }
+}
+```
+
+`resume_marker` is an optional opaque marker the runtime uses to position itself within the restored context. The control plane does not interpret it.
+
+## Failure paths
+
+| Failure | Outcome |
+|---|---|
+| Checkpoint in `CAPTURE_FAILED` / `VALIDATION_FAILED` | Reject immediately. Run never leaves `READY`. |
+| Artifact missing or hash mismatch | `RECOVERING → FAILED` with `error.code = "artifact_unrecoverable"`. |
+| `model_family` or `policy_scope` incompatibility | `RECOVERING → FAILED` with `error.code = "checkpoint_incompatible"`. |
+| KV import fails at target | Soft fall-through to manifest replay; flow continues. |
+| Manifest replay fails (this should not happen if steps 1–3 succeeded; treated as a bug) | `RESUMING → FAILED` with `error.code = "manifest_replay_failed"`. |
+
+The Run-level outcome is recorded on the [Run state machine](/docs/concepts/run-state-machine); the Checkpoint-level outcome is recorded on the [Checkpoint state machine](/docs/concepts/checkpoint-state-machine).
+
+## See also
+
+- [Checkpoints](/docs/concepts/checkpoints) — the entity that anchors restore
+- [Checkpoint state machine](/docs/concepts/checkpoint-state-machine) — the source-side FSM
+- [Run state machine](/docs/concepts/run-state-machine) — `RECOVERING / RESUMING` from the Run's side
+- [State handles](/docs/concepts/state-handles) — the typed references each restore step validates
+- [Current manifest](/docs/concepts/current-manifest) — the Session pointer the resume sets before dispatch
+- [Manifest-aware routing](/docs/concepts/manifest-aware-routing) — the router consumer of `resume_feasible`
