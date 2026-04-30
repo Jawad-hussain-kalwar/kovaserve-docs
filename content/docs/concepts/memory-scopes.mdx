@@ -1,0 +1,115 @@
+---
+title: Memory scopes
+description: The MemoryScope enum — `ephemeral | session | user | tenant | global` — and how it classifies context retention, reuse, and policy boundaries.
+---
+
+A **MemoryScope** is the classification of context or state for continuity, retention, and scope treatment. The enum has five values:
+
+| Scope | Lifetime | Cross-Run? | Cross-Session? | Cross-User? | Cross-Tenant? |
+|---|---|---|---|---|---|
+| `ephemeral` | One invocation. Dropped after the ModelCall. | no | no | no | no |
+| `session` | Lifetime of the [Session](/docs/concepts/sessions). | yes (same Session) | no | no | no |
+| `user` | Cross-Session per user. | yes | yes | no | no |
+| `tenant` | Cross-user per tenant. | yes | yes | yes | no |
+| `global` | Cross-tenant within deployment, admin-controlled. | yes | yes | yes | yes |
+
+`MemoryScope` mirrors Google ADK's prefix-scoped state model (`temp:` / no-prefix / `user:` / `app:`) plus the KovaServe-novel `tenant` and `global` scopes for multi-tenant deployments.
+
+The scope appears on every [ContextSegment](/docs/concepts/context-segments), every [MemoryEntry](/docs/concepts/memory-entries) in the [Memory Store](/docs/concepts/memory-store), and as `memory_class_hints` on the inference request envelope.
+
+## What scope decides
+
+Scope is a single field that governs three independent behaviors:
+
+1. **Retention.** How long the underlying row survives.
+2. **Reuse boundary.** Which Runs and Sessions can read this data.
+3. **Policy enforcement.** Whether [PolicyScope](/docs/concepts/policy-scopes)'s `context_share_scope` permits including this data in the assembled manifest.
+
+The three are not orthogonal — a `tenant`-scoped MemoryEntry has tenant-lifetime retention, tenant-wide reuse, and is gated by the resolved PolicyScope's tenant share rules. Picking a scope picks a complete policy.
+
+## The five scopes
+
+### `ephemeral`
+
+Invocation-scoped. Used for transient context: the current user message, the current assistant draft, the generation target, transient tool-disposition outputs that the runtime injects for one call.
+
+`ephemeral` segments and entries are discarded after the ModelCall closes. They never enter the [Memory Store](/docs/concepts/memory-store). Two ModelCalls with identical `ephemeral` content compute identical segment digests but no cache reuse occurs across them — `ephemeral` content varies by definition.
+
+### `session`
+
+Session-lifetime. The classification for ordinary conversational context: turn history, in-Session tool outputs, in-Session running summaries.
+
+`session`-scoped data is retained until the [Session](/docs/concepts/sessions) reaches `ARCHIVED` or `EXPIRED`. It is reusable across Runs sharing the same Session id but invisible across Sessions, even within the same user.
+
+### `user`
+
+Cross-Session, per-user. Used for user preferences, long-term goals, and user-authored notes that should follow the user across conversations but not bleed into other users' contexts.
+
+`user` scope requires authenticated user identity in the request. Anonymous traffic cannot write or read `user`-scoped data.
+
+### `tenant`
+
+Cross-user, per-tenant. Used for tenant-wide instructions: company tone guides, shared compliance policies, tenant-curated tool documentation.
+
+`tenant` scope is the first scope at which content is shared across users. It is gated by the [PolicyScope](/docs/concepts/policy-scopes)'s `context_share_scope`: a Run with `context_share_scope: project` cannot include `tenant`-scoped MemoryEntries from outside its project even though the entries technically span the tenant.
+
+### `global`
+
+Cross-tenant within a deployment. The most permissive scope. Used for deployment-wide system prompts, KovaServe-managed tool catalogs, and operator-curated baseline instructions. **Admin-controlled** — only deployment operators can write `global` entries; tenants can read but not author.
+
+`global` entries are the same on every request to the deployment. They sit at the system breakpoint of every assembled manifest and produce maximum cache reuse.
+
+## Scope on segments
+
+A [ContextSegment](/docs/concepts/context-segments) carries `memory_scope` independently of its `context_type`. The two fields move independently:
+
+- A `system_prompt` segment can be `tenant` (a tenant-curated system prompt), `project` (project-specific instructions), or `global` (deployment-wide baseline).
+- A `history` segment is `session`-scoped — turn history is never visible across Sessions.
+- A `user_message` segment is `ephemeral` — the current call's user input.
+- A `tool_definitions` segment is `tenant`-scoped or `global`-scoped depending on whether the [ToolCatalog](/docs/concepts/tool-catalogs) belongs to the tenant or the deployment.
+
+The retention rule for a segment is the segment's own `retention` field, not directly derived from `memory_scope`. A `session`-scoped segment with `retention: with_call` exists for one call and discards; a `session`-scoped segment with `retention: with_session` lives for the Session. Scope and retention are separate axes.
+
+## Scope on memory entries
+
+A [MemoryEntry](/docs/concepts/memory-entries) is rooted at a `(scope_type, scope_id, namespace, key)` tuple. The `scope_type` is the MemoryScope; `scope_id` resolves the entry to a specific Session, user, tenant, or deployment.
+
+Two entries with the same `(namespace, key)` at different scopes are different rows — `(session, ses_a, "preferences", "language")` and `(user, user_a, "preferences", "language")` coexist. The Memory Store does not collapse them.
+
+## `memory_class_hints` on the inference envelope
+
+Runtimes signal which scopes to consult on each request via the `memory_class_hints` field on the `kovaserve` extension envelope:
+
+```json
+{
+  "kovaserve": {
+    "memory_class_hints": [
+      { "selector": { "namespace": "preferences" }, "memory_scope": "user", "checkpoint_relevant": true },
+      { "selector": { "namespace": "policy" }, "memory_scope": "tenant", "checkpoint_relevant": true }
+    ]
+  }
+}
+```
+
+GCM v2 fetches matching entries from the Memory Store, normalizes them into `system_memory` segments at the appropriate position, and includes them in the assembled manifest. The runtime supplies hints; GCM resolves and orders.
+
+## Scope and policy
+
+[PolicyScope](/docs/concepts/policy-scopes)'s `context_share_scope` (`none` / `project` / `tenant`) bounds which scopes are admissible. A request under `context_share_scope: project` rejects `tenant`-scoped reads from outside the project; a request under `none` admits only `ephemeral` and `session` scopes.
+
+The interaction is conservative: if a scope and a share-scope agree on visibility, data flows; if they disagree, the entry is invisible to the request as if it did not exist (no error — just absence).
+
+## What memory scopes are not
+
+- **Not the same as tenancy.** Tenancy answers *who owns* this row. Scope answers *who can read* this row. A `global`-scoped entry is owned by the deployment but readable by every tenant.
+- **Not free-form.** The five values are closed.
+- **Not implicit.** Scope is required on every segment and every entry. There is no "default" scope.
+- **Not asymmetric.** Reads and writes obey the same scope rules. A user who can read a `tenant`-scoped entry can — subject to policy — write to it.
+
+## See also
+
+- [Memory entries](/docs/concepts/memory-entries) — the rows in the Memory Store carrying scope
+- [Memory store](/docs/concepts/memory-store) — the service that backs scope-rooted persistence
+- [Context segments](/docs/concepts/context-segments) — how segments carry `memory_scope`
+- [Policy scopes](/docs/concepts/policy-scopes) — `context_share_scope` and its interaction with MemoryScope
+- [Identity and IDs](/docs/concepts/identity-and-ids) — Session / user / tenant id formats
