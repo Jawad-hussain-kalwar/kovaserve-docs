@@ -1,13 +1,13 @@
 ---
 title: Sessions
-description: Continuity containers across turns and related runs — session lifecycle, run binding, history, and TTL semantics.
+description: Continuity containers across turns and related runs — the entity, run binding, turn history, scoping, and TTL semantics.
 ---
 
-A **Session** is a continuity container that lives above the [Run](/docs/concepts/runs-steps-model-calls). One session hosts many sequential runs and accumulates a turn history that persists across them. Sessions are how KovaServe represents long-lived conversational or task context without forcing the runtime to manage that state itself.
+A **Session** is a continuity container that lives above the [Run](/docs/concepts/runs). One Session hosts many sequential Runs and accumulates a turn history that persists across them. Sessions are how KovaServe represents long-lived conversational or task context without forcing the runtime to manage that state itself.
 
 The Session is the entity to reach for when you need:
 
-- A stable identity that survives across multiple runs, retries, or pauses.
+- A stable identity that survives across multiple Runs, retries, or pauses.
 - A turn history that is queryable and audit-traceable, with foreign keys back to the Steps and ModelCalls that produced each turn.
 - A scoped lifetime (idle reactivation, TTL expiry, explicit archival) without the runtime owning lifecycle logic.
 
@@ -25,55 +25,23 @@ Session                 (1..N runs, 1..N turns)
     └── model_call_id   (FK to the ModelCall that produced the turn)
 ```
 
-A Run has at most one Session (`runs.session_id`). That binding is set at Run creation and is **immutable** — a Run cannot be moved between sessions.
+A Run has at most one Session (`runs.session_id`). That binding is set at Run creation and is **immutable** — a Run cannot be moved between Sessions.
 
-A Session has at most one *current* Run (`sessions.current_run_id`). Earlier Runs in the session are not erased; they remain in the run history but no longer occupy the `current_run_id` pointer.
+A Session has at most one *current* Run (`sessions.current_run_id`). Earlier Runs in the Session are not erased; they remain in the run history but no longer occupy the `current_run_id` pointer.
 
-## Session lifecycle
+## Lifecycle
 
-### State machine
+Sessions travel a five-state FSM — `OPEN → IDLE → RESUMABLE → ARCHIVED | EXPIRED`. The full graph, drivers, and validated transitions are documented on the [Session state machine](/docs/concepts/session-state-machine) page.
 
-```
-OPEN ─┬─▶ IDLE ─┬─▶ OPEN              (reactivation on new turn)
-      │         ├─▶ RESUMABLE         (reserved for checkpoint resume)
-      │         ├─▶ ARCHIVED          (terminal)
-      │         └─▶ EXPIRED           (terminal)
-      ├─▶ ARCHIVED                    (terminal)
-      └─▶ EXPIRED                     (terminal)
-
-RESUMABLE ─┬─▶ ARCHIVED               (terminal)
-           └─▶ EXPIRED                (terminal)
-```
+Quick orientation:
 
 | State | Meaning |
 |---|---|
-| `OPEN` | Active. Accepts new turns and run bindings. The default on creation. |
+| `OPEN` | Active. Accepts new turns and Run bindings. The default on creation. |
 | `IDLE` | No turn for longer than the idle threshold. Reactivates to `OPEN` automatically on the next turn. |
-| `RESUMABLE` | Reserved for checkpoint-driven resume; see [Checkpoints](/docs/concepts/checkpoints). Not entered by the runtime in v1. |
-| `ARCHIVED` | Explicitly closed. Readable for audit; rejects new turns. |
-| `EXPIRED` | TTL elapsed (`expires_at < now`). Readable for audit; reads return `410 Gone`. |
-
-Transitions are validated against this graph. An illegal transition is rejected at the service layer; terminal states (`ARCHIVED`, `EXPIRED`) are frozen.
-
-### Idle and reactivation
-
-A Session enters `IDLE` when `last_accessed_at` falls strictly behind the configured idle threshold and no non-terminal Run is bound. The next turn appended to the session reactivates it to `OPEN` atomically inside the same transaction that records the turn — there is no observable window in which the new turn is recorded against an `IDLE` row.
-
-The threshold check is strict (`<`): a session exactly at the threshold remains `OPEN`. This avoids spurious sweeps under clock skew.
-
-### Expiry
-
-Each Session may carry an `expires_at`. The default is 24 hours from creation; pass `expires_in_hours` on `POST /v1/ks/sessions` to override.
-
-Expiry is **lazy**: `GET /v1/ks/sessions/{id}` checks `expires_at` on read and transitions any non-terminal session to `EXPIRED` before returning. A background sweep also expires sessions in bulk. After expiry:
-
-- Reads return `410 Gone` with error code `session_expired`.
-- The Session row and all turns remain in the database (no purge in v1).
-- The session cannot be reactivated. To resume, create a new session.
-
-### Archival
-
-`ARCHIVED` is the explicit-close terminal. It is set by administrative or runtime action (not by automatic sweep) and indicates the session is closed for new work but should remain readable for audit.
+| `RESUMABLE` | Held pending a checkpoint-driven resume. Exits to `OPEN` when a new Run resumes against that [Checkpoint](/docs/concepts/checkpoints). |
+| `ARCHIVED` | Explicitly closed (terminal). Readable for audit; rejects new turns. |
+| `EXPIRED` | TTL elapsed (terminal). Reads return `410 Gone`; the row remains for audit. |
 
 ## Session-Run binding
 
@@ -84,23 +52,23 @@ A Run becomes the current Run via the `kovaserve.session_id` extension on `POST 
 1. **Tenant scoping.** The target Run must belong to the same tenant as the Session. A cross-tenant bind returns the same `404` as a missing Session — the existence of the foreign Run is not leaked.
 2. **Run ID shape.** The Run ID must be a valid 26-character Crockford ULID.
 3. **Non-terminal Runs only.** Runs in `COMPLETED`, `FAILED`, or `CANCELED` cannot be bound.
-4. **No cross-session re-binding.** A Run already bound to a different Session cannot be moved.
+4. **No cross-Session re-binding.** A Run already bound to a different Session cannot be moved.
 5. **Idempotent same-pair binds.** Re-binding the Run that is already current is a no-op, not an error.
 6. **`last_accessed_at` is bumped** as part of the bind, even when no new turn is recorded.
 
-When a Run reaches a terminal state, `sessions.current_run_id` remains pinned to that Run (it is **not** cleared). The next bind replaces it. This is intentional: it preserves a "last run" pointer that is useful for resume planning and is recoverable from the run history regardless.
+When a Run reaches a terminal state, `sessions.current_run_id` remains pinned to that Run (it is **not** cleared). The next bind replaces it.
 
-### Multiple sequential runs
+### Multiple sequential Runs
 
-The expected pattern is one session, many sequential runs. Each run completes (or fails / is canceled), and the next run binds in. The turn history spans every run; turn rows carry `step_id` and `model_call_id` so each turn is traceable to the exact execution that produced it.
+The expected pattern is one Session, many sequential Runs. Each Run completes (or fails / is canceled), and the next Run binds in. The turn history spans every Run; turn rows carry `step_id` and `model_call_id` so each turn is traceable to the exact execution that produced it.
 
-### Concurrent runs
+### Concurrent Runs
 
-The model permits a second Run to be bound to a session whose current Run is still active. The most recently bound Run becomes `current_run_id`; the previous run continues independently and is still queryable via the run history. This avoids forcing the runtime to serialize independent Runs that legitimately share a session, but it also means **the runtime, not the Session Registry, is responsible for ordering concurrent runs against the same session if ordering matters.**
+The model permits a second Run to be bound to a Session whose current Run is still active. The most recently bound Run becomes `current_run_id`; the previous Run continues independently and is still queryable via the run history. The runtime, not the Session Registry, is responsible for ordering concurrent Runs against the same Session if ordering matters.
 
 ## Turn history
 
-Each call to a session appends one or more `SessionTurn` rows:
+Each call to a Session appends one or more `SessionTurn` rows:
 
 ```json
 {
@@ -115,9 +83,11 @@ Each call to a session appends one or more `SessionTurn` rows:
 }
 ```
 
-`turn_number` is monotonic per session. `token_count` is a real measurement from the substrate response, not a client-side estimate. `step_id` and `model_call_id` are populated for any turn produced by a Run-bound execution; they are nullable for legacy or runtime-direct turns.
+`turn_number` is monotonic per Session. `token_count` is a real measurement from the substrate response, not a client-side estimate. `step_id` and `model_call_id` are populated for any turn produced by a Run-bound execution.
 
-Turn history is unbounded in v1. Bounded manifest history (per the architecture blueprint) is a future capability tied to the [ContextManifest](/docs/concepts/context-engineering); it is not yet enforced at the Session level.
+## Manifest tracking
+
+Each Session tracks the most recently admitted [ContextManifest](/docs/concepts/context-manifests) via `current_manifest_id`, plus a bounded history of prior manifests. The pointer survives across Run binds — a new Run inheriting a Session inherits the current manifest reference. Full semantics (when the pointer advances, what survives across Run binds and Checkpoint restore, how the bounded history is maintained) live on the [current manifest](/docs/concepts/current-manifest) page.
 
 ## Tenant scoping
 
@@ -131,11 +101,11 @@ Session IDs do not follow the bare-ULID convention used elsewhere in the surface
 ses_a7f3c2b8d4e1f0925a1b6c3d
 ```
 
-This is an intentional v1 carry-over for backward compatibility with existing clients. All other IDs (`run_id`, `step_id`, `model_call_id`, `checkpoint_id`, `context_manifest_id`) are bare 26-character Crockford ULIDs.
+Session IDs use this prefixed form so they are distinguishable at a glance from execution-scoped IDs. All other IDs (`run_id`, `step_id`, `model_call_id`, `checkpoint_id`, `context_manifest_id`) are bare 26-character Crockford ULIDs. See [Identity and IDs](/docs/concepts/identity-and-ids).
 
 ## API shape
 
-### Create a session
+### Create a Session
 
 ```http
 POST /v1/ks/sessions
@@ -160,43 +130,15 @@ Content-Type: application/json
   "last_accessed_at": "2026-04-30T12:00:00Z",
   "expires_at": "2026-05-01T12:00:00Z",
   "current_run_id": null,
+  "current_manifest_id": null,
   "stable_prefix_id": null,
   "last_node_id": null
 }
 ```
 
-### Read a session with turn history
+### Use a Session on inference
 
-```http
-GET /v1/ks/sessions/ses_a7f3c2b8d4e1f0925a1b6c3d
-Authorization: Bearer ks_...
-```
-
-```json
-{
-  "id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
-  "state": "OPEN",
-  "turn_count": 6,
-  "current_run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
-  "turns": [
-    {
-      "turn_number": 1,
-      "role": "user",
-      "content": "...",
-      "token_count": 84,
-      "timestamp": "2026-04-30T12:00:00Z",
-      "step_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
-      "model_call_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T3"
-    }
-  ]
-}
-```
-
-A session in `EXPIRED` returns `410 Gone` with `error.code = "session_expired"` rather than `200`. `ARCHIVED` returns `200` for read but rejects new turns.
-
-### Use a session on inference
-
-The most common path: pass `kovaserve.session_id` on a chat completion. The gateway resolves the session, prepends its turn history into the context, executes, and appends the new user and assistant turns on success.
+The most common path: pass `kovaserve.session_id` on a chat completion. The gateway resolves the Session, prepends its turn history into the context, executes, and appends the new user and assistant turns on success.
 
 ```bash
 curl https://api.kovaserve.com/v1/chat/completions \
@@ -211,18 +153,20 @@ curl https://api.kovaserve.com/v1/chat/completions \
   }'
 ```
 
-If the session is `EXPIRED` or `ARCHIVED`, the request is rejected before inference. If it is `IDLE`, it reactivates to `OPEN` atomically with the new turn.
+If the Session is `EXPIRED` or `ARCHIVED`, the request is rejected before inference. If it is `IDLE`, it reactivates to `OPEN` atomically with the new turn.
 
 ## What Sessions are not
 
-- **Not the unit of value.** That is the [Run](/docs/concepts/runs-steps-model-calls). A session can host zero, one, or many Runs over its lifetime.
-- **Not a runtime construct.** The Session Registry is owned by the control plane; runtimes (LangGraph, Temporal, custom) reference sessions but do not implement them.
-- **Not a memory store.** Cross-session memory belongs to the Memory Store with explicit [`MemoryScope`](/docs/concepts/context-engineering) (`user`, `tenant`, `global`). Sessions hold per-conversation continuity only.
-- **Not yet a manifest history holder.** The architecture reserves `current_manifest_id` and bounded manifest history at the Session level; in v1 these live at the Run/ModelCall level via the `context_manifest_id` foreign key on each `ModelCall`. See [ContextManifest](/docs/concepts/context-engineering).
+- **Not the unit of value.** That is the [Run](/docs/concepts/runs). A Session can host zero, one, or many Runs over its lifetime.
+- **Not a runtime construct.** The Session Registry is owned by the control plane; runtimes (LangGraph, Temporal, custom) reference Sessions but do not implement them.
+- **Not a memory store.** Cross-Session memory belongs to the [Memory Store](/docs/concepts/memory-store) with explicit [`MemoryScope`](/docs/concepts/memory-scopes) (`user`, `tenant`, `global`). Sessions hold per-conversation continuity only.
+- **Not the canonical owner of every ContextManifest.** Each ModelCall carries its own `context_manifest_id`; the Session tracks `current_manifest_id` and a bounded history for resume planning, not the full per-call lineage.
 
 ## See also
 
-- [Runs, Steps, ModelCalls](/docs/concepts/runs-steps-model-calls) — what a Session contains
+- [Session state machine](/docs/concepts/session-state-machine) — the FSM the Session lifecycle travels
+- [Current manifest](/docs/concepts/current-manifest) — `current_manifest_id` semantics across Run binds
+- [Runs](/docs/concepts/runs) — what a Session contains
 - [Checkpoints](/docs/concepts/checkpoints) — the resume surface that uses `RESUMABLE`
-- [Context engineering](/docs/concepts/context-engineering) — manifests, segments, and memory scope
+- [Context manifests](/docs/concepts/context-manifests) — the entity referenced by `current_manifest_id`
 - [`POST /v1/ks/sessions`](/docs/api/sessions/create) · [`GET /v1/ks/sessions/{id}`](/docs/api/sessions/get)
