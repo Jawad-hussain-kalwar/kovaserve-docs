@@ -1,0 +1,150 @@
+---
+title: Policy scopes
+description: The PolicyScope entity — the normalized governance binding that travels on every Run, carrying ACLs, rate limits, share-scope, data boundary, and tool policy enrichment.
+---
+
+A **PolicyScope** is the normalized governance binding that attaches to every [Run](/docs/concepts/runs), [ModelCall](/docs/concepts/model-calls), and [Checkpoint](/docs/concepts/checkpoints). It carries model ACLs, rate limits, share-scope rules, data boundary constraints, environment/deployment restrictions, and tool policy enrichment fields.
+
+PolicyScopes are owned by the **Policy / Governance Layer**. Every request resolves to exactly one PolicyScope through the tenant hierarchy; allow/deny/degrade decisions are explainable and auditable.
+
+## What a PolicyScope binds
+
+| Field | Purpose |
+|---|---|
+| `model_acl[]` | Allowed model ids and families. Requests for non-listed models reject. |
+| `rate_limits` | Per-tenant / project / environment rate limits in requests per second and tokens per second. |
+| `context_share_scope` | Cache and manifest reuse boundary: `none` / `project` / `tenant`. Controls cross-Run KV cache and manifest-tier reuse. |
+| `data_boundary` | Artifact and context residency constraint: `tenant_local` / `region_local` / `unrestricted`. |
+| `tool_policy_ref` | Reference to a tool policy that produces [ToolContextDispositions](/docs/concepts/tool-context-disposition). |
+| `deployment_restrictions[]` | Deployment ids the scope may execute against; empty = all deployments in scope. |
+| `environment_restrictions[]` | Environment ids — typically `prod` / `staging` / `dev`. |
+| `degraded_mode_policy` | Whether `DEGRADE` admission decisions are accepted, rejected, or warn-only. |
+
+PolicyScopes are tenant- and project-resolvable but not project-immutable: a Run created under a project picks up that project's resolved PolicyScope at creation time, and the scope is then *frozen* on the Run for the Run's lifetime — later changes to the project's PolicyScope do not retroactively apply.
+
+## Resolution
+
+Every request's PolicyScope is resolved through the tenant hierarchy at admission time:
+
+```
+Tenant policy
+  ▼ overlay
+Project policy
+  ▼ overlay
+Environment policy
+  ▼ overlay
+Deployment policy
+  ▼ overlay
+API key scope
+  ▼
+Resolved PolicyScope (frozen on the Run)
+```
+
+Each layer overlays the previous one — a more-specific layer can narrow but not widen. A Project policy that adds a model to the ACL when the Tenant policy excludes it has no effect; the Tenant exclusion wins.
+
+The resolved scope is denormalized onto the Run row so subsequent Steps and ModelCalls do not re-resolve.
+
+## Decision shape
+
+Policy decisions are explicit and structured:
+
+| Decision | When |
+|---|---|
+| `ALLOW` | Request matches scope; proceed. |
+| `DENY` | Hard mismatch (model not in ACL, rate limit exceeded, foreign deployment). Returns `403 Forbidden` with explanation. |
+| `DEGRADED_ALLOW` | Scope permits a degraded variant of the request (e.g. a smaller model, a reduced context window). Used in conjunction with admission-side `DEGRADE`. |
+
+Every decision is emitted as a `ks.policy.evaluated` event with the matched rule and rationale. Denials emit `ks.policy.denied`; degraded paths emit `ks.policy.degraded_mode_applied`.
+
+## `context_share_scope`
+
+The reuse boundary for cache and manifest-tier reuse:
+
+| Value | Reuse boundary |
+|---|---|
+| `none` | Each Run gets a private cache namespace. No cross-Run reuse, even within the same Session. |
+| `project` | Reuse across Runs in the same project. The default for managed cloud workloads. |
+| `tenant` | Reuse across Runs in the same tenant, across projects. Used for shared-tenant deployments. |
+
+`context_share_scope` is a hard scope filter on routing. The [Cache-Aware Router](/docs/concepts/manifest-aware-routing) only considers replicas whose cache origin agrees with the resolved `context_share_scope`. A request from a `project`-scoped Run cannot route to a replica warmed by a different project even if the cache content would otherwise match.
+
+## `data_boundary`
+
+The residency constraint for [ContextArtifacts](/docs/concepts/context-artifacts) and KV state:
+
+| Value | Constraint |
+|---|---|
+| `tenant_local` | All artifacts and KV exports stay in storage allocated to the tenant. |
+| `region_local` | All artifacts and KV exports stay in the deployment's region. |
+| `unrestricted` | No residency constraint beyond tenant scoping. |
+
+`data_boundary` is enforced at write time on the Artifact Store and at restore time on the [Checkpoint Manager](/docs/concepts/checkpoints). A Checkpoint cannot restore in a deployment that violates its `data_boundary`.
+
+## Wire shape
+
+```http
+POST /v1/ks/policies
+Authorization: Bearer ks_...
+Content-Type: application/json
+
+{
+  "name": "production",
+  "model_acl": ["qwen3-coder-30b", "qwen3-coder-7b"],
+  "rate_limits": {
+    "requests_per_second": 50,
+    "tokens_per_second": 1000000
+  },
+  "context_share_scope": "project",
+  "data_boundary": "tenant_local",
+  "tool_policy_ref": "01J8X9Y2Z3K4M5N6P7Q8R9TP01",
+  "degraded_mode_policy": "warn"
+}
+```
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9P0K0",
+  "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+  "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+  "name": "production",
+  "model_acl": ["qwen3-coder-30b", "qwen3-coder-7b"],
+  "rate_limits": {
+    "requests_per_second": 50,
+    "tokens_per_second": 1000000
+  },
+  "context_share_scope": "project",
+  "data_boundary": "tenant_local",
+  "tool_policy_ref": "01J8X9Y2Z3K4M5N6P7Q8R9TP01",
+  "degraded_mode_policy": "warn",
+  "created_at": "2026-04-30T12:00:00Z"
+}
+```
+
+## Tool policy integration
+
+PolicyScope binds a `tool_policy_ref` that the Tool Context Governance subsystem consults to produce [ToolContextDispositions](/docs/concepts/tool-context-disposition). The tool policy decides, per tool definition and per tool output, whether the data may enter context (`inline_full` / `inline_preview` / `summary_required` / `artifact_ref` / `drop` / `blocked`). Risk levels and checkpoint advisories also flow from the tool policy.
+
+## Inheritance on branches and sub-runs
+
+| Operation | PolicyScope behavior |
+|---|---|
+| [Branch](/docs/concepts/branches) | Inherited; overridable narrower (never wider). |
+| [Sub-run](/docs/concepts/sub-runs) | Inherited; cannot escape parent's scope. |
+| [Resume](/docs/concepts/resume-flow) | The resumed Run must satisfy the Checkpoint's recorded scope. |
+
+A scope is monotonically narrowing across lineage. There is no path that widens scope without an out-of-band administrative grant.
+
+## What PolicyScopes are not
+
+- **Not API keys.** API keys are bound to a PolicyScope at issuance; the key is the bearer, the scope is the policy.
+- **Not [Budgets](/docs/concepts/budgets).** Budgets bound resource consumption; PolicyScopes bound *what is allowed*.
+- **Not free-form.** The fields are closed; new policy dimensions require ADR-driven extension.
+- **Not retroactively mutable.** Scope changes apply to new Runs only; in-flight Runs run under the scope frozen at creation.
+
+## See also
+
+- [Tenancy](/docs/concepts/tenancy) — Organization → Project → Environment → Key
+- [Budgets](/docs/concepts/budgets) · [Context budgets](/docs/concepts/context-budgets) — the resource-consumption controls
+- [Tool context disposition](/docs/concepts/tool-context-disposition) — the per-tool decision the policy produces
+- [Manifest-aware routing](/docs/concepts/manifest-aware-routing) — the consumer of `context_share_scope`
+- [`POST /v1/ks/policies`](/docs/api/policy-scopes/create)

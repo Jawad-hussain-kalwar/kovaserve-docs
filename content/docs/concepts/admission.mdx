@@ -1,0 +1,157 @@
+---
+title: Admission
+description: The admission decision flow — how the Context Admission Service evaluates an assembled ContextManifest against the ContextBudget, applies advisory transformations, and produces the final admitted shape before GPU dispatch.
+---
+
+**Admission** is the pre-dispatch evaluation that decides whether an assembled [ContextManifest](/docs/concepts/context-manifests) may proceed to substrate execution, and if so, in what shape. It is owned by the **Context Admission Service** and runs on every ModelCall. The service consumes the manifest from GCM v2, evaluates it against the Run's [ContextBudget](/docs/concepts/context-budgets), applies any required transformations, and returns the admitted shape.
+
+Admission is the single point at which "can this run, and how" is decided. After admission, dispatch is unconditional — the substrate sees only manifests that admission has cleared.
+
+## Where admission sits in the hot path
+
+```
+1. Auth / scope resolution
+2. Run / Session resolution
+3. Context inputs gathered (history, memory, artifact previews)
+4. GCM v2 assembles the ContextManifest
+5. Tool Context Governance assigns ToolContextDispositions
+6. ▶▶ ContextBudget admission ◀◀          (this page)
+7. Run-level Budget pre-check on admitted manifest
+8. Step row created, bound to the manifest
+9. Cache-aware routing
+10. Substrate execution
+```
+
+Admission runs *after* manifest assembly so it can score real token counts, real artifact byte counts, and real tool-disposition decisions. It runs *before* the run-level [Budget](/docs/concepts/budgets) pre-check so cost is computed against the admitted shape, not the raw assembly.
+
+## Decisions
+
+The service emits exactly one decision per evaluation:
+
+| Decision | Effect |
+|---|---|
+| `ALLOW` | Proceed unchanged. |
+| `WARN` | Proceed; emit `ks.context.budget.warning`. Informational. |
+| `OFFLOAD_REQUIRED` | Apply offload (oversized inline segment → artifact reference); re-admit. |
+| `COMPACT_REQUIRED` | Runtime or managed compactor compacts; re-admit. |
+| `DEGRADE` | Reduce `max_tokens` and/or drop optional segments; re-admit. |
+| `HARD_STOP` | Reject before dispatch. ModelCall is not created. |
+
+`OFFLOAD_REQUIRED`, `COMPACT_REQUIRED`, and `DEGRADE` are **transient advisories** — the indicated transformation is applied and the manifest is re-admitted. Re-admission either reaches `ALLOW`/`WARN` (proceed) or produces another advisory. The service caps the re-admission chain (typical default: three rounds) to bound work; an unresolvable chain falls through to `HARD_STOP`.
+
+## The evaluation
+
+For each dimension on the [ContextBudget](/docs/concepts/context-budgets), admission computes the consumed ratio and applies threshold rules:
+
+```
+ratio = manifest.token_counts.<dim> / context_budget.<dim>_limit
+
+ratio < warn_threshold       → ALLOW
+warn ≤ ratio < hard           → WARN  (or transformation if a trigger fires)
+ratio ≥ hard                  → HARD_STOP
+
+if any segment.byte_count > offload_required_threshold
+                              → OFFLOAD_REQUIRED
+
+if active_token_ratio ≥ compaction_required_threshold
+                              → COMPACT_REQUIRED
+
+if degrade_eligible AND no transformation viable AND no HARD_STOP
+                              → DEGRADE
+```
+
+Multiple conditions can be satisfied; precedence is: `HARD_STOP` > `OFFLOAD_REQUIRED` > `COMPACT_REQUIRED` > `DEGRADE` > `WARN` > `ALLOW`. The service emits the highest-precedence decision and applies the matching transformation.
+
+## Transformations
+
+| Decision | Transformation |
+|---|---|
+| `OFFLOAD_REQUIRED` | Each segment exceeding `offload_required_threshold` is rewritten: full payload → [ContextArtifact](/docs/concepts/context-artifacts), segment row keeps a preview + `artifact_ref_id`. Manifest re-admits with reduced `active_tokens` and increased `artifact_bytes`. |
+| `COMPACT_REQUIRED` | The runtime is signalled to compact (or the managed compactor runs). A [CompactionRecord](/docs/concepts/compaction-records) is registered. Compacted segments replace their sources in the next assembled manifest. |
+| `DEGRADE` | `max_tokens` is reduced according to `context_budget.degrade_policy`; optional segments (those with `degrade_droppable: true`) are dropped. Manifest re-admits. |
+
+Each transformation is recorded on the manifest's `admission.transformations[]` field so the path from raw assembly to admitted shape is reconstructable.
+
+## The admitted manifest
+
+After admission completes (with `ALLOW` or `WARN`), a final manifest row is written with:
+
+- The post-transformation segment list and digests.
+- Final `token_counts` and `byte_counts`.
+- `admission.decision = ALLOW` (or `WARN`).
+- `admission.transformations[]` listing every transformation applied across re-admission rounds.
+- `admission.timestamp`.
+
+The original pre-transformation manifest, if any, remains addressable in the Context Manifest Registry — admission writes new rows, never mutates existing ones.
+
+## Preflight admission
+
+Runtimes can request a preflight admission decision without dispatching a ModelCall:
+
+```http
+POST /v1/ks/context/admit
+Authorization: Bearer ks_...
+Content-Type: application/json
+
+{
+  "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+  "context_manifest": {
+    "segments": [...],
+    "tool_catalog_id": "01J8X9Y2Z3K4M5N6P7Q8R9TC01"
+  }
+}
+```
+
+```json
+{
+  "decision": "OFFLOAD_REQUIRED",
+  "transformations": [
+    {
+      "type": "artifact_offload",
+      "segment_ids": ["01J8X9Y2Z3K4M5N6P7Q8R9SG07"]
+    }
+  ],
+  "admitted_manifest": {
+    "token_counts": { "active_tokens": 18420, "offloaded_tokens": 9412 }
+  }
+}
+```
+
+Preflight is useful for runtimes that want to plan transformations in advance (e.g. compact ahead of admission failure) rather than react to the inline decision on `/v1/chat/completions`.
+
+## Events
+
+| Event | Emitted on |
+|---|---|
+| `ks.context.manifest.admitted` | Final admission decision (`ALLOW` or `WARN`). |
+| `ks.context.budget.offload_required` | `OFFLOAD_REQUIRED` decision. |
+| `ks.context.budget.compact_required` | `COMPACT_REQUIRED` decision. |
+| `ks.context.budget.degraded` | `DEGRADE` decision. |
+| `ks.context.budget.hard_stop` | `HARD_STOP` decision. |
+| `ks.context.budget.warning` | `WARN` decision. |
+
+## Failure modes
+
+| Failure | Outcome |
+|---|---|
+| Re-admission cap exceeded | Last decision falls through to `HARD_STOP`. |
+| Transformation fails (artifact write failure, compactor unreachable) | `HARD_STOP` with `error.code = "admission_transformation_failed"`. |
+| Manifest assembly produced an invalid shape | `HARD_STOP` with `error.code = "manifest_invalid"`. ModelCall is not created. |
+
+`HARD_STOP` rejects the request before dispatch with HTTP `400 Bad Request` and an explanatory body — it is not a server error.
+
+## What admission is not
+
+- **Not the same as routing.** Admission decides whether the request runs and in what shape. [Manifest-aware routing](/docs/concepts/manifest-aware-routing) decides where it runs once admitted.
+- **Not the runtime's job to bypass.** Runtimes cannot opt out of admission; the only opt-out is to operate without a ContextBudget, which only the v1 anonymous path supports.
+- **Not retroactive.** A `HARD_STOP` does not cancel in-flight ModelCalls; it rejects the new admission attempt.
+
+## See also
+
+- [Context budgets](/docs/concepts/context-budgets) — the budget admission evaluates against
+- [Context manifests](/docs/concepts/context-manifests) — the input and the output
+- [Compaction records](/docs/concepts/compaction-records) — produced under `COMPACT_REQUIRED`
+- [Context artifacts](/docs/concepts/context-artifacts) — produced under `OFFLOAD_REQUIRED`
+- [Budgets](/docs/concepts/budgets) — the next gate after admission
+- [Manifest-aware routing](/docs/concepts/manifest-aware-routing) — what runs against admitted manifests
+- [`POST /v1/ks/context/admit`](/docs/api/context-budgets/create)

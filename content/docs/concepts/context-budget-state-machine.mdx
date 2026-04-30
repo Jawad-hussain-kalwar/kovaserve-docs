@@ -1,0 +1,149 @@
+---
+title: Context budget state machine
+description: The ContextBudget FSM — `ACTIVE` plus the five advisory states `WARN`, `OFFLOAD_REQUIRED`, `COMPACT_REQUIRED`, `DEGRADE`, and the terminal `HARD_STOP → CLOSED`.
+---
+
+The **ContextBudget state machine** is the lifecycle every [ContextBudget](/docs/concepts/context-budgets) travels per ModelCall. Unlike most FSMs in KovaServe, it is dominated by **transient advisories** — five non-`ACTIVE` states that the runtime applies a transformation to and re-admits, returning to `ACTIVE`. Only `HARD_STOP` is terminal.
+
+The same identifiers double as the `ContextBudgetDecision` return type from the [admission](/docs/concepts/admission) service. On the FSM the names represent the action being taken; on the wire they represent the decision being communicated.
+
+## The graph
+
+```
+ACTIVE ──▶ WARN ──▶ ACTIVE                            (transient warning, no transformation)
+ACTIVE ──▶ OFFLOAD_REQUIRED ──▶ ACTIVE                (transformation applied, re-admitted)
+ACTIVE ──▶ COMPACT_REQUIRED ──▶ ACTIVE                (runtime compacts, re-admitted)
+ACTIVE ──▶ DEGRADE ──▶ ACTIVE                         (max_tokens reduced, optional segments dropped, re-admitted)
+ACTIVE ──▶ HARD_STOP ──▶ CLOSED                       (terminal — request rejected before GPU dispatch)
+```
+
+The five non-`ACTIVE` non-terminal states are visited *during admission*, never observed for an extended duration. By the time a ModelCall reaches the substrate, its ContextBudget is back in `ACTIVE` (or the request was rejected with `HARD_STOP`).
+
+## States
+
+### `ACTIVE`
+
+The normal state. Manifest assembly, admission, dispatch, and recording all happen with the ContextBudget in `ACTIVE`. Between ModelCalls the row sits in `ACTIVE` indefinitely.
+
+`ACTIVE` is also the post-transformation state — when a transient advisory has been applied and the manifest re-admitted successfully, the FSM returns here.
+
+**Transitions out:** any of the five non-`ACTIVE` states, or `CLOSED` on Run termination.
+
+### `WARN`
+
+Consumption is at or above the warning threshold on at least one dimension but no dimension is at its hard limit. `WARN` is **informational** — the manifest proceeds to dispatch unchanged. The transition is a single-step round trip back to `ACTIVE`; the FSM emits `ks.context.budget.warning` and immediately re-enters `ACTIVE`.
+
+`WARN` does not block, does not require runtime action, and does not record a transformation on the manifest. It is the only non-`ACTIVE` non-terminal state that does not change the manifest's shape.
+
+**Transitions out:** `ACTIVE` only.
+
+### `OFFLOAD_REQUIRED`
+
+At least one inline [ContextSegment](/docs/concepts/context-segments) exceeds `offload_required_threshold`. The Context Admission Service rewrites the segment to reference a [ContextArtifact](/docs/concepts/context-artifacts), and the manifest is re-admitted. The transformation is recorded on the manifest's `admission.transformations[]`.
+
+`OFFLOAD_REQUIRED` is fully owned by admission — the runtime is not consulted. The runtime sees only the admitted shape returned from the call.
+
+**Transitions out:** `ACTIVE` (re-admission succeeds), or another advisory if the offloaded shape still exceeds another dimension, or `HARD_STOP` if no transformation can satisfy the budget.
+
+### `COMPACT_REQUIRED`
+
+`active_token_ratio` has crossed `compaction_required_threshold`. The runtime (or the managed compactor) is signalled to compact; a [CompactionRecord](/docs/concepts/compaction-records) is registered, compacted segments replace their sources in the next assembled manifest, and admission re-runs.
+
+`COMPACT_REQUIRED` differs from `OFFLOAD_REQUIRED` in that the runtime is the typical executor. Runtime-driven compaction is the default; KovaServe-managed compaction is opt-in via `compaction_policy`.
+
+**Transitions out:** `ACTIVE` (re-admission succeeds after compaction), or another advisory, or `HARD_STOP`.
+
+### `DEGRADE`
+
+Neither offload nor compaction is sufficient (or applicable), but the manifest can be admitted under reduced parameters: `max_tokens` is reduced according to `context_budget.degrade_policy`, and optional segments tagged `degrade_droppable: true` are dropped. The reduced manifest is re-admitted.
+
+`DEGRADE` requires `policy_scope.degraded_mode_policy` to permit it. A scope configured `reject` skips this state — the FSM advances directly to `HARD_STOP`.
+
+**Transitions out:** `ACTIVE` (re-admission succeeds under reduced shape), or `HARD_STOP`.
+
+### `HARD_STOP` (terminal gate)
+
+The manifest cannot be admitted under any combination of available transformations within the re-admission cap. The request is rejected before GPU dispatch with HTTP `400 Bad Request` and `error.code = "context_budget_exceeded"`. The ModelCall row is **not** created. The pre-rejection manifest is recorded for audit but no `model_call_id` references it.
+
+`HARD_STOP` is a terminal *gate* — for the rejected request. The ContextBudget itself remains live; the next ModelCall on the same Run starts a fresh admission cycle in `ACTIVE`.
+
+The exception is when the rejected request was the only Step the Run had budget for: the [Budget](/docs/concepts/budgets) (separate FSM) may transition to its own `HARD_STOP`, and the Run state machine may transition to `FAILED`. The ContextBudget still goes to `CLOSED` only via Run termination, not via this single rejected request.
+
+**Transitions out:** `CLOSED` (only when the Run terminates; the ContextBudget itself is per-Run, not per-call).
+
+### `CLOSED` (terminal)
+
+The Run has terminated. Same semantics as the Budget's `CLOSED` state — counters frozen for audit, no further admissions accepted.
+
+## Re-admission cap
+
+The admission service caps the re-admission chain (typical default: three rounds) to bound work. A request whose advisory chain exceeds the cap falls through to `HARD_STOP`, even if a longer chain would eventually succeed. This bounds the worst-case admission latency at the cost of rejecting some pathological inputs that could in principle be admitted.
+
+The cap is per-request, not per-Run; each new ModelCall starts a fresh chain.
+
+## Drivers
+
+| Driver | Effect |
+|---|---|
+| Manifest assembled | Admission begins; FSM enters one of `WARN` / `OFFLOAD_REQUIRED` / `COMPACT_REQUIRED` / `DEGRADE` / `HARD_STOP`, or stays in `ACTIVE` for clean `ALLOW`. |
+| Transformation applied | FSM returns to `ACTIVE` on successful re-admission. |
+| Re-admission cap exceeded | FSM advances to `HARD_STOP`. |
+| Run termination | FSM advances to `CLOSED` from `ACTIVE`. |
+
+## Validated transitions
+
+The Context Admission Service rejects any transition not listed below.
+
+| From → To | Allowed |
+|---|---|
+| `ACTIVE → WARN` | yes |
+| `ACTIVE → OFFLOAD_REQUIRED` | yes |
+| `ACTIVE → COMPACT_REQUIRED` | yes |
+| `ACTIVE → DEGRADE` | yes (policy permits) |
+| `ACTIVE → HARD_STOP` | yes |
+| `WARN → ACTIVE` | yes (immediate, single-step) |
+| `OFFLOAD_REQUIRED → ACTIVE` | yes (re-admission succeeds) |
+| `OFFLOAD_REQUIRED → COMPACT_REQUIRED` | yes (offloaded shape still oversized in active tokens) |
+| `OFFLOAD_REQUIRED → DEGRADE` | yes |
+| `OFFLOAD_REQUIRED → HARD_STOP` | yes |
+| `COMPACT_REQUIRED → ACTIVE` | yes |
+| `COMPACT_REQUIRED → OFFLOAD_REQUIRED` | yes |
+| `COMPACT_REQUIRED → DEGRADE` | yes |
+| `COMPACT_REQUIRED → HARD_STOP` | yes |
+| `DEGRADE → ACTIVE` | yes |
+| `DEGRADE → HARD_STOP` | yes |
+| `DEGRADE → OFFLOAD_REQUIRED` / `COMPACT_REQUIRED` | rejected (degrade is the last advisory tier) |
+| `HARD_STOP → ACTIVE` | rejected |
+| `HARD_STOP → CLOSED` | yes (Run terminal) |
+| `ACTIVE → CLOSED` | yes (Run terminal) |
+| anything from `CLOSED` | rejected |
+
+## Decision precedence
+
+When admission could legally emit multiple decisions for the same manifest, precedence is:
+
+```
+HARD_STOP  >  OFFLOAD_REQUIRED  >  COMPACT_REQUIRED  >  DEGRADE  >  WARN  >  ALLOW
+```
+
+`OFFLOAD_REQUIRED` precedes `COMPACT_REQUIRED` because offload is non-lossy (the original payload is preserved in an artifact) while compaction is lossy. `DEGRADE` is the last resort before `HARD_STOP`.
+
+## Events
+
+| Event | Emitted on |
+|---|---|
+| `ks.context.budget.warning` | `WARN` entered. |
+| `ks.context.budget.offload_required` | `OFFLOAD_REQUIRED` entered. |
+| `ks.context.budget.compact_required` | `COMPACT_REQUIRED` entered. |
+| `ks.context.budget.degraded` | `DEGRADE` entered. |
+| `ks.context.budget.hard_stop` | `HARD_STOP` entered. |
+| `ks.context.manifest.admitted` | `ACTIVE` re-entered after a successful chain. |
+
+## See also
+
+- [Context budgets](/docs/concepts/context-budgets) — the entity this FSM governs
+- [Admission](/docs/concepts/admission) — the evaluator that drives transitions
+- [Budget state machine](/docs/concepts/budget-state-machine) — the Run-level companion FSM
+- [Compaction records](/docs/concepts/compaction-records) — produced under `COMPACT_REQUIRED`
+- [Context artifacts](/docs/concepts/context-artifacts) — produced under `OFFLOAD_REQUIRED`
+- [Policy scopes](/docs/concepts/policy-scopes) — `degraded_mode_policy` gates `DEGRADE`
