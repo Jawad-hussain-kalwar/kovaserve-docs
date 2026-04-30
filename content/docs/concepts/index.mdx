@@ -1,0 +1,59 @@
+---
+title: Concepts
+description: The canonical execution model — Run, Session, Step, ModelCall, Checkpoint, Budget, PolicyScope, StateHandle.
+---
+
+KovaServe is a control plane for long-running AI execution. Its public surface — REST API, SDK, CLI, console — is a thin shell over a small set of canonical entities that mean the same thing in managed cloud and self-hosted deployments.
+
+This section defines those entities. Everything in the API and SDK references resolves back to terms introduced here.
+
+## The execution model at a glance
+
+```
+Organization                                    (billing root)
+└── Project                                     (logical app boundary)
+    └── Environment                             (prod / staging / dev)
+        └── Session            ─────────────┐   (continuity container)
+            └── Run                         │   (durable execution objective)
+                ├── Step                    │   (typed unit of progression)
+                │   └── ModelCall ──────────┤   (one substrate-bound model invocation)
+                │       └── ContextManifest │   (durable per-call context record)
+                ├── Checkpoint              │   (resumable snapshot)
+                ├── Budget                  │   (run-level execution control)
+                └── ContextBudget           │   (admission control over context size)
+                                            │
+                                  PolicyScope (governance binding)
+```
+
+## The canonical entities
+
+| Entity | What it is |
+|---|---|
+| **Run** | The top-level durable execution objective. The unit of value. May have a `parent_run_id` (sub-run lineage). |
+| **Session** | A continuity container across turns or related runs. Tracks the current `ContextManifest`. |
+| **Step** | A typed unit of progression inside a Run. See [step types](/docs/concepts/runs-steps-model-calls#step-types). |
+| **ModelCall** | One substrate-bound model invocation belonging to a Step. Carries a `context_manifest_id`. |
+| **ContextManifest** | A durable per-call record of the context shape — segments, token counts, stable identity. The audit anchor for budgets, routing, checkpoints, and resume. |
+| **Checkpoint** | A resumable snapshot binding logical context first; KV cache export is an optimization layered on top. |
+| **StateHandle** | A typed reference to reusable execution state: `kv_prefix`, `context_manifest`, `checkpoint`, `artifact_bundle`, `memory_entry`, or `runtime_state`. |
+| **Budget** | A run-level execution budget controlling cost, tokens, steps, time, or tool count. |
+| **ContextBudget** | A per-run admission control object for active context size, evaluated before GPU dispatch. |
+| **PolicyScope** | Normalized governance binding across tenant / project / environment / deployment / runtime. |
+| **MemoryScope** | The retention class for context and state: `ephemeral`, `session`, `user`, `tenant`, or `global`. |
+
+## Three rules that govern the model
+
+1. **The Run is the unit of value.** Not a token, not a request. A Run completes when the work it represents is done — possibly after many Steps, ModelCalls, pauses, resumes, and checkpoints.
+2. **Continuity is first-class.** Sessions, ContextManifests, Checkpoints, and StateHandles exist so that long-running work survives node restarts, failures, and movement across infrastructure without losing logical state.
+3. **Admission happens before execution.** PolicyScope, Budget, and ContextBudget evaluate against the assembled ContextManifest *before* GPU dispatch. Decisions are explicit (`ALLOW`, `WARN`, `OFFLOAD_REQUIRED`, `COMPACT_REQUIRED`, `DEGRADE`, `HARD_STOP`) and traceable.
+
+## Where to go next
+
+<Cards>
+  <Card title="Runs, Steps, ModelCalls" href="/docs/concepts/runs-steps-model-calls" description="The core hierarchy and its state machines." />
+  <Card title="Sessions" href="/docs/concepts/sessions" description="Continuity containers across turns and related runs." />
+  <Card title="Checkpoints" href="/docs/concepts/checkpoints" description="Logical-context-first resume; typed StateHandles." />
+  <Card title="Budgets and policy" href="/docs/concepts/budgets-and-policy" description="Active control objects for cost and admission." />
+  <Card title="Cost model" href="/docs/concepts/cost-model" description="Gross, net, and cache-savings accounting." />
+  <Card title="Tenancy" href="/docs/concepts/tenancy" description="Organization → Project → Environment → Key." />
+</Cards>
