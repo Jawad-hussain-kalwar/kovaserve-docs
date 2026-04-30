@@ -1,0 +1,160 @@
+---
+title: Context artifacts
+description: The ContextArtifact entity — object-storage-backed externalized context with name + version + mime_type + bytes, used for tool outputs, file diffs, snapshots, transcripts, and compaction inputs.
+---
+
+A **ContextArtifact** is an object-storage-backed externalization of context data that is too large to inline into a [ContextManifest](/docs/concepts/context-manifests). Artifacts use the canonical `name + version + mime_type + bytes` shape (Google ADK convergence) and are referenced from [ContextSegments](/docs/concepts/context-segments) via `artifact_ref_id`.
+
+Artifacts are how KovaServe keeps active context bounded without dropping information. Raw tool outputs, file diffs, retrieved documents, workspace snapshots, large transcripts, and pre/post-compaction summaries live in the **Context Artifact Store**; segments retain a short preview and a reference. The active prompt stays small; the underlying material remains durable, addressable, and re-admissible.
+
+## Why artifacts exist
+
+Long-running agent runs accumulate large bytes — a `git diff` can be megabytes, a tool that fetches a document can return tens of thousands of tokens, a workspace snapshot can be hundreds of files. Inlining that material into every subsequent ModelCall is impossible past trivial Run lengths; dropping it is unsafe because the runtime may need it later for tool calls, follow-up reasoning, or resume.
+
+The artifact pattern resolves the tension:
+
+- The artifact is written once, addressable forever (subject to retention).
+- A short preview lives on the segment row, so dashboards and routing can inspect shape without resolving the full payload.
+- The full payload is fetched on demand by the runtime (or by the resume flow) when it is actually needed.
+- Token accounting on the manifest counts the preview, not the full payload — `active_tokens` reflects what the model actually sees, while `offloaded_tokens` reflects what is parked in artifact storage.
+
+## Shape
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9AR03",
+  "name": "tool_output:run_tests",
+  "version": 1,
+  "mime_type": "text/plain",
+  "byte_count": 2457621,
+  "digest": "sha256:e7c1…",
+  "storage_ref": "s3://kovaserve-artifacts/01J8X9Y2Z3K4M5N6P7Q8R9AR03",
+  "scope": {
+    "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+    "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1"
+  },
+  "retention": "with_session",
+  "preview": "First 512 chars of the artifact body...",
+  "created_at": "2026-04-30T12:00:00Z"
+}
+```
+
+| Field | Purpose |
+|---|---|
+| `id` | Bare 26-char ULID. |
+| `name` | Logical name (often `<class>:<descriptor>` like `tool_output:run_tests` or `file_diff:src/foo.py`). |
+| `version` | Monotonically incrementing version per `(scope, name)`. New writes against the same name produce a new version, never overwrite. |
+| `mime_type` | Standard MIME type — `text/plain`, `text/markdown`, `application/json`, `application/x-diff`, `image/png`, etc. |
+| `byte_count` | Exact size of `bytes`. |
+| `digest` | SHA-256 over the bytes. Verified on read. |
+| `storage_ref` | Object-storage URI. MinIO-managed in managed cloud; customer-supplied S3 in private deployments. |
+| `scope` | Tenant/project ownership. Cross-tenant access returns 404. |
+| `retention` | `with_call` / `with_session` / `with_compaction_lineage` / `with_tenant`. |
+| `preview` | Short payload preview — the first 512 chars for text MIME types, an empty string for non-text types. |
+
+## How artifacts enter context
+
+Three pathways write artifacts:
+
+| Producer | Pathway |
+|---|---|
+| Runtime tool execution | Runtime calls `POST /v1/ks/tools/results` after a tool runs; the result is registered as an artifact and a summary segment is added to the next manifest. |
+| Admission-driven offload | [ContextBudget admission](/docs/concepts/admission) returns `OFFLOAD_REQUIRED` for an oversized inline segment; the segment is rewritten to reference a freshly written artifact. |
+| Layer 3 workspace snapshots | The runtime captures workspace state; snapshots become artifacts referenced from `runtime_state` [StateHandles](/docs/concepts/state-handles). |
+| Sub-run summary handoff | A child Run posts its summary via `POST /v1/ks/runs/{child_id}/summary`; the summary is registered as an artifact and attached to the parent's next manifest. |
+| Compaction | [CompactionRecord](/docs/concepts/compaction-records) writes pre- and post-compaction transcripts as artifacts so the lineage can be replayed. |
+
+## Versioning
+
+Artifacts under the same `(scope, name)` are versioned, not overwritten. A second `tool_output:run_tests` write produces version 2; version 1 remains addressable until retention expires. This matters for resume: a Checkpoint frozen at version 3 can still resolve its `artifact_ref_id` even if version 4 has since been written.
+
+References from segments always carry both `id` and (transitively) the bound `version`. There is no concept of "latest" in the manifest layer — every reference is concrete.
+
+## Retention
+
+`retention` on an artifact governs durability independently of the segments that reference it. The Artifact Store does not delete an artifact while any non-evicted [CompactionRecord](/docs/concepts/compaction-records) lists it as a source, even if the segments that originally referenced it have aged past their own retention. This preserves replay correctness for compaction lineage.
+
+| Value | Lives until |
+|---|---|
+| `with_call` | The ModelCall closes. Used for transient artifacts that exist only for one admission cycle. |
+| `with_session` | The owning Session is `ARCHIVED` or `EXPIRED`. |
+| `with_compaction_lineage` | Every CompactionRecord that lists the artifact as a source is pruned. |
+| `with_tenant` | Tenant retention policy decides. |
+
+## Reading an artifact
+
+```http
+GET /v1/ks/context/artifacts/01J8X9Y2Z3K4M5N6P7Q8R9AR03
+Authorization: Bearer ks_...
+```
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9AR03",
+  "name": "tool_output:run_tests",
+  "version": 1,
+  "mime_type": "text/plain",
+  "byte_count": 2457621,
+  "digest": "sha256:e7c1…",
+  "preview": "First 512 chars of the artifact body...",
+  "download_url": "https://artifacts.kovaserve.com/01J8X9Y2Z3K4M5N6P7Q8R9AR03?token=…",
+  "expires_at": "2026-04-30T13:00:00Z"
+}
+```
+
+The metadata response includes a short-lived `download_url`. Bytes are not returned inline by the JSON endpoint; the runtime fetches them through the URL when it actually needs the full payload. The preview is sufficient for most dashboard and routing decisions.
+
+## Uploading an artifact
+
+```http
+POST /v1/ks/context/artifacts
+Authorization: Bearer ks_...
+Content-Type: multipart/form-data
+
+name=tool_output:run_tests
+mime_type=text/plain
+retention=with_session
+bytes=@./pytest-output.txt
+```
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9AR03",
+  "name": "tool_output:run_tests",
+  "version": 1,
+  "byte_count": 2457621,
+  "digest": "sha256:e7c1…",
+  "preview": "First 512 chars of the artifact body...",
+  "created_at": "2026-04-30T12:00:00Z"
+}
+```
+
+The runtime then references `artifact_ref_id: "01J8X9Y2Z3K4M5N6P7Q8R9AR03"` from a segment in the next request's `parts`, or hands it to `POST /v1/ks/context/admit` for preflight admission.
+
+## Scope and isolation
+
+Artifacts are owned by exactly one `(tenant_id, project_id)`. Cross-tenant access returns the same `404 Not Found` as a missing artifact — existence is not leaked across tenants. The `policy_scope.context_share_scope` further bounds reuse: an artifact written under a `project`-scoped policy cannot be referenced from a `tenant`-scoped manifest in another project, even within the same tenant.
+
+## Storage backends
+
+| Mode | Backend |
+|---|---|
+| Managed cloud | KovaServe-managed MinIO. |
+| Private deployment | Customer-supplied S3-compatible object store. |
+
+The wire shape is identical in both modes. Migrating a workload from managed to private replays artifact references against the new bucket without changing the manifest layer.
+
+## What artifacts are not
+
+- **Not arbitrary blob storage.** The artifact store is for context. General application blob storage (model weights, customer file uploads outside an agent run, build outputs) belongs to the customer's own object storage.
+- **Not mutable.** A given `(name, version)` pair is immutable. New content gets a new version; old versions remain addressable.
+- **Not free.** `byte_count` accumulates against the [ContextBudget](/docs/concepts/context-budgets)'s `artifact_byte_limit`. Tenants with high artifact churn pay for storage as part of metering.
+- **Not auto-summarized.** The runtime (or the [CompactionRecord](/docs/concepts/compaction-records) producer) decides when to summarize an artifact; the Artifact Store does not infer summaries on its own.
+
+## See also
+
+- [Context segments](/docs/concepts/context-segments) — the entity that references artifacts via `artifact_ref_id`
+- [Context manifests](/docs/concepts/context-manifests) — the parent entity whose `byte_counts.artifact_bytes` aggregates artifact size
+- [Compaction records](/docs/concepts/compaction-records) — the lineage object that frequently references artifacts as sources
+- [Admission](/docs/concepts/admission) — the service that triggers `OFFLOAD_REQUIRED`
+- [`POST /v1/ks/context/artifacts`](/docs/api/context/artifacts/upload) · [`GET /v1/ks/context/artifacts/{id}`](/docs/api/context/artifacts/get)
