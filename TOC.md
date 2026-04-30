@@ -40,7 +40,7 @@ Living roadmap for `docs.kovaserve.com`. Source of structure for `content/docs/`
 
 - [x] `concepts/layered-model.mdx` — Layer 1 / 2 / 3 boundaries
 - [x] `concepts/execution-substrate.mdx` — Layer 1: vLLM alignment, what the substrate exposes
-- [ ] `concepts/control-plane.mdx` — Layer 2: KovaServe control plane responsibilities
+- [x] `concepts/control-plane.mdx` — Layer 2: KovaServe control plane responsibilities
 - [ ] `concepts/runtime-wedge.mdx` — Layer 3: runtime wedge (CodeRuns)
 
 ### Run hierarchy — Blueprint §7.2 entities, §7.4 FSMs
