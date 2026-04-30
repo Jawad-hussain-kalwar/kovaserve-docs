@@ -1,0 +1,150 @@
+---
+title: Cached tokens
+description: The `cached_tokens` accounting field — what it measures, where it appears in the wire shape, how it relates to gross/net cost (ADR-019/020), and how it interacts with manifest token counts and substrate cache events.
+---
+
+`cached_tokens` is the per-call count of input tokens that were served from the substrate's [KV cache](/docs/concepts/kv-cache) and therefore did not pay full prefill cost. It is the accounting handle KovaServe uses to attribute cache reuse value to a specific [ModelCall](/docs/concepts/model-calls) and to drive cost savings.
+
+The field name follows OpenAI's prompt-caching convention — `cached_tokens` is part of the OpenAI-compatible usage block returned on every chat completion. KovaServe carries the same name end-to-end so OpenAI-compatible clients see familiar accounting and KovaServe-native dashboards see one canonical field.
+
+## Where `cached_tokens` appears
+
+### On the chat-completion response
+
+```json
+{
+  "id": "chatcmpl-...",
+  "model": "qwen3-coder-30b",
+  "choices": [...],
+  "usage": {
+    "prompt_tokens": 4218,
+    "completion_tokens": 312,
+    "total_tokens": 4530,
+    "cached_tokens": 3640,
+    "prompt_tokens_details": {
+      "cached_tokens": 3640
+    }
+  }
+}
+```
+
+`prompt_tokens` is the full input length. `cached_tokens` is the subset of that input that the substrate served from cache. The two relate as:
+
+```
+prompt_tokens = cached_tokens + freshly_prefilled_tokens
+```
+
+`completion_tokens` (output) is independent — generation tokens never count as cached.
+
+### On `usage_records`
+
+Every ModelCall produces a `usage_records` row with `cached_tokens` as a typed column alongside `input_tokens`, `output_tokens`, and the pricing-snapshot columns:
+
+| Column | Source |
+|---|---|
+| `input_tokens` | `usage.prompt_tokens` |
+| `cached_tokens` | `usage.cached_tokens` |
+| `output_tokens` | `usage.completion_tokens` |
+| `input_price_snapshot` | Frozen rate for input tokens at call time. |
+| `output_price_snapshot` | Frozen rate for output tokens at call time. |
+| `discount_snapshot` | Frozen cache-discount rate at call time. |
+
+The pricing snapshots make each row self-contained for audit (ADR-022).
+
+### On the [ContextManifest](/docs/concepts/context-manifests)
+
+The manifest's `token_counts` exposes the input shape — `stable_tokens`, `volatile_tokens`, `active_tokens`, `offloaded_tokens` — but does not directly carry `cached_tokens`. `cached_tokens` is what the substrate *actually reused* on a specific call; manifest token counts describe the *manifest's shape*. They correlate (a manifest with high `stable_tokens` and a hot replica produces high `cached_tokens`) but are not the same field.
+
+The router uses `manifest.token_counts.stable_tokens` plus warmness to *estimate* prefill savings; the substrate then reports `cached_tokens` as the realized number.
+
+## How `cached_tokens` is produced
+
+The substrate computes `cached_tokens` per request as the count of input tokens served from KV cache before the divergence point with prior cached state. The number is **real** — it is the substrate's own count, not a control-plane estimate.
+
+The flow:
+
+```
+1. Manifest is admitted; bytes are rendered.
+2. Substrate looks up the rendered prefix in its KV cache.
+3. Substrate matches up to token N, where the prefix diverges.
+4. Substrate emits kv.state.accessed with N.
+5. cached_tokens = N is included in the usage block of the response.
+6. Metering writes the usage_records row with cached_tokens persisted.
+```
+
+Steps 4 and 5 are independent — `cached_tokens` lands on the response synchronously, and the `kv.state.accessed` event lands asynchronously on the [`kv_events`](/docs/concepts/events/state) stream. Both are sources of cache-state truth; the wire field is the per-call number, the event stream is the across-time projection feeding the [KV Index](/docs/concepts/kv-index).
+
+## Cost identity
+
+ADR-019/020/021 fix the cost relationships precisely:
+
+```
+gross_cost = input_tokens × input_price_snapshot
+           + output_tokens × output_price_snapshot
+
+cache_savings = cached_tokens × input_price_snapshot × discount_snapshot
+
+net_cost = gross_cost − cache_savings
+
+(gross_cost = net_cost + cache_savings exactly, after rounding)
+```
+
+`cached_tokens` is the only input-side variable in the savings calculation. A call with high `cached_tokens` produces high savings; a call with `cached_tokens = 0` (cold prefix) produces zero savings and `net_cost = gross_cost`.
+
+The identity holds *exactly* — `gross = net + savings` is computed as the difference of rounded values, so audits do not see drift from independent rounding paths.
+
+### Headers and final SSE chunk
+
+For non-streaming responses, both gross and net values are exposed as cost headers (ADR-019). For streaming responses, the final SSE chunk carries the cost block (ADR-021); KovaServe does not put cost in HTTP headers for streaming responses because they would precede the realized value.
+
+```
+X-KS-Cost-Cents: 0.0420
+X-KS-Cost-Cents-Gross: 0.0680
+X-KS-Cost-Cents-Savings: 0.0260
+```
+
+When `cached_tokens = 0`, the savings header is `0.0000` — present, not omitted (ADR-019: cost headers are always-present on non-streaming v2 responses).
+
+## Multi-tier reuse and `cached_tokens`
+
+A request that matches at multiple breakpoints — `tools` and `system` reused, but divergent at `history-prefix` — still produces a single `cached_tokens` number. The substrate counts contiguous reused tokens from the start of the prefix to the divergence point; non-contiguous reuse does not contribute.
+
+In practice this means earlier breakpoints (tools, system) drive the bulk of cache reuse value because they sit at the start of the rendered prefix. Later breakpoints rarely add to `cached_tokens` because divergence in any earlier breakpoint truncates the contiguous match.
+
+## Anonymous traffic
+
+Requests on the v1 anonymous path (no `kovaserve` extension key) produce `cached_tokens` on the response just like v2 traffic, but the per-call `usage_records` row is included in JSONL exports per ADR-024 (one row per `usage_records` row, including anonymous traffic). Anonymous traffic does not carry a Run, Step, or ContextManifest reference — `cached_tokens` is the only cache-related accounting available.
+
+## Aggregation
+
+Metering aggregations expose `cached_tokens` at every scope:
+
+| Scope | Endpoint |
+|---|---|
+| Run | `GET /v1/ks/metering/usage?scope=run&run_id=...` |
+| Project | `GET /v1/ks/metering/usage?scope=project&project_id=...` |
+| Tenant | `GET /v1/ks/metering/usage?scope=tenant` |
+
+ADR-023 governs error semantics: `scope=run` returns `404` if the Run is unknown; `scope=project` and `scope=tenant` return `200` with zero counts when there is no traffic.
+
+## Forecasting
+
+The Metering Layer's forecast model uses historical `cached_tokens` ratios per Session and per stable-context lineage to project remaining spend. A Run sitting on a hot prefix forecasts lower than one without; the forecast advances on every call as actual `cached_tokens` come in.
+
+Forecast deltas appear on `ks.budget.forecast_updated` events; they never *cause* admission decisions on their own — the [Budget state machine](/docs/concepts/budget-state-machine) advances on realized consumption, not projected.
+
+## What `cached_tokens` is not
+
+- **Not an estimate.** The substrate reports the realized number. KovaServe never substitutes a heuristic.
+- **Not output-side.** Generation tokens are never cached.
+- **Not the same as `manifest.token_counts.stable_tokens`.** Manifest stable tokens are a *shape* property of the input; cached tokens are the *actual reuse* number.
+- **Not free of substrate truth.** When the [KV index](/docs/concepts/kv-index) and `cached_tokens` disagree (e.g. a routing decision predicted warm reuse but the substrate served cold), `cached_tokens` is canonical for accounting and the divergence is recorded as a routing-quality signal.
+
+## See also
+
+- [KV cache](/docs/concepts/kv-cache) — the substrate mechanism `cached_tokens` measures
+- [KV index](/docs/concepts/kv-index) — the across-time projection
+- [Cost model](/docs/concepts/cost-model) — gross / net / savings (ADR-019/020/021)
+- [Pricing snapshots](/docs/concepts/pricing-snapshots) — `*_price_snapshot` columns (ADR-022)
+- [Manifest-aware routing](/docs/concepts/manifest-aware-routing) — the consumer that estimates savings before dispatch
+- [`GET /v1/ks/metering/usage`](/docs/api/metering/usage)
