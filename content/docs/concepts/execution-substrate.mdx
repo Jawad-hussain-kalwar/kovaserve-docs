@@ -1,0 +1,178 @@
+---
+title: Execution substrate
+description: Layer 1 — the open, vLLM-aligned inference substrate beneath KovaServe. Carries the execution metadata envelope, exposes KV state lifecycle, supports restore/import/export, and emits real substrate signals upward.
+---
+
+The **execution substrate** is Layer 1 of the KovaServe layered model — the open inference engine that performs model computation and exposes execution mechanics to the control plane above. It is vLLM-aligned by default: KovaServe builds on vLLM and llm-d-style systems instead of forking the inference ecosystem. The substrate's job is to make serving infrastructure visible and controllable enough for [Layer 2](/docs/concepts/control-plane) to reason about continuity, resumability, and execution economics using real signals — not synthetic approximations.
+
+```
+┌─ Layer 1 — execution substrate (per GPU node) ────────────────────────┐
+│                                                                       │
+│   vLLM engine                                                         │
+│    ├── Execution-metadata carrier (run_id, session_id, step_id, ...)  │
+│    ├── KV cache lifecycle hooks                                       │
+│    ├── Prefix / state visibility (hot/warm/cool/cold/partial)         │
+│    ├── Restore / import / export primitives                           │
+│    ├── Tier movement (HBM ↔ host RAM ↔ NVMe ↔ object)                 │
+│    └── Scheduler / admission cooperation                              │
+│                                                                       │
+│   KovaServe Layer 1 adjacencies                                       │
+│    ├── Engine Adapter      ── canonical envelope ↔ vLLM request       │
+│    ├── Node Agent (gRPC)   ── node telemetry, KV lookups, hooks       │
+│    ├── Transfer / Restore Worker ── tier movement, state mobility     │
+│    └── Local Event Publisher ── kv_events → NATS JetStream            │
+│                                                                       │
+└────────────────────────────▲──────────────────────────────────────────┘
+                             │  metadata down · events / telemetry up
+                             ▼
+                    Layer 2 control plane
+```
+
+The substrate is intentionally substrate-focused. It carries semantics; it does not own them. The canonical execution model — `Run`, `Session`, `Step`, `ModelCall`, `ContextManifest`, `Checkpoint`, `Budget`, `PolicyScope` — lives in Layer 2. The substrate is what makes the control plane credible because every routing, tiering, checkpoint, and economic decision rests on real substrate truth.
+
+## What the substrate exposes
+
+Layer 1 exposes seven capabilities that the control plane relies on.
+
+### 1. Execution metadata propagation
+
+The substrate accepts and carries an execution metadata envelope from the gateway through the engine, allocator, scheduler, eventing, and completion path. The envelope binds every model invocation to its canonical execution identity:
+
+| Field | Purpose |
+|---|---|
+| `run_id` | Owning [Run](/docs/concepts/runs). |
+| `session_id` | Bound [Session](/docs/concepts/sessions), if any. |
+| `step_id` | Owning [Step](/docs/concepts/steps). |
+| `model_call_id` | The specific [ModelCall](/docs/concepts/model-calls). |
+| `context_manifest_id` | The [ContextManifest](/docs/concepts/context-manifests) admitted for this call. |
+| `stable_context_id` | Compatibility-aware identity for cache reuse and routing. |
+| `stable_prefix_id` | Legacy prefix identity (Pass 4 router compatibility). |
+| `checkpoint_id` | Originating [Checkpoint](/docs/concepts/checkpoints), if this call is a resume. |
+| `policy_scope_ref` | Resolved [PolicyScope](/docs/concepts/policy-scopes). |
+| `budget_context` | Run-level [Budget](/docs/concepts/budgets) reference. |
+| `placement_hint` | Optional [PlacementHint](/docs/concepts/placement-hints) from the runtime or operator. |
+| `memory_class_hints` | Typed [MemoryScope](/docs/concepts/memory-scopes) annotations. |
+| `trace_id` | OpenTelemetry trace correlation. |
+
+The substrate does not interpret these fields. It preserves them through every stage so emitted events can be joined back to canonical entities upstream.
+
+### 2. KV state lifecycle
+
+The substrate is the source of truth for reusable execution state. Every meaningful transition in the KV cache is emitted as a real event on the `kv_events` substrate stream — never synthesized at a higher layer.
+
+| Event | Meaning |
+|---|---|
+| `kv.state.stored` | A new prefix or KV block was written. |
+| `kv.state.accessed` | An existing prefix was hit. |
+| `kv.state.partial_match` | A request matched part of a prefix but required additional prefill. |
+| `kv.state.demoted` | Blocks moved from a hotter tier to a cooler one. |
+| `kv.state.promoted` | Blocks moved from a cooler tier to a hotter one. |
+| `kv.state.restored` | Blocks were imported back into HBM from durable storage. |
+| `kv.state.transferred` | Blocks moved between nodes. |
+| `kv.state.evicted` | Blocks were dropped from a tier. |
+| `kv.state.invalidated` | Blocks were invalidated (model swap, tokenizer change, scope change). |
+
+Layer 2's [KV Event System](/docs/concepts/events/state) ingests this stream, the [KV Index](/docs/concepts/kv-index) projects it into a queryable view of cluster-wide state, and the [Cache-Aware Router](/docs/concepts/manifest-aware-routing) consumes that view at placement time.
+
+### 3. Prefix and state visibility
+
+For a given `stable_prefix_id` or `stable_context_id`, the substrate reveals whether a match exists, where it is resident, how fresh it is, whether it is exact or partial, and what restore cost may apply. Warmness classes:
+
+| Class | Meaning |
+|---|---|
+| `hot` | Resident in HBM on a ready node. |
+| `warm` | Resident in host RAM, loadable into HBM cheaply. |
+| `cool` | Resident on local NVMe, loadable with measurable I/O cost. |
+| `cold` | Resident in durable object storage; restore cost is the primary factor. |
+| `partial` | The match covers a prefix of the requested context but not all of it. |
+
+Visibility is what makes [manifest-aware routing](/docs/concepts/manifest-aware-routing) and logical-context-first [resume](/docs/concepts/resume-flow) tractable.
+
+### 4. Restore / import / export primitives
+
+The substrate supports exporting and importing reusable execution state with compatibility checks across model family, tokenizer, renderer version, and node topology. Each operation reports its outcome — success or failure, target residency, latency, and failure reason — so the [Checkpoint Manager](/docs/concepts/checkpoints) and [Tiering / State Manager](/docs/concepts/control-plane#tiering--state-manager) can plan against truth.
+
+| Operation | Used by |
+|---|---|
+| Export | Checkpoint capture (`kv_prefix` [StateHandle](/docs/concepts/state-handles)), tier movement to durable storage. |
+| Import | Checkpoint resume, tier promotion, cross-node transfer. |
+| Validate | Compatibility check before resume. Verifies model id, tokenizer fingerprint, renderer version, and scope alignment. |
+
+A checkpoint remains valid even when KV restore is unavailable — the [resume flow](/docs/concepts/resume-flow) reconstructs active context from the manifest first and only optimizes with KV restore when feasible.
+
+### 5. Tier movement
+
+The substrate moves KV state across HBM, host RAM, local NVMe, and durable object storage while preserving stable state identity. It exposes occupancy, pressure, transfer latency, restore latency, and success/failure outcomes so Layer 2's tiering planner can act on real readings.
+
+| Tier | Properties |
+|---|---|
+| HBM | On-GPU, lowest latency, smallest capacity, evicted under pressure. |
+| Host RAM | Off-GPU, low latency, larger capacity, used for working-set offload. |
+| Local NVMe | On-node disk, moderate latency, large capacity. |
+| Object storage | Durable, cross-node, large capacity, primary durable tier (MinIO managed; S3-compatible in private mode). |
+
+Raw movement execution lives in the KovaServe-owned **Transfer/Restore Worker** adjacency, not in the engine core. This keeps the upstream substrate clean while letting KovaServe ship operational features.
+
+### 6. Scheduler and admission cooperation
+
+The substrate accepts route and admission hints from Layer 2 and returns acceptance, delay, rejection, or degraded alternatives. The interface is advisory in v1 — the substrate retains the final scheduling decision — and tightens over time toward deeper integration. This is what lets the [Cache-Aware Router](/docs/concepts/manifest-aware-routing) plan placement on real node state instead of blind load-balancing.
+
+### 7. Node telemetry
+
+Each node emits real telemetry: queue depth, HBM pressure, KV occupancy, transfer latency, restore latency, model lifecycle signals, and per-request usage primitives (real input/output token counts and `cached_tokens`). Layer 2 consumes this for the dashboard, metering, and admission decisions. No synthetic counters; no estimated token counts.
+
+## What runs on the substrate
+
+A Layer 1 deployment on a single GPU node is composed of an engine plus four KovaServe-owned adjacencies. The adjacencies live alongside the engine — not inside it — so upstream alignment is preserved.
+
+| Component | Owned by | Purpose |
+|---|---|---|
+| **vLLM engine** | Open source (KovaServe-aligned) | Model execution, KV cache, scheduler. Patched with the execution-metadata carrier and the KV lifecycle hook surface. |
+| **Engine Adapter** | KovaServe | Translates the canonical execution envelope into vLLM request shape; strips the [`kovaserve` extension field](/docs/api/index#extension-envelope) before forwarding; reattaches metadata to emitted events. |
+| **Node Agent** | KovaServe | gRPC server exposing node telemetry, KV state lookups, restore/import/export, and lifecycle hooks. The control plane talks to the substrate through this surface. |
+| **Transfer/Restore Worker** | KovaServe | Performs tier movement between HBM, host RAM, NVMe, and object tiers while preserving stable state identity. |
+| **Local Event Publisher** | KovaServe | Emits `kv_events` into NATS JetStream. The publisher is local because event emission must not depend on cross-node connectivity. |
+
+The Engine Adapter and Node Agent are the boundary between Layer 1 and Layer 2. Everything below them is engine substrate; everything above them is the canonical control plane.
+
+## The vLLM alignment story
+
+KovaServe aligns with vLLM as the v1 substrate and prepares for llm-d and disaggregated serving over time. The alignment principle: contribute upstream where extensions are generally useful, and ship operational features in KovaServe-owned adjacencies where company-specific semantics would not belong in an open engine.
+
+| In vLLM | In KovaServe adjacencies |
+|---|---|
+| Request/engine execution-context carrier | Engine Adapter (envelope translation) |
+| KVConnector or equivalent KV cache lifecycle hooks | Local Event Publisher (event emission to NATS) |
+| Local state lookup API | Node Agent (gRPC endpoint exposed to Layer 2) |
+| Export/import primitives for reusable state | Transfer/Restore Worker (orchestration, retries, telemetry) |
+| Scheduler advisory/admission interface | Layer 2 Cache-Aware Router (placement decisions) |
+| Model lifecycle and compatibility signals | Layer 2 Checkpoint Manager (resume validation) |
+
+Equivalent extensions exist for **llm-d-style systems**: distributed worker state reporting, distributed state identity visibility, phase-aware handoff in disaggregated serving, distributed restore/import coordination, and admission and locality reporting across worker groups. The control-plane abstractions are deliberately engine-agnostic so multi-backend support is a substrate question, not an architectural one.
+
+## What the substrate does not own
+
+The substrate carries identifiers; it does not own their semantics.
+
+- **No canonical execution model.** `Run` / `Session` / `Step` / `ModelCall` persistence and FSMs live in the [control plane](/docs/concepts/control-plane).
+- **No cluster-wide KV index.** The substrate exposes per-node state. Cross-node aggregation is the [KV Index Service](/docs/concepts/kv-index)'s job.
+- **No route scoring.** The substrate accepts hints and reports back. The [Cache-Aware Router](/docs/concepts/manifest-aware-routing) chooses placement.
+- **No restore strategy.** The substrate provides primitives (export, import, validate). The [Checkpoint Manager](/docs/concepts/checkpoints) plans logical-context-first restore.
+- **No context engineering.** The substrate may consume `stable_context_id` or `memory_class_hints` for placement and validation, but it never assembles a manifest. [GCM v2](/docs/concepts/control-plane#global-context-manager-gcm-v2) is the manifest producer.
+- **No tenancy.** The substrate is unaware of `Organization`, `Project`, `Environment`, or `Key`. It receives a resolved `policy_scope_ref` and respects it; it does not resolve it.
+- **No budget enforcement.** The substrate carries `budget_context` through the request path; the [Metering / Cost / Budget Layer](/docs/concepts/control-plane#metering--cost--budget) does the accounting and the [run-budget precheck](/docs/concepts/budgets) admits or rejects.
+
+## How the substrate fits in deployment
+
+The substrate runs on every GPU node, in both [managed cloud](/docs/concepts/managed-cloud) and [private deployment](/docs/concepts/private-deployment). The Helm chart parameterizes the topology — a 3-VM reference deployment is one control node plus two GPU nodes, scaled out by adding more GPU nodes. Each GPU node runs the same set of components in the same configuration; the control plane reaches every node through the Node Agent's gRPC surface.
+
+Substrate hot-path performance — prefill cost, KV reuse, transfer latency, restore latency — is what ultimately determines [cost per completed run](/docs/concepts/cost-per-completed-run). Layer 2 makes those numbers visible; Layer 1 makes them real.
+
+## See also
+
+- [Layered model](/docs/concepts/layered-model) — the three-layer architecture this page details Layer 1 of
+- [Control plane](/docs/concepts/control-plane) — Layer 2, the consumer of substrate signals
+- [KV cache fundamentals](/docs/concepts/kv-cache) · [KV Index](/docs/concepts/kv-index) · [Manifest-aware routing](/docs/concepts/manifest-aware-routing) — how Layer 2 turns substrate truth into placement
+- [State events](/docs/concepts/events/state) — the `kv_events` stream this layer emits
+- [Checkpoints](/docs/concepts/checkpoints) · [Resume flow](/docs/concepts/resume-flow) — how export / import / validate primitives compose into recovery
+- [Cached tokens](/docs/concepts/cached-tokens) — usage accounting that flows up from the substrate
