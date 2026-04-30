@@ -141,29 +141,29 @@ Living roadmap for `docs.kovaserve.com`. Source of structure for `content/docs/`
 
 ### Product modes — Blueprint Part 9
 
-- [ ] `concepts/byo-runtime.mdx` — BYO runtime mode (§9.2)
-- [ ] `concepts/managed-runtime.mdx` — KovaServe runtime mode (§9.3)
-- [ ] `concepts/managed-cloud.mdx` — managed cloud (§9.4)
-- [ ] `concepts/private-deployment.mdx` — self-hosted / private / sovereign (§9.5)
+- [x] `concepts/byo-runtime.mdx` — BYO runtime mode (§9.2)
+- [x] `concepts/managed-runtime.mdx` — KovaServe runtime mode (§9.3)
+- [x] `concepts/managed-cloud.mdx` — managed cloud (§9.4)
+- [x] `concepts/private-deployment.mdx` — self-hosted / private / sovereign (§9.5)
 
 ### Runtime / Layer 3 — Blueprint Part 6
 
-- [ ] `concepts/runtime-architecture.mdx`
-- [ ] `concepts/runtime-execution-semantics.mdx`
-- [ ] `concepts/workers.mdx`
-- [ ] `concepts/sandboxes.mdx`
-- [ ] `concepts/tool-invocations.mdx`
-- [ ] `concepts/workspaces.mdx`
-- [ ] `concepts/workspace-artifacts.mdx`
-- [ ] `concepts/runtime-local-state.mdx`
-- [ ] `concepts/runtime-observability.mdx`
+- [x] `concepts/runtime-architecture.mdx`
+- [x] `concepts/runtime-execution-semantics.mdx`
+- [x] `concepts/workers.mdx`
+- [x] `concepts/sandboxes.mdx`
+- [x] `concepts/tool-invocations.mdx`
+- [x] `concepts/workspaces.mdx`
+- [x] `concepts/workspace-artifacts.mdx`
+- [x] `concepts/runtime-local-state.mdx`
+- [x] `concepts/runtime-observability.mdx`
 
 ### Managed-agent SKUs — positioning §11 (positioning voice)
 
-- [ ] `concepts/managed-agents.mdx` — SKU model overview
-- [ ] `concepts/coderuns.mdx`
-- [ ] `concepts/opsruns.mdx`
-- [ ] `concepts/docruns.mdx`
+- [x] `concepts/managed-agents.mdx` — SKU model overview
+- [x] `concepts/coderuns.mdx`
+- [x] `concepts/opsruns.mdx`
+- [x] `concepts/docruns.mdx`
 
 ## 4. Guides
 

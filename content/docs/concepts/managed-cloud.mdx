@@ -1,0 +1,140 @@
+---
+title: Managed cloud
+description: KovaServe's hosted multi-tenant deployment topology — same canonical model, same APIs, same event taxonomy as private deployment, run by KovaServe and reachable at api.kovaserve.com.
+---
+
+**Managed cloud** is the KovaServe deployment topology that runs the control plane as a hosted multi-tenant service. The control plane, the dashboard, the APIs, the event infrastructure, and the [checkpoint](/docs/concepts/checkpoints) and [artifact](/docs/concepts/context-artifacts) storage are all operated by KovaServe and reachable at `https://api.kovaserve.com`. Customers bring tenancy, runtime metadata, and (optionally) their own GPU fleet — KovaServe brings the rest.
+
+```
+┌─ Managed cloud (api.kovaserve.com) ─────────────────────┐
+│                                                         │
+│  Hosted control plane                                   │
+│   ├── API Gateway                                       │
+│   ├── Canonical Execution Service                       │
+│   ├── Context engineering subsystem                     │
+│   ├── Cache-Aware Router                                │
+│   ├── Checkpoint Manager                                │
+│   ├── Metering / Budgets                                │
+│   ├── Event infrastructure  (NATS JetStream, ks.>)      │
+│   ├── Hosted Postgres / Redis / MinIO                   │
+│   └── Dashboard                                         │
+│                                                         │
+│  GPU fleets (configurable)                              │
+│   ├── Shared KovaServe fleet     (default)              │
+│   └── Partner / customer fleets  (BYO compute)          │
+└─────────────────────────────────────────────────────────┘
+```
+
+The semantic model — Run, Session, Step, ModelCall, ContextManifest, Budget, Checkpoint, PolicyScope, StateHandle — is identical to the model used in [private deployment](/docs/concepts/private-deployment). Managed and private differ in operations, not in semantic meaning. A workload that starts here and migrates to a sovereign deployment carries the same IDs, the same wire shapes, and the same event envelopes.
+
+## What KovaServe runs
+
+| Subsystem | Operated by KovaServe |
+|---|---|
+| API Gateway | Yes — TLS termination, authn, request normalization, runtime metadata ingestion. |
+| Canonical Execution Service | Yes — Run / Session / Step / ModelCall persistence and FSMs. |
+| Global Context Manager (GCM v2) | Yes — manifest assembly, identity computation, segment normalization. |
+| Context Manifest Registry | Yes — durable per-call manifests, queryable by Run / Step / ModelCall / Checkpoint. |
+| Context Artifact Store | Yes — MinIO-backed object storage for offloaded artifacts. |
+| Context Admission Service | Yes — pre-dispatch admission against [ContextBudget](/docs/concepts/context-budgets). |
+| Compaction Lineage Service | Yes — [CompactionRecord](/docs/concepts/compaction-records) storage. |
+| Memory Store Service | Yes — typed namespace + key store with [MemoryScope](/docs/concepts/memory-scopes) retention. |
+| Tool Catalog Registry | Yes — hashed, immutable, versioned [ToolCatalog](/docs/concepts/tool-catalogs) bundles. |
+| Tool Context Governance | Yes — [ToolContextDisposition](/docs/concepts/tool-context-disposition) decisions. |
+| KV Event System / KV Index | Yes — `kv_events` ingestion and reusable-state lookup. |
+| Cache-Aware Router | Yes — [manifest-aware routing](/docs/concepts/manifest-aware-routing) across the fleet. |
+| Session Registry | Yes — [Session](/docs/concepts/sessions) lifecycle and `current_manifest_id` continuity. |
+| [Checkpoint Manager](/docs/concepts/checkpoints) | Yes — checkpoint planning and logical-context-first restore. |
+| State Handle Registry | Yes — typed [StateHandle](/docs/concepts/state-handles) resolution. |
+| Tiering / State Manager | Yes — tier movement planning and state-identity preservation. |
+| Policy / Governance Layer | Yes — model ACLs, rate limits, share-scope rules, tool policy. |
+| Metering / Cost / Budget Layer | Yes — usage aggregation, [Budget](/docs/concepts/budgets) and [ContextBudget](/docs/concepts/context-budgets) enforcement, cost roll-up. |
+| Tenant Management | Yes — [Organization → Project → Environment → Key](/docs/concepts/tenancy) hierarchy. |
+| Dashboard | Yes — run explorer, session explorer, checkpoint browser, usage and budget panels, tenant admin. |
+
+## What the customer brings
+
+| Surface | Customer responsibility |
+|---|---|
+| Tenancy and identity | The Organization, its Projects, Environments, and the Keys that authenticate workloads. Provisioned through the dashboard or `POST /v1/ks/tenants`. |
+| Runtime | Either an external orchestrator using [BYO runtime mode](/docs/concepts/byo-runtime), or KovaServe's [managed runtime](/docs/concepts/managed-runtime). |
+| Tool catalogs | Tool definitions registered into [ToolCatalog](/docs/concepts/tool-catalogs) bundles. |
+| Policies and budgets | [PolicyScope](/docs/concepts/policy-scopes) overlays, [Budgets](/docs/concepts/budgets), [ContextBudgets](/docs/concepts/context-budgets) configured at the appropriate level. |
+| GPU compute (optional) | The default shared KovaServe fleet is the simplest path. Customers can also bind a partner fleet or a private fleet through the runtime-binding API while keeping the rest of the control plane managed. |
+
+## Endpoints
+
+The customer-facing surface on managed cloud:
+
+| Surface | Base URL |
+|---|---|
+| Inference (OpenAI-compatible) | `https://api.kovaserve.com/v1/chat/completions`, `/v1/models` |
+| Native control plane | `https://api.kovaserve.com/v1/ks/...` |
+| Context engineering | `https://api.kovaserve.com/v1/ks/context/...` |
+| Memory | `https://api.kovaserve.com/v1/ks/memory/...` |
+| Runtime APIs | `https://api.kovaserve.com/v1/ks/runtime/...` |
+| Events (pulled) | `https://api.kovaserve.com/v1/ks/events/...` |
+| Dashboard | `https://app.kovaserve.com` |
+
+The wire shapes, the [error envelope](/docs/api/errors), the [pagination](/docs/api/pagination) contract, the [idempotency](/docs/api/idempotency) headers, the [cost headers](/docs/api/cost-headers), and the [SSE streaming](/docs/api/streaming) conventions are identical to the ones used in private deployment.
+
+## Tenant isolation
+
+Multi-tenancy on managed cloud is **strong logical isolation**. Every record — every Run, every Session, every Checkpoint, every ContextArtifact, every MemoryEntry, every event, every usage row — carries `(organization_id, project_id, environment_id)` columns. Access checks resolve through the [tenancy](/docs/concepts/tenancy) hierarchy on every call.
+
+| Boundary | Enforcement |
+|---|---|
+| Cross-organization access | `404 Not Found` — identical to the response for a missing entity. ID probing leaks no information. |
+| Cross-project cache reuse | Default `context_share_scope = project`. The [Cache-Aware Router](/docs/concepts/manifest-aware-routing) only considers replicas whose origin matches the configured scope. |
+| Object storage | ContextArtifact bytes and KV exports are stored under tenant-scoped paths. |
+| Memory entries | Namespaced by `(organization_id, project_id, scope_type, scope_id, namespace, key)`; `tenant` scope spans Projects within an Organization, `global` spans Organizations only under admin control. |
+| Rate limits | Configured at any level; the most-specific applicable limit wins; Organization-level limits cap the sum of all Projects. |
+
+Stronger isolation modes — region pinning, single-tenant control-plane partitions, dedicated routing — are deployment-time choices that come with the [private deployment](/docs/concepts/private-deployment) topology.
+
+## Storage on managed cloud
+
+By default, hosted storage covers everything the control plane needs:
+
+- **Hosted Postgres** — canonical entity persistence (Runs, Sessions, Steps, ModelCalls, ContextManifests, Budgets, Checkpoints, PolicyScopes, MemoryEntries, ToolCatalogs, usage records).
+- **Hosted Redis** — rate-limit counters, idempotency cache, hot-path lookups.
+- **Hosted NATS JetStream** — `ks.>` event subjects with bounded retention; `kv_events` substrate stream with 24-hour retention.
+- **Hosted MinIO** — Context Artifact Store, KV export bundles, [WorkspaceArtifact](/docs/concepts/workspace-artifacts) bytes, checkpoint blobs.
+
+Customers who want object storage in their own bucket configure it on the Project. The control plane writes ContextArtifact and Checkpoint bytes to the customer-supplied bucket while retaining the manifest and metadata in hosted Postgres.
+
+## Chargeback and metering
+
+Every `usage_records` row carries `organization_id`, `project_id`, frozen [pricing snapshots](/docs/concepts/pricing-snapshots), and the `cached_tokens` [savings](/docs/concepts/cached-tokens) that landed on it. Roll-up granularity:
+
+| Layer | Surface |
+|---|---|
+| Per-Run | `cost_cents`, `gross_cost_cents`, `cache_savings_cents` on the Run record. |
+| Per-Project | `GET /v1/ks/metering/usage?scope=project&project_id=...` |
+| Per-Organization | `GET /v1/ks/metering/usage?scope=organization&organization_id=...` |
+| Export (audit) | `GET /v1/ks/metering/export` — one JSONL line per `usage_records` row. |
+
+The rounding contract preserves `gross = net + savings` exactly across rows and across scopes — see [cost model](/docs/concepts/cost-model).
+
+## Partner packaging
+
+Managed cloud supports partner fleets as first-class. A neocloud or AI infrastructure partner registers a fleet through the runtime-binding API, and customer Runs whose [PolicyScope](/docs/concepts/policy-scopes) routes them there land on the partner's GPUs while the canonical control plane stays hosted by KovaServe. The partner sees the same dashboard, the same event taxonomy, and the same metering surface as a fully hosted fleet.
+
+This is the path neoclouds use to launch [managed agents](/docs/concepts/managed-agents) on top of their existing capacity without standing up the control plane themselves.
+
+## When to choose managed cloud
+
+| Choose managed cloud when | Choose [private deployment](/docs/concepts/private-deployment) when |
+|---|---|
+| Time-to-first-Run matters more than topology control. | Data residency, sovereign jurisdiction, or air-gap constraints rule out hosted services. |
+| Hosted Postgres / Redis / NATS / MinIO are acceptable. | Customer-owned datastores are required. |
+| Default shared GPU fleet is acceptable, or a partner fleet covers it. | Specific GPU fleets must be operated under customer control. |
+| Cross-organization isolation through logical tenancy is sufficient. | Single-organization control-plane partitioning is required. |
+
+## See also
+
+- [Private deployment](/docs/concepts/private-deployment) — the self-hosted, sovereign, neocloud topology with the same semantic model
+- [Tenancy](/docs/concepts/tenancy) — the four-level hierarchy the multi-tenant deployment scopes against
+- [BYO runtime mode](/docs/concepts/byo-runtime) · [KovaServe runtime mode](/docs/concepts/managed-runtime) — the two product modes that run on top
+- [Authentication](/docs/api/authentication) — Bearer keys against `api.kovaserve.com`
+- [Cost per completed run](/docs/concepts/cost-per-completed-run) — the unit of value rolled up across managed cloud workloads
