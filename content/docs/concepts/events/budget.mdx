@@ -3,11 +3,11 @@ title: Budget events
 description: The budget stream — Run-level Budget transitions covering budget.warning, budget.forecast_updated, and budget.hard_stop.
 ---
 
-The **budget events** stream covers transitions on the Run-level [Budget](/docs/concepts/budgets) — the active control object that bounds cost, tokens, steps, time, and tool count for a single Run. Forecast updates land here on every Step admission; threshold crossings and hard stops emit dedicated events that drive admission rejection.
+The **budget events** stream covers transitions on the Run-level [Budget](/docs/concepts/policy/budgets) — the active control object that bounds cost, tokens, steps, time, and tool count for a single Run. Forecast updates land here on every Step admission; threshold crossings and hard stops emit dedicated events that drive admission rejection.
 
 Subjects: `ks.budget.*`. Persisted in the `execution_events` JetStream stream. Consumed via [`GET /v1/ks/events/budget`](/docs/api/events/budget).
 
-> The [ContextBudget](/docs/concepts/context-budgets) — admission control over context size — emits its own events under `ks.context.budget.*` on the [context engineering](/docs/concepts/events/context-engineering) stream. This page covers the Run-level Budget only.
+> The [ContextBudget](/docs/concepts/policy/context-budgets) — admission control over context size — emits its own events under `ks.context.budget.*` on the [context engineering](/docs/concepts/events/context-engineering) stream. This page covers the Run-level Budget only.
 
 ## Event types
 
@@ -103,7 +103,7 @@ The envelope's `run_id` is always populated; `step_id` is populated on `forecast
 
 ## Forecast and admission
 
-Forecasts inform UX (warning UI, dashboard projections, runtime hints) but never *cause* admission decisions on their own. The [Budget state machine](/docs/concepts/budget-state-machine) advances on realized consumption, not projected. A forecast that projects exhaustion ten Steps from now does not trigger `hard_stop` — only realized consumption does.
+Forecasts inform UX (warning UI, dashboard projections, runtime hints) but never *cause* admission decisions on their own. The [Budget state machine](/docs/concepts/policy/budget-state-machine) advances on realized consumption, not projected. A forecast that projects exhaustion ten Steps from now does not trigger `hard_stop` — only realized consumption does.
 
 This separation lets runtimes react to forecasts (compact context, drop optional segments, branch into a cheaper variant) without the Budget itself changing state.
 
@@ -116,8 +116,8 @@ This separation lets runtimes react to forecasts (compact context, drop optional
 
 ## See also
 
-- [Budgets](/docs/concepts/budgets) — the entity these events project
-- [Budget state machine](/docs/concepts/budget-state-machine) — the FSM transitions land on
+- [Budgets](/docs/concepts/policy/budgets) — the entity these events project
+- [Budget state machine](/docs/concepts/policy/budget-state-machine) — the FSM transitions land on
 - [Context budget events](/docs/concepts/events/context-engineering#context-budget-events) — the per-call admission counterpart
-- [Cost model](/docs/concepts/cost-model) — the realized consumption side
+- [Cost model](/docs/concepts/cost/cost-model) — the realized consumption side
 - [`GET /v1/ks/events/budget`](/docs/api/events/budget)

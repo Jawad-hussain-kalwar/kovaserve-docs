@@ -1,0 +1,9 @@
+{
+  "title": "Deployment modes",
+  "pages": [
+    "byo-runtime",
+    "managed-runtime",
+    "managed-cloud",
+    "private-deployment"
+  ]
+}

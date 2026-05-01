@@ -1,0 +1,182 @@
+---
+title: ModelCalls
+description: One substrate-bound model invocation — the ContextManifest it consumed, where it ran, what it used, and what it cost.
+---
+
+A **ModelCall** is one substrate-bound model invocation belonging to a [Step](/docs/concepts/run-hierarchy/steps). It is the row that records *what actually hit the inference substrate*: which model, on which node, against which [ContextManifest](/docs/concepts/context/context-manifests), with which token counts, at what cost. Where Steps are how you reason about *what the Run is doing*, ModelCalls are how you reason about *what it cost and how it was placed*.
+
+ModelCalls are owned by the **Canonical Execution Service**. The service inserts a ModelCall row only after the substrate has executed and returned real usage — never against client-side estimates. The row binds the execution event back to its admitted ContextManifest, to the Step that requested it, and (transitively) to the Run that owns the Step.
+
+## What a ModelCall records
+
+| Field | Purpose |
+|---|---|
+| `id` | The ModelCall identifier (bare 26-character Crockford ULID). |
+| `step_id` | The owning [Step](/docs/concepts/run-hierarchy/steps). Immutable. |
+| `run_id` | The owning [Run](/docs/concepts/run-hierarchy/runs), denormalized for query convenience. Immutable. |
+| `model` | The model that served the call (e.g. `qwen3-coder-30b`). |
+| `node_id` | The Layer 1 node that executed the call. |
+| `context_manifest_id` | Foreign key to the admitted [ContextManifest](/docs/concepts/context/context-manifests) the substrate consumed. The audit anchor. |
+| `prompt_tokens` | Real prompt token count from the substrate response. |
+| `completion_tokens` | Real completion token count from the substrate response. |
+| `cached_tokens` | Subset of `prompt_tokens` served from prompt cache. Field name is OpenAI-convergent. |
+| `cache_hit_ratio` | `cached_tokens / prompt_tokens`, materialized for fast aggregation. |
+| `cost_cents` | Net cost as a 4-decimal-digit `Decimal`, emitted as a string. |
+| `gross_cost_cents` | Cost the call would have incurred without any cache reuse. |
+| `cache_savings_cents` | `gross_cost_cents - cost_cents`. The identity `gross = net + savings` always holds. |
+| `ttft_ms` / `total_ms` | Real time-to-first-token and total latency from the substrate. |
+| `stable_prefix_id` | The legacy prefix-cache identity used by the cache-aware router. |
+| `traceparent` | W3C trace context for OpenTelemetry correlation. Recorded in `metadata`. |
+| `metadata` | Open key-value bag for runtime annotations the Canonical Execution Service does not interpret. |
+| `created_at` | When the row was inserted — after the substrate completed. |
+
+A ModelCall does **not** record prompts, messages, completion text, or reasoning content. Those live on the bound ContextManifest (input shape) and on the substrate's response payload (output, returned to the caller and not durably stored on the ModelCall row). What the row preserves is the relationship between the manifest, the substrate, and the cost.
+
+## The `context_manifest_id` FK is load-bearing
+
+Every ModelCall carries `context_manifest_id`. This is the single most important field on the row, because it is what makes long-running execution auditable:
+
+- **Cost is reproducible.** Given the manifest, you can replay token accounting and verify the recorded cost against the model's pricing snapshot. There is no hidden state.
+- **Routing is explainable.** The router's placement decision was made against this manifest's `stable_context_id` and `stable_prefix_id`; the rationale is replayable from the same identity.
+- **Resume is grounded.** A [Checkpoint](/docs/concepts/recovery/checkpoints) anchored to a ModelCall freezes the same manifest the call consumed. Restore reconstructs the active context from the manifest and its referenced [ContextArtifacts](/docs/concepts/context/context-artifacts) — the call can always be reproduced even when KV state is gone.
+- **Compaction lineage is queryable.** A [CompactionRecord](/docs/concepts/context/compaction-records) records source manifest IDs; given a ModelCall, you can trace what was summarized into what before this call ran.
+
+The FK is mandatory. Every ModelCall the gateway inserts has an admitted manifest behind it; admission happens before substrate dispatch (see [Steps](/docs/concepts/run-hierarchy/steps) for the admission ordering), so a manifest always exists by the time the call lands.
+
+## How a ModelCall is created
+
+1. The gateway authenticates and resolves PolicyScope.
+2. GCM assembles the ContextManifest; Tool Context Governance assigns ToolContextDispositions.
+3. ContextBudget admission and Run-level Budget pre-check pass; the manifest is admitted.
+4. The Step row is inserted, bound to the admitted manifest.
+5. The Cache-Aware Router selects a node using the manifest's `stable_context_id`, `stable_prefix_id`, KV Index lookup, scope filters, placement hints, and budget pressure.
+6. Layer 1 executes on the selected node.
+7. Real usage flows back: `prompt_tokens`, `completion_tokens`, `cached_tokens`, `ttft_ms`, `total_ms`.
+8. The Canonical Execution Service inserts the **ModelCall row** with `context_manifest_id` set, the cost computed from the model's pricing snapshot, and `cache_savings_cents` recorded as `gross_cost_cents - cost_cents`.
+9. `ks.model_call.completed` is published on the execution event stream.
+
+The row is inserted exactly once per substrate dispatch. A Step that issues parallel substrate calls inserts one row per dispatch under the same `step_id`.
+
+## How many ModelCalls per Step
+
+| Step type | Typical ModelCall count |
+|---|---|
+| `MODEL_CALL`, `TOOL_PLAN` | One — sometimes more when the runtime issues parallel calls (e.g. structured output paired with reasoning). |
+| `TOOL_EXECUTE`, `FILE_READ`, `FILE_WRITE`, `PROCESS_START` | Zero — the substrate is not invoked. |
+| `OBSERVE`, `THINK` | Zero or one, runtime's choice. |
+| `CHECKPOINT`, `PAUSE`, `RESUME`, `BRANCH` | Zero. |
+| `COMPLETE`, `FAIL` | Zero. |
+| `COMPACT` | Zero or one — present when the compactor is a model invocation; absent when compaction is mechanical. |
+| `MEMORY_READ`, `MEMORY_WRITE` | Zero. |
+| `SUB_RUN_DISPATCH`, `SUB_RUN_JOIN` | Zero. The child Run owns its own ModelCalls. |
+
+A Step with zero ModelCalls has zero cost — its presence on the timeline is informational, durability-related, or governance-related rather than substrate-bound.
+
+## Token accounting
+
+Token counts on a ModelCall are **real measurements from the substrate**, never client-side estimates. Three values matter:
+
+- **`prompt_tokens`** — total tokens the model saw on input.
+- **`completion_tokens`** — total tokens the model produced.
+- **`cached_tokens`** — the subset of `prompt_tokens` served from prompt cache. The field name aligns with OpenAI's prompt-caching surface so existing observability tooling reads it without translation.
+
+`cache_hit_ratio` is materialized as `cached_tokens / prompt_tokens` (zero when `prompt_tokens` is zero). It is stored on the row so dashboards and metering aggregations do not have to recompute it on every read.
+
+## Cost accounting
+
+Cost is recorded in three columns that always satisfy the identity `gross_cost_cents = cost_cents + cache_savings_cents`. Each value is a `Decimal` with 4 fractional digits and is emitted as a decimal string over JSON, so client-side aggregation never silently truncates to a binary float.
+
+| Column | Meaning |
+|---|---|
+| `cost_cents` | The net cost — what the call actually consumed against the Run's [Budget](/docs/concepts/policy/budgets). |
+| `gross_cost_cents` | What the call would have cost without any prompt-cache reuse. |
+| `cache_savings_cents` | `gross_cost_cents - cost_cents`. Materialized so cache savings can be aggregated cheaply. |
+
+Pricing inputs are captured per-row at insert time via pricing-snapshot columns (`input_price_snapshot`, `output_price_snapshot`, `discount_snapshot`). Each ModelCall row is self-contained for audit: a future change to a model's price list does not retroactively change recorded costs.
+
+## On the wire
+
+### Embedded in the Run timeline
+
+The canonical way to read ModelCalls is through `GET /v1/ks/runs/{id}` — Steps are embedded under the Run, and each Step's ModelCalls are embedded under the Step:
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+  "status": "RUNNING",
+  "steps": [
+    {
+      "id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T5",
+      "step_type": "MODEL_CALL",
+      "status": "SUCCEEDED",
+      "ordinal": 1,
+      "model_calls": [
+        {
+          "id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T6",
+          "step_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T5",
+          "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+          "model": "qwen3-coder-30b",
+          "node_id": "gpu-node-2",
+          "context_manifest_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T7",
+          "prompt_tokens": 4218,
+          "completion_tokens": 612,
+          "cached_tokens": 3984,
+          "cache_hit_ratio": 0.9445,
+          "cost_cents": "0.0420",
+          "gross_cost_cents": "0.4180",
+          "cache_savings_cents": "0.3760",
+          "ttft_ms": 142,
+          "total_ms": 1840,
+          "stable_prefix_id": "sp_01J8X9...",
+          "metadata": {
+            "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+          },
+          "created_at": "2026-04-30T12:00:18Z"
+        }
+      ]
+    }
+  ]
+}
+```
+
+### Direct fetch
+
+```http
+GET /v1/ks/runs/01J8X9Y2Z3K4M5N6P7Q8R9S0T1/steps/01J8X9Y2Z3K4M5N6P7Q8R9S0T5/model-calls
+Authorization: Bearer ks_...
+```
+
+Returns ModelCalls for the Step in insertion order. ModelCall IDs are bare 26-character Crockford ULIDs and are also sortable lexicographically by creation time.
+
+### Response headers and streaming
+
+For non-streaming responses on `/v1/chat/completions`, the gateway echoes per-call cost in always-present response headers (`X-KS-Cost-Cents`, `X-KS-Gross-Cost-Cents`, `X-KS-Cache-Savings-Cents`); the value is `0` when not applicable. For streaming responses, cost is delivered in the **final SSE chunk** rather than headers, following OpenAI's streaming convention. Either way, the durable record is the ModelCall row — headers and stream chunks are convenience surfaces over the same data.
+
+## Events
+
+Two events on the execution stream make a ModelCall observable:
+
+| Event | When |
+|---|---|
+| `ks.model_call.started` | Substrate dispatch begins after admission and routing. |
+| `ks.model_call.completed` | Substrate returns; the ModelCall row is inserted. |
+
+Each event carries `run_id`, `step_id`, `model_call_id`, `context_manifest_id`, `model_id`, `node_id`, and `tenant_id` / `project_id` in its envelope.
+
+## What a ModelCall is not
+
+- **Not a request.** A request is the gateway-level transaction that may produce one or several ModelCalls (parallel structured-output calls, side-channel reasoning calls, retries against a fallback model). The ModelCall is the substrate-level record.
+- **Not the cost authority for the Run.** The Run's accumulated cost is the sum of its ModelCalls, but the **metering record** is the canonical billing surface. ModelCalls are the per-call detail; metering is the rolled-up source of truth for budgets and chargeback.
+- **Not the prompt or response.** The bound ContextManifest carries the input shape; the response payload is returned to the caller. The ModelCall row carries the relationship and the accounting, not the content.
+- **Not retriable in place.** A failed substrate call inserts a ModelCall row that records the failure; a retry is a new ModelCall under a (possibly new) Step. The row is the durable evidence of what happened.
+
+## See also
+
+- [Steps](/docs/concepts/run-hierarchy/steps) — what a ModelCall belongs to
+- [Context manifests](/docs/concepts/context/context-manifests) — the audit anchor every ModelCall references
+- [Cached tokens](/docs/concepts/routing/cached-tokens) — the OpenAI-convergent prompt-cache field
+- [Cost model](/docs/concepts/cost/cost-model) — gross / net / cache-savings accounting
+- [Pricing snapshots](/docs/concepts/cost/pricing-snapshots) — per-row pricing capture
+- [Manifest-aware routing](/docs/concepts/routing/manifest-aware-routing) — how `node_id` is selected
+- [Runs](/docs/concepts/run-hierarchy/runs) — the durable execution objective these calls serve
+- [`GET /v1/ks/runs/{id}`](/docs/api/runs/get) · [`GET /v1/ks/runs/{id}/steps`](/docs/api/runs/steps)

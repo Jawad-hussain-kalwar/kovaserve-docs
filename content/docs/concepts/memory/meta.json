@@ -1,0 +1,9 @@
+{
+  "title": "Memory",
+  "pages": [
+    "index",
+    "memory-scopes",
+    "memory-entries",
+    "memory-store"
+  ]
+}

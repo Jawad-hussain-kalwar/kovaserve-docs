@@ -1,0 +1,168 @@
+---
+title: Workspace artifacts
+description: The catalog of byte-level outputs a runtime Run produces — stdout, stderr, file diffs, patches, test reports, tool results, model outputs, workspace snapshots, checkpoint notes — recorded as first-class WorkspaceArtifacts and surfaced on the timeline.
+---
+
+A **WorkspaceArtifact** is the runtime's first-class record of a byte-level output produced during a Run — a stdout capture, a stderr capture, a file diff, a patch, a test report, a tool result, a model output, a workspace snapshot, or a checkpoint note. WorkspaceArtifacts are what makes the [runtime timeline](/docs/concepts/runtime/runtime-observability) inspectable: every Step that produces or modifies bytes leaves an artifact behind, and the artifact is queryable, replayable, and (for snapshots) restorable.
+
+WorkspaceArtifacts are distinct from [ContextArtifacts](/docs/concepts/context/context-artifacts). ContextArtifacts are the canonical Layer 2 entity for *context bytes* — bytes that enter a [ContextManifest](/docs/concepts/context/context-manifests) by reference. WorkspaceArtifacts are the runtime's catalog of *what the Run did to its workspace* — outputs, mutations, snapshots, reports. A `FILE_WRITE` Step's diff is a WorkspaceArtifact (runtime-side); the same bytes, if subsequently inlined into a future model call, become or reference a ContextArtifact (context-side).
+
+```
+┌─ Run timeline ──────────────────────────────────────────────────────┐
+│                                                                     │
+│  Step 03  PROCESS_START   ──▶ artifact stdout_03    (.txt)          │
+│                            ──▶ artifact stderr_03   (.txt)          │
+│                                                                     │
+│  Step 07  FILE_WRITE      ──▶ artifact diff_07      (.diff)         │
+│                                                                     │
+│  Step 12  TOOL_EXECUTE    ──▶ artifact test_report  (.json)         │
+│                            ──▶ artifact stdout_12   (.txt)          │
+│                                                                     │
+│  Step 14  CHECKPOINT      ──▶ artifact snapshot_14  (.tar.zst)      │
+│                            ──▶ artifact checkpoint_note_14 (.md)    │
+│                                                                     │
+│  Step 21  MODEL_CALL      ──▶ artifact model_output_21 (.json)      │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+The Workspace / Artifact Manager is the [Layer 3 subsystem](/docs/concepts/runtime/runtime-architecture#workspace--artifact-manager) that owns the catalog.
+
+## Artifact types
+
+| Type | Produced by | Content |
+|---|---|---|
+| `stdout` | `PROCESS_START`, `TOOL_EXECUTE` | Captured stdout bytes. |
+| `stderr` | `PROCESS_START`, `TOOL_EXECUTE` | Captured stderr bytes. |
+| `file` | `FILE_WRITE` (when configured) | A copy of a written file's bytes. |
+| `diff` | `FILE_WRITE` | The unified diff of the mutation. |
+| `patch` | Runtime-produced | A unified patch across multiple files (e.g. a coding agent's final delta). |
+| `test_report` | `TOOL_EXECUTE` of a `test_build` tool | Structured report — pass/fail count, failing tests, durations. |
+| `tool_result` | `TOOL_EXECUTE` | Full tool output when [disposition](/docs/concepts/tools/tool-context-disposition) requires offload. |
+| `model_output` | `MODEL_CALL` (when retained) | The model's full response, kept on the timeline regardless of whether it stayed in context. |
+| `workspace_snapshot` | `CHECKPOINT`, manual capture, branch | The byte-level snapshot of the workspace's writable scope. |
+| `checkpoint_note` | `CHECKPOINT` | Optional human-readable note attached to a Checkpoint. |
+
+## What a WorkspaceArtifact records
+
+| Field | Purpose |
+|---|---|
+| `id` | ULID. |
+| `run_id` | The Run the artifact belongs to. |
+| `step_id` | The Step that produced it (when applicable). |
+| `workspace_id` | The Workspace it was produced against. |
+| `type` | One of the types above. |
+| `mime_type` | E.g. `text/plain`, `text/x-diff`, `application/json`, `application/x-tar+zstd`. |
+| `name` | Human-readable name (`stdout`, `pytest-report.json`, `step-07.diff`). |
+| `version` | Monotonic version when the runtime overwrites a same-named artifact. |
+| `byte_size` | Size in bytes. |
+| `digest` | Content hash for integrity and dedup. |
+| `storage_uri` | S3 / MinIO URI under tenant-scoped path. |
+| `retention` | Retention class — see [Retention](#retention). |
+| `created_at` | When captured. |
+
+The shape mirrors the canonical [ContextArtifact](/docs/concepts/context/context-artifacts) — `name + version + mime_type + bytes` — so artifacts that promote into context (via tool result offload or `FILE_READ` on a captured file) carry the same handle shape.
+
+## Storage
+
+WorkspaceArtifact bytes live in S3-compatible object storage under tenant-scoped paths:
+
+```
+s3://<bucket>/orgs/<org_id>/projects/<project_id>/runs/<run_id>/artifacts/<artifact_id>
+```
+
+On [managed cloud](/docs/concepts/deployment/managed-cloud) the bucket is hosted MinIO unless the Project is configured with customer-supplied storage; on [private deployment](/docs/concepts/deployment/private-deployment) the bucket is the customer's own S3-compatible service. The [PolicyScope](/docs/concepts/policy/policy-scopes) `data_boundary` enforces region and residency constraints.
+
+## Listing artifacts
+
+```http
+GET /v1/ks/runtime/runs/01J8X9Y2Z3K4M5N6P7Q8R9S0T1/artifacts
+Authorization: Bearer ks_...
+```
+
+```json
+{
+  "data": [
+    {
+      "id":         "01J8X9Y2Z3K4M5N6P7Q8R9ART1",
+      "step_id":    "01J8X9Y2Z3K4M5N6P7Q8R9STP3",
+      "type":       "stdout",
+      "name":       "stdout",
+      "version":    1,
+      "mime_type":  "text/plain",
+      "byte_size":  18420,
+      "digest":     "sha256:9f1c..."
+    },
+    {
+      "id":         "01J8X9Y2Z3K4M5N6P7Q8R9ART2",
+      "step_id":    "01J8X9Y2Z3K4M5N6P7Q8R9STP7",
+      "type":       "diff",
+      "name":       "step-07.diff",
+      "version":    1,
+      "mime_type":  "text/x-diff",
+      "byte_size":  2104,
+      "digest":     "sha256:6a04..."
+    },
+    {
+      "id":         "01J8X9Y2Z3K4M5N6P7Q8R9SNP1",
+      "step_id":    "01J8X9Y2Z3K4M5N6P7Q8R9STP14",
+      "type":       "workspace_snapshot",
+      "name":       "snap-step-14",
+      "version":    1,
+      "mime_type":  "application/x-tar+zstd",
+      "byte_size":  18934211,
+      "digest":     "sha256:c81b..."
+    }
+  ],
+  "next_cursor": null
+}
+```
+
+## Promotion to ContextArtifact
+
+When a tool result, a file read, or a model output enters a future [ContextManifest](/docs/concepts/context/context-manifests), the runtime promotes the WorkspaceArtifact into a [ContextArtifact](/docs/concepts/context/context-artifacts) — the bytes do not move (the same `storage_uri` is referenced), but a Layer 2 ContextArtifact row is created and the manifest's segment carries `artifact_ref_id` to it. This is how the runtime keeps the canonical context catalog and the runtime timeline aligned without copying bytes.
+
+The reverse does not happen — Layer 2 ContextArtifacts (e.g. retrieved documents from a runtime's RAG path) are not WorkspaceArtifacts unless the runtime explicitly catalogs them.
+
+## Workspace snapshots
+
+A `workspace_snapshot` artifact is a special case: it is the byte-level state of the [Workspace](/docs/concepts/runtime/workspaces) writable scope at a moment in time, captured as a tarball compressed with zstd. Snapshots are produced:
+
+- on every [Checkpoint](/docs/concepts/recovery/checkpoints) when the [sandbox profile](/docs/concepts/runtime/sandboxes) sets `snapshot_policy = on_checkpoint`
+- on explicit operator request via `POST /v1/ks/runtime/workspaces/{id}/snapshot`
+- before a [branch](/docs/concepts/recovery/branches), so the child Run starts from the same filesystem state as the parent at the branch point
+
+A snapshot artifact is referenced as a `runtime_state` [StateHandle](/docs/concepts/recovery/state-handles) on the Checkpoint that triggered it. The [resume flow](/docs/concepts/recovery/resume-flow) restores the snapshot when the resume targets a Checkpoint and the sandbox profile permits it.
+
+## Retention
+
+Retention is governed at the project level and overrideable per artifact type:
+
+| Retention class | Default lifetime |
+|---|---|
+| `transient` | 24 hours — small captures the dashboard surfaces but does not need to keep. |
+| `run` | Until the Run is archived. The default for `stdout`, `stderr`, `diff`, `tool_result`, `model_output`. |
+| `session` | Until the [Session](/docs/concepts/continuity/sessions) is archived or expires. |
+| `policy` | Governed by the [PolicyScope](/docs/concepts/policy/policy-scopes) `data_boundary` retention setting — used by `workspace_snapshot`, `test_report`, `patch` for audit-grade retention. |
+| `pinned` | Indefinite. An artifact can be pinned through the dashboard or API to prevent eviction. |
+
+Retention rules are enforced by a periodic sweep that drops expired artifact rows and the underlying object-storage bytes.
+
+## Streaming consumption
+
+`stdout` and `stderr` artifacts can be streamed as they accumulate (long-running processes do not wait for the artifact to finalize). The same `GET /v1/ks/runtime/runs/{id}/artifacts/{artifact_id}` endpoint accepts an `Accept: text/event-stream` header and emits append events until the producing Step completes, then closes the stream.
+
+## What WorkspaceArtifacts are not
+
+- **Not a context entry.** A WorkspaceArtifact is a timeline byte-record. Bytes enter context only when a [ContextSegment](/docs/concepts/context/context-segments) references the artifact (via promotion to a [ContextArtifact](/docs/concepts/context/context-artifacts)).
+- **Not a metric.** Tool reports and test reports are structured but they live on the timeline, not in metering. Cost and savings are recorded on the Run and on `usage_records`, not on the artifact catalog.
+- **Not implicit.** The runtime decides which outputs become artifacts. A `PROCESS_START` whose stdout is suppressed by tool policy does not produce an artifact.
+
+## See also
+
+- [Workspaces](/docs/concepts/runtime/workspaces) — the structured filesystem artifacts are produced against
+- [Sandboxes](/docs/concepts/runtime/sandboxes) — the execution boundary that emits stdout, stderr, and process artifacts
+- [Tool invocations](/docs/concepts/runtime/tool-invocations) — tool outputs that become `tool_result` and `test_report` artifacts
+- [Context artifacts](/docs/concepts/context/context-artifacts) — the Layer 2 context catalog WorkspaceArtifacts promote into
+- [Checkpoints](/docs/concepts/recovery/checkpoints) · [Branch flow](/docs/concepts/recovery/branch-flow) — snapshots as `runtime_state` StateHandles
+- [Runtime observability](/docs/concepts/runtime/runtime-observability) — the timeline that surfaces the artifact catalog

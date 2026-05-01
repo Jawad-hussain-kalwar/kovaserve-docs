@@ -3,7 +3,7 @@ title: Execution events
 description: The execution stream — Run, Step, and ModelCall lifecycle events covering creation, started, paused, recovering, resumed, completed, and failed transitions.
 ---
 
-The **execution events** stream covers the lifecycle of [Runs](/docs/concepts/runs), [Steps](/docs/concepts/steps), and [ModelCalls](/docs/concepts/model-calls). It is the primary timeline of "what happened to my work" — every consumer that builds a Run explorer, a timeline UI, or an external trace reconstructs it from this stream.
+The **execution events** stream covers the lifecycle of [Runs](/docs/concepts/run-hierarchy/runs), [Steps](/docs/concepts/run-hierarchy/steps), and [ModelCalls](/docs/concepts/run-hierarchy/model-calls). It is the primary timeline of "what happened to my work" — every consumer that builds a Run explorer, a timeline UI, or an external trace reconstructs it from this stream.
 
 NATS subjects: `ks.run.*`, `ks.step.*`, `ks.model_call.*`. Persisted in the `execution_events` JetStream stream under the `ks.>` filter. Consumed via [`GET /v1/ks/events/execution`](/docs/api/events/execution).
 
@@ -152,8 +152,8 @@ Cross-Run ordering is not guaranteed — two Runs running concurrently produce i
 
 ## See also
 
-- [Run state machine](/docs/concepts/run-state-machine) — the 12-state FSM these events project
-- [Step state machine](/docs/concepts/step-state-machine) — the Step FSM
-- [ModelCall](/docs/concepts/model-calls) — the entity `ks.model_call.*` projects
-- [Event envelope](/docs/concepts/event-envelope) — the wrapping fields
+- [Run state machine](/docs/concepts/run-hierarchy/run-state-machine) — the 12-state FSM these events project
+- [Step state machine](/docs/concepts/run-hierarchy/step-state-machine) — the Step FSM
+- [ModelCall](/docs/concepts/run-hierarchy/model-calls) — the entity `ks.model_call.*` projects
+- [Event envelope](/docs/concepts/events/event-envelope) — the wrapping fields
 - [`GET /v1/ks/events/execution`](/docs/api/events/execution)

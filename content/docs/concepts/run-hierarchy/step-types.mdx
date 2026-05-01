@@ -1,0 +1,149 @@
+---
+title: Step types
+description: The canonical 19-value StepType enum — what each type represents, when runtimes emit it, and how the substrate, sandbox, and control plane interpret it.
+---
+
+KovaServe defines a canonical, open enum of **Step types** that classifies every [Step](/docs/concepts/run-hierarchy/steps) by what it is doing inside a [Run](/docs/concepts/run-hierarchy/runs). The catalog is large enough to cover the standard agent loop, workspace and process orchestration, reflection, durability, lineage, context engineering, and sub-run composition. New types extend the enum without a DDL change — Step type validation is application-level, not a database `CHECK` constraint.
+
+A runtime emits Step types that match its semantics and ignores the rest. A LangGraph BYO runtime may stick to `MODEL_CALL`, `TOOL_PLAN`, and `TOOL_EXECUTE`; the KovaServe runtime in coding-agent mode emits the full sandbox set; a document-review agent may also emit `OBSERVE` and `THINK` markers; any runtime that participates in compaction or memory reads emits the corresponding context-engineering types. The control plane interprets the types it owns — `CHECKPOINT`, `PAUSE`, `RESUME`, `BRANCH`, `COMPACT`, `MEMORY_READ`, `MEMORY_WRITE`, `SUB_RUN_DISPATCH`, `SUB_RUN_JOIN` — and stores the rest as runtime-emitted progression markers.
+
+## The canonical 19 values
+
+| Group | Step type |
+|---|---|
+| Standard agent loop | `MODEL_CALL`, `TOOL_PLAN`, `TOOL_EXECUTE` |
+| Workspace and process | `FILE_READ`, `FILE_WRITE`, `PROCESS_START` |
+| Reflection and reasoning | `OBSERVE`, `THINK` |
+| Durability and lineage | `CHECKPOINT`, `PAUSE`, `RESUME`, `BRANCH` |
+| Terminal markers | `COMPLETE`, `FAIL` |
+| Context engineering | `COMPACT`, `MEMORY_READ`, `MEMORY_WRITE` |
+| Sub-run | `SUB_RUN_DISPATCH`, `SUB_RUN_JOIN` |
+
+## Standard agent loop
+
+The three Steps every agentic Run will exercise.
+
+### `MODEL_CALL`
+
+A substrate-bound model invocation. The defining type — every Run that produces tokens emits at least one. Owns one [ModelCall](/docs/concepts/run-hierarchy/model-calls), which carries the [ContextManifest](/docs/concepts/context/context-manifests) the substrate consumed, the model and node placement, the token usage (including `cached_tokens`), and the cost breakdown. A runtime that issues parallel model calls inside a single Step records each as a separate ModelCall under the same `MODEL_CALL` Step.
+
+### `TOOL_PLAN`
+
+A reasoning Step in which the model selects which tool to call and with what arguments, but does not yet execute the tool. Often owns one ModelCall whose response is the planned tool invocation. The actual execution lands in a child `TOOL_EXECUTE` Step pointing back through `parent_step_id`.
+
+### `TOOL_EXECUTE`
+
+The execution of a tool the runtime selected. May be a child of a `TOOL_PLAN` Step (`parent_step_id` set) or a top-level Step when the runtime decides which tool to call without an explicit planning phase. Owns zero ModelCalls — the substrate is not invoked here. The result is recorded as a tool result and, when material, offloaded to a [ContextArtifact](/docs/concepts/context/context-artifacts) under the [ToolContextDisposition](/docs/concepts/tools/tool-context-disposition) chosen by Tool Context Governance.
+
+## Workspace and process
+
+Used by the KovaServe runtime in coding, terminal, and tool-heavy modes — where the agent operates against a [sandbox](/docs/concepts/runtime/sandboxes) and a structured [workspace](/docs/concepts/runtime/workspaces).
+
+### `FILE_READ`
+
+The runtime read one or more files from the workspace. The Step's metadata records the paths read; large file contents are stored as ContextArtifacts under the workspace's artifact policy, not inlined into the Step row.
+
+### `FILE_WRITE`
+
+The runtime mutated one or more files in the workspace. Writes are governed by the workspace's read/write policy; a Step that violates the policy is rejected before the write reaches disk. Diffs are recorded as ContextArtifacts and surface on the Layer 3 timeline as inspectable changes.
+
+### `PROCESS_START`
+
+The runtime started a process inside the sandbox — a shell command, a build, a test run, a long-running server. Process state is owned by the Sandbox Manager; the Step records the invocation and links to the process's stdout/stderr artifacts. A separate runtime event, `ks.process.waiting`, may surface during long-running processes; events and Step types are independent enumerations.
+
+## Reflection and reasoning
+
+Optional progression markers a runtime may emit to make reasoning legible on the timeline.
+
+### `OBSERVE`
+
+The runtime recorded an observation about the current state — a tool result interpretation, a workspace inspection, a checkpoint advisory. Owns zero ModelCalls. Used by runtimes that distinguish observation from planning to make timelines easier to read.
+
+### `THINK`
+
+The runtime recorded a deliberation Step — a chain-of-thought boundary, a planning pause, a self-critique. May or may not own a ModelCall depending on whether the runtime invokes the substrate to do the thinking.
+
+Both `OBSERVE` and `THINK` are decorative in the sense that the control plane does not act on them — they exist so timelines and audit views can show *why* a Run made a particular move, not just *what* it did.
+
+## Durability and lineage
+
+Step types the **Checkpoint Manager** and Canonical Execution Service interpret directly.
+
+### `CHECKPOINT`
+
+The runtime took a [Checkpoint](/docs/concepts/recovery/checkpoints) at this point in the Run. The Step records the checkpoint trigger (before a risky tool call, after a stable analysis phase, on budget warning, manual, periodic) and links to the resulting Checkpoint row via metadata. Owns zero ModelCalls.
+
+### `PAUSE`
+
+The Run was paused — by a runtime decision, by a budget-warning policy, by an operator action, or as part of a checkpoint-and-pause sequence. The Step records the pause reason; the Run transitions to the `PAUSED` state on the [Run state machine](/docs/concepts/run-hierarchy/run-state-machine).
+
+### `RESUME`
+
+The Run was resumed — either continuing from `PAUSED` or returning through `RECOVERING → RESUMING → RUNNING` after a Checkpoint-driven restore. The Step records the resume source (which Checkpoint, if any) and the resume mode (KV-warm, manifest replay, or both).
+
+### `BRANCH`
+
+The runtime created a new Run lineage from a Checkpoint or stable point. The new Run inherits the parent's PolicyScope and a bounded copy of its Budget. Branching is distinct from sub-run dispatch: a branch is an alternate continuation of the same Run's intent; a sub-run is a delegated child. See the `BRANCHING` state on the [Run state machine](/docs/concepts/run-hierarchy/run-state-machine).
+
+## Terminal markers
+
+Two Step types the runtime emits to make Run termination explicit.
+
+### `COMPLETE`
+
+The Run finished successfully. Often the last Step in a Run; carries any final summary the runtime wishes to record. The Run transitions to `COMPLETED` (terminal) on the Run state machine.
+
+### `FAIL`
+
+The Run failed in a way the runtime classifies as terminal — distinct from a `FAILED`-status `MODEL_CALL` or `TOOL_EXECUTE` Step that may be retried. The Step's metadata records the failure classification; the Run transitions to `FAILED` (terminal).
+
+A Run may also reach a terminal state without an explicit `COMPLETE` or `FAIL` Step — a budget hard-stop, an operator cancellation, or a policy denial that arrives at the end of execution moves the Run to its terminal state directly. The terminal-marker Step types exist for runtimes that want the explicit closure on the timeline.
+
+## Context engineering
+
+Step types that record interactions with the **Context Engineering Subsystem**.
+
+### `COMPACT`
+
+A compaction operation occurred — either runtime-produced or run by a KovaServe-managed compactor. The Step's effect is a [CompactionRecord](/docs/concepts/context/compaction-records) that captures the source manifest, source segment IDs, output segment IDs, method, model used, and token counts before and after. The lineage contract is the same regardless of which side produced the summary.
+
+### `MEMORY_READ`
+
+The runtime read one or more entries from the [Memory Store](/docs/concepts/memory/memory-store). The Step's metadata records the queried `(namespace, key)` pairs and the [MemoryScope](/docs/concepts/memory/memory-scopes) under which they were resolved. The retrieved entries enter the next ModelCall's manifest as segments with `memory_scope` set accordingly.
+
+### `MEMORY_WRITE`
+
+The runtime wrote, updated, or deleted one or more Memory Store entries. The Step records the affected `(namespace, key)` pairs and the scope; the corresponding `ks.memory.entry.written`, `ks.memory.entry.deleted`, or `ks.memory.entry.expired` events are emitted on the memory event stream.
+
+## Sub-run
+
+Step types the **Canonical Execution Service** uses to record [sub-run](/docs/concepts/run-hierarchy/sub-runs) lineage.
+
+### `SUB_RUN_DISPATCH`
+
+The Run dispatched a child Run via `POST /v1/ks/runs/{id}/subruns`. The Step's metadata pins the child's `run_id`; the child carries `parent_run_id` back at the dispatching Run. PolicyScope inheritance and Budget allocation happen at this Step.
+
+### `SUB_RUN_JOIN`
+
+The parent folded a completed child's `summary_artifact_id` into its next ContextManifest as a single bounded segment. The Step is emitted before the next `MODEL_CALL` Step that consumes the summary; ContextBudget admission re-evaluates the parent's manifest with the summary segment included.
+
+## Validation and extension
+
+Step type validation is performed at the application layer. The Step row stores the type as a `TEXT` column with an enum check enforced by the Pydantic schema and the Canonical Execution Service. New canonical types extend the enum without DDL changes — adding `MEMORY_READ` and `MEMORY_WRITE`, adding `COMPACT`, adding the sub-run pair — never requires a migration to widen a database constraint.
+
+Runtimes that need a Step type beyond the canonical set should propose it. KovaServe extends the canonical enum rather than letting the surface fragment, so timelines, dashboards, and audit consumers always interpret the same names the same way.
+
+## Step type vs. runtime event
+
+Step types and runtime events are **separate enumerations**. A Step type is a row inserted into the Step table; a runtime event is a message published on the event stream. Some runtime events have a corresponding Step type (`ks.tool.invocation.started` ↔ `TOOL_EXECUTE`); others do not (`ks.process.waiting` records process state without inserting a Step). Clients reading timelines should treat the two surfaces as complementary, not redundant.
+
+## See also
+
+- [Steps](/docs/concepts/run-hierarchy/steps) — the entity these types classify
+- [Step state machine](/docs/concepts/run-hierarchy/step-state-machine) — the lifecycle each Step type travels
+- [ModelCalls](/docs/concepts/run-hierarchy/model-calls) — what `MODEL_CALL`, `TOOL_PLAN`, and similar Steps own
+- [Checkpoints](/docs/concepts/recovery/checkpoints) — what `CHECKPOINT`, `PAUSE`, `RESUME`, `BRANCH` interact with
+- [Sub-runs](/docs/concepts/run-hierarchy/sub-runs) — the dispatch and join semantics of `SUB_RUN_DISPATCH` and `SUB_RUN_JOIN`
+- [Compaction records](/docs/concepts/context/compaction-records) — the lineage `COMPACT` produces
+- [Memory entries](/docs/concepts/memory/memory-entries) — what `MEMORY_READ` and `MEMORY_WRITE` operate on
+- [Sandboxes](/docs/concepts/runtime/sandboxes) · [Workspaces](/docs/concepts/runtime/workspaces) — where `FILE_READ`, `FILE_WRITE`, and `PROCESS_START` execute

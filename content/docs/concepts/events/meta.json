@@ -2,6 +2,7 @@
   "title": "Events",
   "pages": [
     "index",
+    "event-envelope",
     "execution",
     "state",
     "routing",

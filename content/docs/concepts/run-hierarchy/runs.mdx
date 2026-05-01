@@ -1,0 +1,185 @@
+---
+title: Runs
+description: The top-level durable execution objective — the unit of value, what a Run owns, and how sub-run lineage works.
+---
+
+A **Run** is one durable execution objective. It is the top-level entity in KovaServe's canonical execution model and the unit of value the entire control plane is organized around: not a token, not a request, but a Run that completes useful work over time. A coding task, a document review, a multi-step tool loop, a long-running ops investigation — each is one Run.
+
+Runs are owned by the **Canonical Execution Service**, the semantic ledger of execution. The service creates Runs, transitions them across their lifecycle, maintains lineage, and reconstructs timeline-friendly state for clients. Every Step, ModelCall, Checkpoint, and timeline event in the system traces back to exactly one Run.
+
+## What a Run owns
+
+A Run is the binding point for the control objects that govern its execution. Each Run carries a fixed set of references resolved at creation:
+
+| Reference | Cardinality | Purpose |
+|---|---|---|
+| `policy_scope_id` | exactly one | Resolved [PolicyScope](/docs/concepts/policy/policy-scopes) — governs model ACLs, share scope, data boundary, tool policy, and deployment restrictions. |
+| `budget_id` | zero or one | Run-level [Budget](/docs/concepts/policy/budgets) — controls cost, tokens, steps, time, and tool count as an active enforcement object. |
+| `context_budget_id` | zero or one | Per-run [ContextBudget](/docs/concepts/policy/context-budgets) — admission control over active context size, evaluated before GPU dispatch. |
+| `session_id` | zero or one | Bound [Session](/docs/concepts/continuity/sessions) — established when continuity across turns or related Runs is needed. Immutable once set. |
+| `parent_run_id` | zero or one | Originating Run when this Run was dispatched as a sub-run. Pins lineage for the Sub-Run primitive. |
+| `summary_artifact_id` | zero or one | The compact handoff this Run produced for its parent on completion. Set on sub-runs that have finished and posted their summary. |
+
+A Run also tracks creation, lifecycle, and operational metadata:
+
+| Field | Purpose |
+|---|---|
+| `id` | The Run identifier (bare 26-character Crockford ULID). |
+| `tenant_id` / `project_id` | Owning tenancy pair, inherited from the API key that created the Run. Immutable. |
+| `status` | The current state in the [Run state machine](/docs/concepts/run-hierarchy/run-state-machine). |
+| `model` | The default model the Run executes against, when not overridden per ModelCall. |
+| `external_run_id` | Optional opaque correlation ID supplied by an external runtime (LangGraph, Temporal, custom). Idempotency-keyed per tenant. |
+| `external_runtime` | Optional name of the originating runtime. Used by the Runtime Integration Adapters to route metadata back to its source. |
+| `step_count` | Monotonic counter of admitted Steps. Incremented only after admission succeeds. |
+| `created_at` / `started_at` / `completed_at` | Lifecycle timestamps. `completed_at` is set when the Run reaches a terminal state. |
+
+What a Run **does not** carry on the row itself: prompts, messages, tool definitions, or memory contents. Those are recorded on the [ContextManifest](/docs/concepts/context/context-manifests) per [ModelCall](/docs/concepts/run-hierarchy/model-calls), in the [Memory Store](/docs/concepts/memory/memory-store), and on the bound [ToolCatalog](/docs/concepts/tools/tool-catalogs) — never inlined onto the Run.
+
+## How a Run is created
+
+Runs are created two ways:
+
+**Explicit creation** — `POST /v1/ks/runs` with a `project_id` and optional `session_id`, `model`, `external_run_id`, `external_runtime`, and `policy_scope_ref`. The Canonical Execution Service resolves the PolicyScope, attaches the default Budget and ContextBudget for the project, and returns a Run in `CREATED`.
+
+**Implicit creation** — the first `POST /v1/chat/completions` carrying a `kovaserve.run_id` in the extension envelope creates the Run on the fly. The same scope resolution, budget attachment, and admission ordering apply; the only difference is that the Run row is materialized as part of the inference request rather than ahead of it.
+
+Both paths produce the same Run shape. The implicit path exists so BYO-runtime adopters can introduce KovaServe by adding a single field to an OpenAI-shaped call without first refactoring to a control-plane API.
+
+## The Run is the unit of value
+
+KovaServe is run-centric, not request-centric. This is the load-bearing decision the rest of the architecture is built on:
+
+- **Cost and budget are run-scoped.** A Run carries a single Budget; a single completed Run is the metering unit reported through `cost_per_completed_run`. Tokens, ModelCalls, and tool invocations roll up into the Run's cost accounting and are not the unit billed against.
+- **Continuity is run-scoped.** Checkpoints bind to a Run and a Step within it. Resume always produces a new Run that references the prior Run's Checkpoint, never an in-place restart of the original.
+- **Audit is run-scoped.** The execution event stream, the timeline endpoint, and the `summary_artifact_id` handoff are all keyed on `run_id`. A Run is the smallest unit you can fully reconstruct after the fact.
+- **Governance is run-scoped.** The PolicyScope a Run resolved at creation governs every Step inside it; tool admissions, share-scope decisions, and data-boundary checks all evaluate against the Run's scope.
+
+A Run completes when the work it represents is done — possibly after many Steps, ModelCalls, pauses, resumes, checkpoints, and branches.
+
+## Sub-run lineage
+
+A Run may dispatch another Run as a **sub-run**. The child Run carries `parent_run_id` pointing back at its parent and inherits the parent's PolicyScope and ContextScope by default. Budgets and ContextBudgets are allocated separately per child so a runaway sub-run cannot consume the parent's remaining budget.
+
+```
+Run (parent)
+├── Step  SUB_RUN_DISPATCH ──────────────▶ Run (child, parent_run_id = parent.id)
+│                                          │
+│                                          └── Step ... (child runs to completion)
+│                                                │
+│                                                ▼
+│                                          summary_artifact_id  (compact handoff)
+│
+└── Step  SUB_RUN_JOIN  ◀──── child summary segment included in next manifest
+```
+
+The child Run executes its own Steps under its own ContextManifests, fully isolated from the parent's manifest. On completion, the child posts a summary via `POST /v1/ks/runs/{child_id}/summary`, producing a `summary_artifact_id` that the parent's next ModelCall can include as a single segment — without inflating the parent's context with the child's full transcript. This is the **Sub-Run primitive**: the only sanctioned way to compose Runs.
+
+A Run has at most one parent. Sub-runs themselves may dispatch sub-runs; lineage is a tree, not a graph.
+
+## Tenant scoping
+
+Every Run is owned by exactly one `(tenant_id, project_id)` pair, inherited from the API key that created it. The owning pair is immutable. Reads, transitions, and references from any other tenant return `404 Not Found` — the same response as a genuinely missing Run — so cross-tenant probing yields no information.
+
+This applies to sub-run dispatch as well: a parent Run cannot dispatch a child into another tenant's project. The child's `tenant_id` and `project_id` are copied from the parent at dispatch time and are not negotiable on the request.
+
+## ID format
+
+Run IDs are bare 26-character Crockford ULIDs, with no prefix:
+
+```
+01J8X9Y2Z3K4M5N6P7Q8R9S0T1
+```
+
+This matches the convention for `step_id`, `model_call_id`, `checkpoint_id`, and `context_manifest_id`. Only `session_id` deviates (`ses_<24hex>`) — see [Sessions](/docs/concepts/continuity/sessions#id-format). Clients should not attempt to infer entity type from an ID; entity-type prefixes are intentionally not used.
+
+## API shape
+
+### Create a Run
+
+```http
+POST /v1/ks/runs
+Authorization: Bearer ks_...
+Content-Type: application/json
+
+{
+  "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+  "model": "qwen3-coder-30b",
+  "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+  "external_run_id": "lg-task-9821",
+  "external_runtime": "langgraph",
+  "policy_scope_ref": "project:01J8X9Y2Z3K4M5N6P7Q8R9S0T0"
+}
+```
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+  "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+  "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+  "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+  "policy_scope_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T3",
+  "budget_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T4",
+  "context_budget_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T5",
+  "parent_run_id": null,
+  "summary_artifact_id": null,
+  "status": "CREATED",
+  "model": "qwen3-coder-30b",
+  "external_run_id": "lg-task-9821",
+  "external_runtime": "langgraph",
+  "step_count": 0,
+  "created_at": "2026-04-30T12:00:00Z",
+  "started_at": null,
+  "completed_at": null
+}
+```
+
+### Read a Run
+
+```http
+GET /v1/ks/runs/01J8X9Y2Z3K4M5N6P7Q8R9S0T1
+Authorization: Bearer ks_...
+```
+
+The response is the Run row with its [Steps](/docs/concepts/run-hierarchy/steps) and each Step's [ModelCalls](/docs/concepts/run-hierarchy/model-calls) embedded — the canonical timeline payload. Clients do not need to issue N+1 calls to reconstruct the Run's shape.
+
+### Dispatch a sub-run
+
+```http
+POST /v1/ks/runs/01J8X9Y2Z3K4M5N6P7Q8R9S0T1/subruns
+Authorization: Bearer ks_...
+Content-Type: application/json
+
+{
+  "model": "qwen3-coder-30b",
+  "budget": { "max_cost_cents": "0.5000", "max_steps": 12 }
+}
+```
+
+The child Run is created with `parent_run_id` set to the parent and a fresh Budget and ContextBudget allocated to it. The parent's PolicyScope and ContextScope are inherited.
+
+### Cancel a Run
+
+```http
+POST /v1/ks/runs/01J8X9Y2Z3K4M5N6P7Q8R9S0T1/cancel
+Authorization: Bearer ks_...
+```
+
+Cancellation transitions the Run to `CANCELED` (terminal), stops further admission, and finalizes cost accounting. In-flight ModelCalls are allowed to settle so cost attribution remains accurate. See the [Run state machine](/docs/concepts/run-hierarchy/run-state-machine) for terminal-state semantics.
+
+## What a Run is not
+
+- **Not a request.** A request is a transient unit of substrate work; a Run is a durable execution objective that may consume many requests across many ModelCalls.
+- **Not a Session.** A [Session](/docs/concepts/continuity/sessions) is a continuity container that may host many Runs sequentially. A Run binds to at most one Session, and the binding is immutable.
+- **Not the orchestration logic.** The Run records what executed; the runtime (LangGraph, Temporal, KovaServe runtime, custom) decides what to execute next. KovaServe is not an orchestration engine.
+- **Not a memory store.** Cross-Run, cross-Session reuse of information belongs to the [Memory Store](/docs/concepts/memory/memory-store) under explicit [MemoryScope](/docs/concepts/memory/memory-scopes), not to Run state.
+- **Not a transaction log.** The execution event stream is the continuous record; the Run row is the durable summary, and Checkpoints are the resumable safe-points within it.
+
+## See also
+
+- [Run state machine](/docs/concepts/run-hierarchy/run-state-machine) — the 12-state Run FSM and its transitions
+- [Sessions](/docs/concepts/continuity/sessions) — the continuity container above Run
+- [Sub-runs](/docs/concepts/run-hierarchy/sub-runs) — `parent_run_id`, `summary_artifact_id`, and the dispatch / join lifecycle
+- [Steps](/docs/concepts/run-hierarchy/steps) · [ModelCalls](/docs/concepts/run-hierarchy/model-calls) — what a Run contains
+- [Checkpoints](/docs/concepts/recovery/checkpoints) — resumable safe-points anchored to a Run + Step
+- [Budgets](/docs/concepts/policy/budgets) · [ContextBudgets](/docs/concepts/policy/context-budgets) · [PolicyScopes](/docs/concepts/policy/policy-scopes) — the control objects a Run binds at creation
+- [`POST /v1/ks/runs`](/docs/api/runs/create) · [`GET /v1/ks/runs/{id}`](/docs/api/runs/get) · [`POST /v1/ks/runs/{id}/cancel`](/docs/api/runs/cancel) · [`POST /v1/ks/runs/{id}/subruns`](/docs/api/runs/sub-runs)

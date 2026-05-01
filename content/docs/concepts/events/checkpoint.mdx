@@ -3,7 +3,7 @@ title: Checkpoint events
 description: The checkpoint stream — Checkpoint lifecycle events covering checkpoint.created, validated, restore_started, restore_completed, and restore_failed.
 ---
 
-The **checkpoint events** stream covers the lifecycle of [Checkpoints](/docs/concepts/checkpoints) — the resumable snapshots that bind logical context first and KV state as an optional optimization. Every Checkpoint creation, validation, restore attempt, and restore outcome lands here.
+The **checkpoint events** stream covers the lifecycle of [Checkpoints](/docs/concepts/recovery/checkpoints) — the resumable snapshots that bind logical context first and KV state as an optional optimization. Every Checkpoint creation, validation, restore attempt, and restore outcome lands here.
 
 Subjects: `ks.checkpoint.*`. Persisted in the `execution_events` JetStream stream. Consumed via [`GET /v1/ks/events/checkpoint`](/docs/api/events/checkpoint).
 
@@ -128,8 +128,8 @@ The envelope's `checkpoint_id` is populated on every event. `run_id` carries the
 
 ## See also
 
-- [Checkpoints](/docs/concepts/checkpoints) — the entity these events project
-- [Checkpoint state machine](/docs/concepts/checkpoint-state-machine) — the FSM transitions land on
-- [Resume flow](/docs/concepts/resume-flow) — the `RECOVERING → RESUMING → RUNNING` path that consumes restore events
-- [State handles](/docs/concepts/state-handles) — the typed references in `payload.state_handles`
+- [Checkpoints](/docs/concepts/recovery/checkpoints) — the entity these events project
+- [Checkpoint state machine](/docs/concepts/recovery/checkpoint-state-machine) — the FSM transitions land on
+- [Resume flow](/docs/concepts/recovery/resume-flow) — the `RECOVERING → RESUMING → RUNNING` path that consumes restore events
+- [State handles](/docs/concepts/recovery/state-handles) — the typed references in `payload.state_handles`
 - [`GET /v1/ks/events/checkpoint`](/docs/api/events/checkpoint)

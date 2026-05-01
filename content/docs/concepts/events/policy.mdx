@@ -3,7 +3,7 @@ title: Policy events
 description: The policy stream — PolicyScope evaluation outcomes covering policy.evaluated, policy.denied, and policy.degraded_mode_applied.
 ---
 
-The **policy events** stream covers evaluation outcomes from the [Policy / Governance Layer](/docs/concepts/policy-scopes). Every admission produces at least one `ks.policy.evaluated` event; denied or degraded outcomes produce additional events that surface the rationale for audit.
+The **policy events** stream covers evaluation outcomes from the [Policy / Governance Layer](/docs/concepts/policy/policy-scopes). Every admission produces at least one `ks.policy.evaluated` event; denied or degraded outcomes produce additional events that surface the rationale for audit.
 
 Subjects: `ks.policy.*`. Persisted in the `execution_events` JetStream stream. Consumed via [`GET /v1/ks/events/policy`](/docs/api/events/policy).
 
@@ -66,7 +66,7 @@ The `matched_rule` field identifies which overlay layer produced the denial — 
 }
 ```
 
-`degraded_dimension` ∈ `model_size`, `max_tokens`, `optional_segments_dropped`, `context_window`. `reason` identifies which subsystem requested the degrade — typically `context_budget_degrade` from [admission](/docs/concepts/admission), or `budget_warning` from the run-level [Budget](/docs/concepts/budgets).
+`degraded_dimension` ∈ `model_size`, `max_tokens`, `optional_segments_dropped`, `context_window`. `reason` identifies which subsystem requested the degrade — typically `context_budget_degrade` from [admission](/docs/concepts/policy/admission), or `budget_warning` from the run-level [Budget](/docs/concepts/policy/budgets).
 
 ## Sequence
 
@@ -80,7 +80,7 @@ ks.policy.evaluated   (always)
 
 ## Ordering with admission
 
-Policy evaluation runs at admission time, before the [ContextBudget admission](/docs/concepts/admission). The full per-request sequence is:
+Policy evaluation runs at admission time, before the [ContextBudget admission](/docs/concepts/policy/admission). The full per-request sequence is:
 
 ```
 ks.policy.evaluated                   (governance)
@@ -101,13 +101,13 @@ The envelope's `run_id`, `step_id`, and `model_call_id` are populated when the p
 
 - **Compliance audit.** `ks.policy.denied` events are the binding audit trail for "why was this request denied" disputes — the `matched_rule` field is the citation.
 - **Operator dashboards.** Aggregate `ks.policy.evaluated` outcomes over time to surface tenants that frequently hit limits.
-- **Degraded-mode tracking.** `ks.policy.degraded_mode_applied` rate is a signal that PolicyScope or [ContextBudget](/docs/concepts/context-budgets) limits need to be revisited.
+- **Degraded-mode tracking.** `ks.policy.degraded_mode_applied` rate is a signal that PolicyScope or [ContextBudget](/docs/concepts/policy/context-budgets) limits need to be revisited.
 - **SDK error mapping.** Clients map `denial_reason` to actionable error messages without scraping HTTP-level error bodies.
 
 ## See also
 
-- [Policy scopes](/docs/concepts/policy-scopes) — the entity these events project
-- [Admission](/docs/concepts/admission) — the next gate after policy evaluation
+- [Policy scopes](/docs/concepts/policy/policy-scopes) — the entity these events project
+- [Admission](/docs/concepts/policy/admission) — the next gate after policy evaluation
 - [Tenancy](/docs/concepts/tenancy) — the hierarchy PolicyScopes resolve through
 - [Budget events](/docs/concepts/events/budget) — the run-level counterpart
 - [`GET /v1/ks/events/policy`](/docs/api/events/policy)

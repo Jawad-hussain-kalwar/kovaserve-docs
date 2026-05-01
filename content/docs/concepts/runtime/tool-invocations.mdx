@@ -1,0 +1,165 @@
+---
+title: Tool invocations
+description: A ToolInvocation is the runtime's record of a single tool execution — class, arguments, result, sandbox dispatch, governance decision, artifact offload, and the runtime events that flow from it.
+---
+
+A **ToolInvocation** is the runtime's first-class record of a single tool execution. It is the wedge-specific runtime entity that pairs a `TOOL_EXECUTE` Step with the concrete details of what tool was called, with what arguments, against which [sandbox](/docs/concepts/runtime/sandboxes), under which [governance decision](/docs/concepts/tools/tool-context-disposition), and what came back.
+
+Tool definitions are owned globally by the Layer 2 [ToolCatalog](/docs/concepts/tools/tool-catalogs) (immutable, hashed, versioned, referenced by `tool_catalog_id`). Tool *governance* — whether the tool's definition or output may enter context, and how — is owned by Layer 2 [Tool Context Governance](/docs/concepts/tools/tool-context-disposition). Tool *invocation* — the actual call-and-result loop, sandbox dispatch, the wedge-specific tool classes — is owned by the Layer 3 runtime. ToolInvocation is the entity that records each of those calls.
+
+```
+TOOL_EXECUTE Step                            Tool Gateway                       Sandbox
+       │                                          │                                │
+       │── invoke(catalog, name, args) ──────────▶│                                │
+       │                                          │── governance check ───────────▶│
+       │                                          │      (disposition policy)      │
+       │                                          │                                │
+       │                                          │── dispatch ───────────────────▶│ exec
+       │                                          │                                │  │
+       │                                          │  capture stdout/stderr/result ◀│◀─┘
+       │                                          │                                │
+       │                                          │── offload result if needed ──▶ ContextArtifact
+       │                                          │── emit ks.tool.invocation.* ─▶ events
+       │◀── ToolInvocation row + result ──────────│                                │
+```
+
+## What a ToolInvocation records
+
+| Field | Purpose |
+|---|---|
+| `id` | ULID. |
+| `run_id`, `step_id` | The Run and the `TOOL_EXECUTE` Step the invocation belongs to. |
+| `tool_catalog_id` | The hashed [ToolCatalog](/docs/concepts/tools/tool-catalogs) bundle the tool definition came from. |
+| `tool_name` | The tool's name within that catalog. |
+| `tool_class` | The runtime tool class — see [Tool classes](#tool-classes). |
+| `arguments` | The tool's input arguments (subject to redaction policy from the governance decision). |
+| `disposition` | The [ToolContextDisposition](/docs/concepts/tools/tool-context-disposition) decision — `inline_full | inline_preview | summary_required | artifact_ref | drop | blocked`. |
+| `sandbox_id` | The [sandbox](/docs/concepts/runtime/sandboxes) the invocation dispatched into (null for non-sandbox-bound tools). |
+| `result` | The structured tool result — present inline only when the disposition allows it. |
+| `result_artifact_id` | The [ContextArtifact](/docs/concepts/context/context-artifacts) that holds the full result when the disposition required offload. |
+| `result_summary` | A bounded summary segment when the disposition required summarization. |
+| `cost` | Per-invocation cost (when the tool class is priced — e.g. `http_api` calls to billed endpoints). |
+| `started_at`, `completed_at`, `duration_ms` | Timing. |
+| `outcome` | `SUCCEEDED | FAILED | DENIED | TIMED_OUT`. |
+
+## Tool classes
+
+Layer 3 defines the standard tool classes. The class drives sandbox dispatch policy, governance defaults, and cost behavior.
+
+| Class | Used for |
+|---|---|
+| `shell` | Arbitrary shell commands inside the sandbox. Subject to file/network policy and shell-specific governance. |
+| `file` | File read, write, list, stat, hash. The runtime translates to `FILE_READ` / `FILE_WRITE` Steps when the operation is mutating. |
+| `repo_git` | Git operations against the workspace's source binding — `clone`, `checkout`, `diff`, `commit`, `push`. Push is a checkpoint trigger. |
+| `test_build` | Test runners and build commands — `pytest`, `npm test`, `cargo build`, custom runners. Output captured as a test report [WorkspaceArtifact](/docs/concepts/runtime/workspace-artifacts). |
+| `http_api` | Outbound HTTP calls. Egress allowlist enforced by the sandbox network policy and the tool catalog's per-tool host policy. |
+| `structured_external` | Schema-typed external tools — anything from search APIs to internal company services with a registered JSON schema. |
+
+A tool catalog binds each tool to one of these classes; the runtime dispatches accordingly.
+
+## Where governance lives
+
+Tool governance is *not* a runtime concern — it is a Layer 2 concern, evaluated through [Tool Context Governance](/docs/concepts/tools/tool-context-disposition). The runtime calls into governance at two points:
+
+1. **Before invocation** — `POST /v1/ks/tools/check-policy` returns the disposition for the tool definition itself (may the model see the tool's definition? in what shape?).
+2. **After result** — `POST /v1/ks/tools/results` registers the tool result, returns the disposition for the *output* (inline full, inline preview, summary required, artifact ref, drop, blocked), and produces a `result_artifact_id` and/or `result_summary` accordingly.
+
+The result the model sees on the next ModelCall is the disposition's output, not the raw payload.
+
+## Wire shape
+
+Recording a tool invocation explicitly:
+
+```http
+POST /v1/ks/tools/report
+Authorization: Bearer ks_...
+Content-Type: application/json
+
+{
+  "run_id":          "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+  "step_id":         "01J8X9Y2Z3K4M5N6P7Q8R9STP1",
+  "tool_catalog_id": "01J8X9Y2Z3K4M5N6P7Q8R9TLC1",
+  "tool_name":       "run_tests",
+  "tool_class":      "test_build",
+  "sandbox_id":      "01J8X9Y2Z3K4M5N6P7Q8R9SBX1",
+  "arguments":       { "path": "tests/payments_test.py" },
+  "started_at":      "2026-04-30T12:01:00.000Z",
+  "completed_at":    "2026-04-30T12:01:42.180Z",
+  "outcome":         "FAILED",
+  "result":          { "exit_code": 1, "stdout_preview": "FAILED tests/payments_test.py::test_refund_partial" }
+}
+```
+
+Response (with the disposition applied to the result):
+
+```json
+{
+  "id":                  "01J8X9Y2Z3K4M5N6P7Q8R9TIV1",
+  "disposition":         "summary_required",
+  "result_artifact_id":  "01J8X9Y2Z3K4M5N6P7Q8R9ART1",
+  "result_summary":      "1 of 47 tests failed: test_refund_partial — assertion error on `tax_cents`.",
+  "cost": { "cost_cents": "0.0000" }
+}
+```
+
+The next `MODEL_CALL` Step in the Run includes the `result_summary` as a typed [context segment](/docs/concepts/context/context-segments) bound to `result_artifact_id`. The full stdout is fetchable through `GET /v1/ks/tools/results/{id}?mode=full` when an operator needs to inspect it on the [timeline](/docs/concepts/runtime/runtime-observability).
+
+## Idempotency
+
+Tools are marked idempotent or not at registration in the [ToolCatalog](/docs/concepts/tools/tool-catalogs). The runtime uses this for [retry](/docs/concepts/recovery/retries) decisions:
+
+| Idempotent | Retry behavior |
+|---|---|
+| Yes | Retried in place on transient failures. The same `(run_id, step_id, tool_name, arguments_hash)` is the idempotency key. |
+| No | Not retried in place. The runtime escalates to a [resume](/docs/concepts/recovery/resume-flow) from the previous Checkpoint. |
+
+`file` reads, `http_api` GETs, `repo_git` reads, `test_build` runs are typically idempotent. `shell` (without explicit override), `repo_git` writes (commit/push), and non-GET `http_api` are typically not.
+
+## Listing invocations
+
+```http
+GET /v1/ks/runtime/tool-invocations?run_id=01J8X9Y2Z3K4M5N6P7Q8R9S0T1
+Authorization: Bearer ks_...
+```
+
+```json
+{
+  "data": [
+    {
+      "id":           "01J8X9Y2Z3K4M5N6P7Q8R9TIV1",
+      "step_id":      "01J8X9Y2Z3K4M5N6P7Q8R9STP1",
+      "tool_name":    "run_tests",
+      "tool_class":   "test_build",
+      "outcome":      "FAILED",
+      "duration_ms":  42180,
+      "disposition":  "summary_required"
+    }
+  ],
+  "next_cursor": null
+}
+```
+
+## Events
+
+Each invocation emits two [runtime events](/docs/concepts/events/runtime):
+
+| Event | When |
+|---|---|
+| `ks.tool.invocation.started` | Dispatched into the sandbox (or into the Worker's outbound HTTP path for non-sandbox tools). |
+| `ks.tool.invocation.completed` | Result captured and disposition applied. |
+
+The events carry `tool_catalog_id`, `tool_name`, `tool_class`, `disposition`, and `outcome` so dashboards and event consumers can build a per-Run tool action timeline without joining Postgres.
+
+## Wedge-specific vs. general tools
+
+Layer 3 owns the wedge-specific tool classes — shell, file, repo/git, test/build — because these are what coding, terminal, and tool-heavy long-running agents need. A team running a [BYO runtime](/docs/concepts/deployment/byo-runtime) that has its own tool gateway records ToolInvocations through the same `POST /v1/ks/tools/report` API; the runtime owns dispatch, but the canonical record shape is the same.
+
+## See also
+
+- [Tool catalogs](/docs/concepts/tools/tool-catalogs) — the immutable, hashed, versioned bundle a tool's definition lives in
+- [Tool context disposition](/docs/concepts/tools/tool-context-disposition) — the governance decision applied to definitions and outputs
+- [Tool governance](/docs/concepts/tools/tool-governance) — the policy enforcement model
+- [Sandboxes](/docs/concepts/runtime/sandboxes) — the execution surface for sandbox-bound tools
+- [Step types](/docs/concepts/run-hierarchy/step-types) — `TOOL_PLAN` and `TOOL_EXECUTE`
+- [Runtime events](/docs/concepts/events/runtime) — the stream invocations feed
+- [Workspace artifacts](/docs/concepts/runtime/workspace-artifacts) — where stdout, stderr, diffs, and test reports are captured

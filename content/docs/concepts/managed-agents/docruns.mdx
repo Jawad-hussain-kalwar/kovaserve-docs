@@ -1,0 +1,130 @@
+---
+title: DocRuns
+description: Managed agents for document-heavy enterprise workflows on the Agentic Execution Cloud — durable runs over contracts, policies, and regulatory text with citation-grade evidence, governance, audit retention, and cost per completed run.
+---
+
+**DocRuns** is the managed-agent SKU for document-heavy enterprise workflows — contract review, compliance checks, redline assistance, clause extraction, and document reconciliation. A DocRun receives one or more documents, reads them under a bounded context budget, applies the configured review or extraction policy, produces a structured output with citations to the source spans, and records a full audit trail.
+
+DocRuns is the SKU that proves the platform on **text-bound, retrieval-heavy, citation-driven, audit-grade** work — the kinds of reviews a legal, compliance, or risk team would otherwise do by hand and need to defend afterward.
+
+```
+       documents (contracts, policies, filings)              structured output + citations
+                 │                                                  ▲
+                 ▼                                                  │
+   ┌─────────────────────────────────────────────────────────────────────┐
+   │                          DocRun                                      │
+   │                                                                      │
+   │   ingest ──▶ segment ──▶ retrieve ──▶ analyze ──▶ cross-check ──▶   │
+   │     │           │           │            │             │             │
+   │   bytes →   structured   targeted     model call    second-pass      │
+   │   artifact   spans w/    fetches w/   w/ context    w/ different     │
+   │              positions   citations    manifest      angle / model    │
+   │                                                                      │
+   │   ↳ every output cites a source span · audit retention · cost per run│
+   └──────────────────────────────────────────────────────────────────────┘
+```
+
+## What a DocRun does
+
+The reference DocRun flow:
+
+1. **Ingest.** The DocRun receives one or more documents — uploaded as bytes, referenced from a content store, or pulled from a connected document system. Each document is registered as an artifact with a content hash and metadata.
+2. **Segment.** Documents are segmented into typed spans — clauses, sections, exhibits, line ranges — each addressable by position and content digest. Spans become the unit of citation for everything the agent produces.
+3. **Retrieve.** Targeted retrieval pulls the spans relevant to the configured review task. Bulky payloads stay in artifact storage; the working context holds bounded references and the spans actually under analysis.
+4. **Analyze.** Model calls run against the assembled context manifest under the document policy — the rules that define what to look for, how to classify findings, what evidence to require. Every finding cites the source span.
+5. **Cross-check.** Where the SKU's policy requires it, a second pass — different model, different prompt angle, or an external rule engine — verifies the finding. Disagreements surface as flagged items, not silent overrides.
+6. **Reconcile.** When the workload spans multiple documents (e.g. supplier contract vs. master agreement), the reconciliation step matches clauses across documents and surfaces conflicts, missing terms, and version drift.
+7. **Complete.** The DocRun ends with a structured output (JSON, redline, or report), every finding citing its source span, the full audit trail, and the cost per completed run.
+
+The SKU's discipline is **citation grade**: every assertion the agent makes is anchored to a span the reviewer can click through to. There is no "the contract probably says X" in the output — there is "section 12.3, lines 4–7 says X (verbatim quote, content digest matches the registered span)."
+
+## Use cases
+
+| Use case | What the DocRun does |
+|---|---|
+| Contract review | Reads the contract, classifies clauses against a policy, flags missing or non-standard terms, cites every flag to its source span, produces a structured review report. |
+| Compliance checks | Compares the document(s) against a regulatory or internal policy, emits a finding per applicable rule with pass / fail / inconclusive, cites the source span and the rule that matched. |
+| Redline assistance | Drafts redline edits against a base contract — proposed changes per clause, with the rationale and the policy reference for each — leaving the final acceptance to a human reviewer. |
+| Clause extraction | Pulls structured fields from documents (parties, effective date, term, governing law, indemnity caps, payment terms), each with the source span and content digest. |
+| Document reconciliation | Aligns clauses across two or more documents, surfaces conflicts and missing terms, produces a side-by-side delta report. |
+
+## What DocRuns is built on
+
+| Layer | DocRuns default |
+|---|---|
+| Runtime | The KovaServe managed runtime — workers, sandboxes (lightweight; document processing is rarely process-heavy), runtime-native timeline. |
+| Workspace | Optional. Most DocRuns operate against artifact-registered documents and do not need a writable filesystem; reconciliation workloads may bind a workspace for intermediate output. |
+| Sandbox profile | Container image with text-processing toolchains (PDF extraction, DOCX parsing, structured-document parsers). Network policy targets the customer's content store only — no general internet egress. |
+| Tool catalog | Document fetchers (content store, document management system), text segmenters, structured extractors, rule-engine adapters, citation validators. Outbound HTTP is governed per-host. |
+| Default budget | Per-document and per-run budget caps. Reconciliation runs across multiple documents have a higher cap, set by the SKU operator. |
+| Default context budget | Aggressive offload of full document bytes to artifacts; only currently-analyzed spans inline. Compact-required threshold tuned to keep the working context lean across long documents. |
+| Default policy scope | Tool policy that blocks document export, blocks unbounded document fetch, and requires explicit policy for any cross-document write. Data boundary set to the customer's document residency region. Audit retention extended to compliance-grade. |
+| Checkpoint trigger rules | After every segmentation phase, before every cross-check phase, on every budget warning, manually on operator request. |
+| Observability | Runtime-native timeline with a foregrounded **citation pane** — every finding linked to its source span, every span linked to its source artifact. Audit retention extended to legal/compliance grade. |
+
+## How a customer dispatches a DocRun
+
+DocRuns are typically wired into a document review surface — a contract management system, a compliance platform, an enterprise portal where reviewers submit documents for first-pass analysis:
+
+```http
+POST /v1/ks/runtime/runs
+Authorization: Bearer ks_...
+Content-Type: application/json
+
+{
+  "agent_id":     "01J8X9Y2Z3K4M5N6P7Q8R9DRA1",
+  "session_id":   "ses_a7f3c2b8d4e1f0925a1b6c3d",
+  "inputs": {
+    "task":       "contract_review",
+    "documents": [
+      { "artifact_id": "01J8X9Y2Z3K4M5N6P7Q8R9DOC1", "name": "msa-v3.pdf",  "role": "primary"   },
+      { "artifact_id": "01J8X9Y2Z3K4M5N6P7Q8R9DOC2", "name": "schedule-a.pdf","role": "supporting" }
+    ],
+    "policy_ref": "review/standard-msa-v2"
+  },
+  "budget":          { "cost_cents_limit": 3000 },
+  "context_budget":  { "active_token_limit": 80000, "artifact_byte_limit": 50000000 },
+  "checkpoint_policy": { "after_segmentation": true, "before_cross_check": true }
+}
+```
+
+The DocRun streams progress on the runtime timeline. The reviewer's UI surfaces findings as they appear, each anchored to the source span the reviewer can click through to inspect.
+
+## What a customer gets back
+
+When a DocRun reaches `COMPLETED`:
+
+- A **structured output** — JSON for extraction tasks, a redline for redline tasks, a structured review report for review and compliance tasks. Every assertion in the output cites its source span by `(artifact_id, segment_id, position)` and content digest.
+- A **citation index** — every span the agent referenced, what it found in it, and which finding it supports.
+- An **evidence pack** — the source documents (or pointers to them in the customer's content store), the span boundaries, and the content digests, retained per the deployment's audit retention.
+- A **policy audit** — every rule applied, every finding's classification, every cross-check pass or flag.
+- A **cost per completed run** number — what it cost to complete the review, with frozen pricing snapshots.
+
+If the DocRun was unable to reach a confident conclusion (a clause not found, an extraction underspecified, a cross-check disagreement that the policy says cannot be silently resolved), the output surfaces the gap explicitly with the evidence the agent did find. *Inconclusive* is a first-class outcome, not a failure mode.
+
+## Citation discipline
+
+Every finding a DocRun produces is bound to a source span — there are no orphan claims. The platform supports that through three guarantees:
+
+- **Spans are content-addressed.** Each segment's content digest is computed at registration; if the source document changes, the digest changes, and the finding's citation no longer matches. Stale citations are detectable.
+- **Finding shapes carry citations as a required field.** The output schema makes a finding without a citation invalid; the agent cannot produce one by accident.
+- **Cross-check disagreements are flagged.** When a second-pass disagrees with a first-pass finding, the disagreement appears in the output with both citations, not silently resolved.
+
+This is what makes DocRuns suitable for legal and compliance work: a reviewer can verify any finding by clicking through to the cited span without trusting the agent's narrative.
+
+## What DocRuns is not
+
+- **Not a document store.** DocRuns reads from the customer's content store; it does not replace it. Documents are registered as artifacts referenced by content hash, not stored as a primary copy.
+- **Not a redline applicator.** DocRuns proposes redlines; final acceptance and application stay with a human reviewer. The output is a structured proposal, not a committed change.
+- **Not a legal opinion.** DocRuns surfaces evidence-anchored findings against a configured policy. The reviewer is the decision-maker; the SKU is a productivity surface, not a substitute for licensed counsel.
+- **Not unbounded retrieval.** DocRuns operates against the documents it is given (or the spans the registered tools can fetch). It does not roam unrelated content stores or the open web.
+
+## See also
+
+- [Managed agents](/docs/concepts/managed-agents) — the SKU model
+- [CodeRuns](/docs/concepts/managed-agents/coderuns) · [OpsRuns](/docs/concepts/managed-agents/opsruns) — the other reference SKUs
+- [KovaServe runtime mode](/docs/concepts/deployment/managed-runtime) — the runtime DocRuns runs on
+- [Context artifacts](/docs/concepts/context/context-artifacts) · [Context segments](/docs/concepts/context/context-segments) — the entities documents and spans become
+- [Tool governance](/docs/concepts/tools/tool-governance) · [Tool context disposition](/docs/concepts/tools/tool-context-disposition) — the governance the SKU enforces
+- [Private deployment](/docs/concepts/deployment/private-deployment) — the topology most DocRuns deployments choose for residency
+- [Cost per completed run](/docs/concepts/cost/cost-per-completed-run) — the unit of value

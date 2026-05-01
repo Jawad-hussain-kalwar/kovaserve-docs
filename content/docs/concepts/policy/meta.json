@@ -1,0 +1,11 @@
+{
+  "title": "Budgets & policy",
+  "pages": [
+    "budgets",
+    "budget-state-machine",
+    "context-budgets",
+    "context-budget-state-machine",
+    "policy-scopes",
+    "admission"
+  ]
+}

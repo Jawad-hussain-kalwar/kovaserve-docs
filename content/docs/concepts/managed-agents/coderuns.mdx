@@ -1,0 +1,131 @@
+---
+title: CodeRuns
+description: Managed coding and technical agents on the Agentic Execution Cloud — durable runs against a private repository, sandboxed shell and file access, checkpoint-before-risk, policy-controlled tool use, and cost per completed run for software engineering tasks.
+---
+
+**CodeRuns** is the managed-agent SKU for running coding and technical agents as durable, governed executions on the Agentic Execution Cloud. A CodeRun receives a software engineering task, reads the repository, runs tools, makes file changes, checkpoints before risky actions, recovers from failure, respects budget, blocks unsafe commands, and produces a final diff with a complete execution timeline.
+
+CodeRuns is the first reference workload — the proof that managed agents are a product category, not a demo. It is intentionally narrow: software engineering work, sandbox-heavy, file-mutating, tool-heavy, long-running. The SKU is the proof; the company is the broader [Agentic Execution Cloud](/docs/concepts/managed-agents).
+
+```
+            task                                                final diff
+              │                                                     ▲
+              ▼                                                     │
+   ┌─────────────────────────────────────────────────────────────────────┐
+   │                        CodeRun                                       │
+   │                                                                      │
+   │   read repo ──▶ plan ──▶ checkpoint ──▶ patch ──▶ run tests ──▶     │
+   │       │           │           │            │           │             │
+   │   sandboxed   model call    durable     file write   tool call       │
+   │   shell &     w/ context    snapshot    w/ policy    w/ policy       │
+   │   file access  manifest                  check        check          │
+   │                                                                      │
+   │   ↳ cost per completed run · audit timeline · branchable lineage     │
+   └──────────────────────────────────────────────────────────────────────┘
+```
+
+## What a CodeRun does
+
+A CodeRun is a durable run that performs software engineering work against a customer-supplied repository. The reference flow:
+
+1. **Receive a task.** A bug report, a failing test, a migration objective, an investigation prompt — submitted through the operator's surface (a neocloud console, an enterprise portal, an AI-native product's API).
+2. **Bind the workspace.** The CodeRun creates a Workspace bound to the repository and a sandbox profile that mounts it under a writable scope.
+3. **Read.** The agent reads the relevant files into bounded context. Large files become artifact-backed segments; the working context stays under the configured budget.
+4. **Plan.** The agent decides which files to mutate and which tools to run, recording the plan as a step on the timeline.
+5. **Checkpoint before risk.** Before any file mutation, before any unsafe shell action, after stable analysis phases, and on schedule, a checkpoint is dropped. The Run can be resumed from any of them.
+6. **Mutate.** File writes go through the workspace's read/write policy. Diffs are captured as artifacts and surface on the timeline.
+7. **Verify.** Tests, builds, or runner commands run inside the sandbox. Test reports are first-class artifacts.
+8. **Recover or branch.** If a step fails, the CodeRun resumes from the last checkpoint paying only for the new work. If a different approach is wanted, a branch from a checkpoint creates a parallel CodeRun lineage.
+9. **Complete.** The CodeRun finishes with a final diff (or a final patch artifact), a full execution timeline, the cost per completed run, and a policy-clean audit trail.
+
+A CodeRun is what *production-ready* coding agents look like. The execution boundary is the product — the repository, the sandbox, the tools, the budget, the recovery, the audit trail are all governed by the platform, not bolted onto the agent code.
+
+## Use cases
+
+| Use case | What the CodeRun does |
+|---|---|
+| Bug fixing | Reads the failing test or stack trace, identifies the cause, patches the code, runs tests, produces a diff. |
+| Test repair | Diagnoses tests broken by recent changes, repairs assertions or fixtures, verifies the suite passes. |
+| Repo analysis | Surveys a codebase against a question — "where is auth checked?", "list all places that call `legacy_payment_v1`", "estimate test coverage for the billing module" — and returns a structured answer with citations to file paths and line ranges. |
+| Migration assistance | Applies a defined migration across the codebase — framework upgrade, dependency replacement, lint rule rollout — with checkpoints between each batch and a final patch covering all changes. |
+| CI failure investigation | Pulls the CI log, reproduces the failure inside the sandbox, traces it to the offending change, proposes a fix or escalates with a structured report. |
+
+These are not exhaustive — they are the workloads the CodeRuns SKU is shipped against and proven on.
+
+## What CodeRuns is built on
+
+A CodeRun is a configured managed agent on the Agentic Execution Cloud. The configuration:
+
+| Layer | CodeRuns default |
+|---|---|
+| Runtime | The KovaServe managed runtime — workers, sandboxes, tool gateway, workspaces, runtime-native timeline. |
+| Workspace source | Customer-supplied Git repository, ref-pinned at the start of the run; resolved commit hash recorded for reproducibility. |
+| Sandbox profile | Container image with common build toolchains, mid-size resource limits, persistence within the run, snapshot on every checkpoint. Network access defaults to an allowlist (the customer's package registries, the customer's git host). |
+| Tool catalog | Shell, file, repo/git, test/build, structured-external. Push and merge are governed actions that require explicit policy. |
+| Default budget | Cost cap, step cap, time cap, tool-call cap — set per deployment, overridable per run. |
+| Default context budget | Active context, stable context, volatile context, and tool-result limits — sized for repository-bound work, with offload-required and compact-required thresholds tuned to keep prefill cost stable. |
+| Default policy scope | Tool policy that blocks unbounded shell, requires checkpoint advisories before destructive actions, redacts secrets in tool arguments. Data boundary set by the deployment. |
+| Checkpoint trigger rules | Before every file write, before every shell command not on the safe-list, after every stable analysis phase, on every budget warning, periodic by configured interval, manual on operator request. |
+| Observability | Runtime-native timeline with full diff inspection, branch lineage, sub-run lineage, budget burn pane, policy decision inspection, full WorkspaceArtifact catalog. |
+
+## How a customer uses a CodeRun
+
+A neocloud or enterprise that operates CodeRuns exposes them through their own surface. The end consumer typically does not call KovaServe APIs directly — they submit a task through the operator's UI or product, and the operator's backend dispatches into KovaServe.
+
+A minimal dispatch:
+
+```http
+POST /v1/ks/runtime/runs
+Authorization: Bearer ks_...
+Content-Type: application/json
+
+{
+  "agent_id":     "01J8X9Y2Z3K4M5N6P7Q8R9CRA1",
+  "session_id":   "ses_a7f3c2b8d4e1f0925a1b6c3d",
+  "workspace": {
+    "source": { "type": "git", "url": "git@github.com:acme/payments.git", "ref": "main" },
+    "writable": true
+  },
+  "inputs": {
+    "objective": "Investigate and fix the failing test in payments_test.py."
+  },
+  "budget":          { "cost_cents_limit": 5000, "step_limit": 200 },
+  "context_budget":  { "active_token_limit": 96000 },
+  "checkpoint_policy": { "before_file_write": true, "before_shell_exec": true, "periodic_seconds": 600 }
+}
+```
+
+The CodeRun progresses through the canonical Run state machine. The operator's UI streams the runtime-native timeline, surfacing the diffs, the test reports, the checkpoints, and the budget burn as they happen.
+
+## What a customer gets back
+
+When a CodeRun reaches `COMPLETED`:
+
+- A **final diff** as a unified patch artifact, suitable for review or for direct application against the repository's main branch.
+- A **runtime timeline** of every step the agent took — file reads, file writes, shell commands, model calls, checkpoints, tool invocations, reasoning notes, branch points if any.
+- A **test or build report** for the final verification step, surfaced as a structured artifact.
+- A **cost per completed run** number and breakdown — gross, net, cache savings — with frozen pricing snapshots.
+- A **policy audit** of every governed action — what was allowed, what was degraded, what was blocked, and which policy scope produced the decision.
+- Optional **checkpoint snapshots** retained per the deployment's retention policy, for replay or branch.
+
+If the CodeRun fails, the same surfaces are available for the partial work plus a foregrounded failure classification — what bounded the run, which step crossed it, and which checkpoint to resume from.
+
+## Branchability
+
+A CodeRun is **branchable**. From any checkpoint or stable point, an operator (or another agent) can create a parallel CodeRun that starts from the same workspace state, the same context manifest, and the same runtime-local state — but with different inputs, a different budget, or a different prompt.
+
+This is what makes the SKU *replayable*: a coding agent that produced a controversial diff can be re-run with stricter policy; a migration that worked in one batch can be branched per repository; a failed investigation can be branched to try an alternative hypothesis without losing the original.
+
+## What CodeRuns is not
+
+- **Not a coding-agent framework.** CodeRuns is a managed-agent SKU; the framework underneath (the planner, the prompt, the tool list) is the *configuration*, not the product.
+- **Not unbounded.** Every CodeRun runs under a budget, a context budget, a policy scope, and a sandbox. There is no path to a runaway loop.
+- **Not the company.** [CodeRuns is one of three reference SKUs](/docs/concepts/managed-agents). [OpsRuns](/docs/concepts/managed-agents/opsruns) and [DocRuns](/docs/concepts/managed-agents/docruns) cover the other reference workloads. The Agentic Execution Cloud is the company.
+
+## See also
+
+- [Managed agents](/docs/concepts/managed-agents) — the SKU model
+- [OpsRuns](/docs/concepts/managed-agents/opsruns) · [DocRuns](/docs/concepts/managed-agents/docruns) — the other reference SKUs
+- [KovaServe runtime mode](/docs/concepts/deployment/managed-runtime) — the runtime CodeRuns runs on
+- [Workspaces](/docs/concepts/runtime/workspaces) · [Sandboxes](/docs/concepts/runtime/sandboxes) · [Tool invocations](/docs/concepts/runtime/tool-invocations) · [Workspace artifacts](/docs/concepts/runtime/workspace-artifacts) — the runtime entities a CodeRun produces
+- [Cost per completed run](/docs/concepts/cost/cost-per-completed-run) — the unit of value

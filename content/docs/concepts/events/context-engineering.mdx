@@ -3,7 +3,7 @@ title: Context engineering events
 description: The context engineering stream — manifest, segment, artifact, compaction, ContextBudget, and tool-catalog lifecycle events covering the full execution-boundary context engineering surface.
 ---
 
-The **context engineering events** stream covers the lifecycle of every context-engineering primitive: [manifests](/docs/concepts/context-manifests), [segments](/docs/concepts/context-segments), [artifacts](/docs/concepts/context-artifacts), [compaction records](/docs/concepts/compaction-records), [ContextBudget](/docs/concepts/context-budgets) admission decisions, and [tool catalog](/docs/concepts/tool-catalogs) registration.
+The **context engineering events** stream covers the lifecycle of every context-engineering primitive: [manifests](/docs/concepts/context/context-manifests), [segments](/docs/concepts/context/context-segments), [artifacts](/docs/concepts/context/context-artifacts), [compaction records](/docs/concepts/context/compaction-records), [ContextBudget](/docs/concepts/policy/context-budgets) admission decisions, and [tool catalog](/docs/concepts/tools/tool-catalogs) registration.
 
 Subjects: `ks.context.*`. Persisted in the `execution_events` JetStream stream. Consumed via [`GET /v1/ks/events/context-engineering`](/docs/api/events/context-engineering).
 
@@ -124,7 +124,7 @@ All ContextBudget events share a payload shape:
 }
 ```
 
-`decision` matches the event type's suffix. `transformation_planned` is the action the [admission](/docs/concepts/admission) service is about to apply.
+`decision` matches the event type's suffix. `transformation_planned` is the action the [admission](/docs/concepts/policy/admission) service is about to apply.
 
 ### `ks.context.tool_catalog.registered`
 
@@ -166,8 +166,8 @@ The envelope's `context_manifest_id` is populated on every event tied to a speci
 
 ## See also
 
-- [Context manifests](/docs/concepts/context-manifests) · [Context segments](/docs/concepts/context-segments) · [Context artifacts](/docs/concepts/context-artifacts)
-- [Compaction records](/docs/concepts/compaction-records) · [Compaction lineage](/docs/concepts/compaction-lineage)
-- [Context budgets](/docs/concepts/context-budgets) · [Admission](/docs/concepts/admission)
-- [Tool catalogs](/docs/concepts/tool-catalogs)
+- [Context manifests](/docs/concepts/context/context-manifests) · [Context segments](/docs/concepts/context/context-segments) · [Context artifacts](/docs/concepts/context/context-artifacts)
+- [Compaction records](/docs/concepts/context/compaction-records) · [Compaction lineage](/docs/concepts/context/compaction-lineage)
+- [Context budgets](/docs/concepts/policy/context-budgets) · [Admission](/docs/concepts/policy/admission)
+- [Tool catalogs](/docs/concepts/tools/tool-catalogs)
 - [`GET /v1/ks/events/context-engineering`](/docs/api/events/context-engineering)

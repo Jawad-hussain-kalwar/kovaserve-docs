@@ -1,0 +1,188 @@
+---
+title: Context manifests
+description: The ContextManifest entity — the durable per-ModelCall record of context shape, identity, and accounting that anchors budgets, routing, checkpoints, and resume.
+---
+
+A **ContextManifest** is the durable, per-[ModelCall](/docs/concepts/run-hierarchy/model-calls) record of the exact context that was sent to the substrate. It captures the segment list, token accounting, stable identities, renderer version, model id, tokenizer fingerprint, scope, and admission decision — everything needed to answer "what was this model call thinking about?" without replaying the original request.
+
+Every successful ModelCall is bound to exactly one ContextManifest via `context_manifest_id` FK. Every [Checkpoint](/docs/concepts/recovery/checkpoints) freezes a manifest snapshot. The [Cache-Aware Router](/docs/concepts/routing/manifest-aware-routing) consults manifest identity when scoring placements. Every [Budget](/docs/concepts/policy/budgets) decision and [ContextBudget](/docs/concepts/policy/context-budgets) admission runs against an assembled manifest. The manifest is the **audit anchor** for the entire context-engineering subsystem.
+
+ContextManifests are produced by **GCM v2** (Global Context Manager) and stored in the **Context Manifest Registry**.
+
+## Why a per-call durable record
+
+No vendor exposes a per-call durable manifest as a first-class entity. KovaServe ships one because every other context-engineering capability depends on having a stable answer to "what was the context?" that survives failures, redeployments, retention windows, and tokenizer migrations:
+
+- Budgets and admission can only be enforced against a concrete shape.
+- Resume needs the exact prompt to reconstruct, not a regenerated approximation.
+- Routing decisions are only meaningful against an identity that the cache layer can recognize.
+- Compaction lineage needs source manifests that do not disappear when memory is recompacted.
+- Audit trails need a record that survives long after the substrate has evicted its working state.
+
+The manifest is the single artifact every other context primitive references.
+
+## What a manifest records
+
+```
+ContextManifest
+├── id, run_id, step_id, model_call_id, session_id, checkpoint_id?
+├── segments[]                  ▸ ordered ContextSegments (canonical ADR-003 order)
+├── stable_prefix_id            ▸ legacy router-tier identity
+├── stable_context_id           ▸ compatibility-aware identity (digest cascade +
+│                                 renderer + model family + tokenizer fp +
+│                                 tenant / project / context scope)
+├── renderer_version            ▸ which context renderer produced this shape
+├── model_id, model_family
+├── tokenizer_fingerprint       ▸ hash of the tokenizer assets
+├── scope                       ▸ tenant / project / context_share_scope
+├── token_counts
+│   ├── stable_tokens           ▸ reused-prefix tokens
+│   ├── volatile_tokens         ▸ likely-to-change tokens
+│   ├── active_tokens           ▸ what counts against ContextBudget.active_token_limit
+│   └── offloaded_tokens        ▸ moved to ContextArtifact storage
+├── byte_counts
+│   └── artifact_bytes          ▸ total bytes referenced via artifact_ref_id
+├── compaction_records[]        ▸ CompactionRecord refs that produced any segment
+├── tool_catalog_id?            ▸ ToolCatalog binding when tools are present
+├── admission
+│   ├── decision                ▸ ALLOW | WARN | OFFLOAD_REQUIRED | ...
+│   ├── transformations[]       ▸ what was applied to reach the admitted shape
+│   └── timestamp
+└── created_at
+```
+
+Every field is concrete on every manifest row — there are no nullable fields beyond the ones explicitly marked optional. A manifest is a complete description.
+
+## Stable identities
+
+Two identity fields travel on every manifest. Both are pure functions of the manifest's content; they do not change between writes of the same shape.
+
+| Identity | Purpose | Inputs |
+|---|---|---|
+| `stable_prefix_id` | Legacy router compatibility. The Pass 4 cache-aware router uses this to look up reusable KV cache prefixes. | Hash of the canonical-ordered stable segments. |
+| `stable_context_id` | Compatibility-aware identity used for manifest-tier reuse, KV index lookups, and cross-call correlation. | Digest cascade across all segments + renderer version + model family + tokenizer fingerprint + scope. |
+
+Two requests that produce the same `stable_context_id` will route to the same warm placement. Two manifests that share `stable_prefix_id` but differ on `stable_context_id` (e.g. same prefix but different downstream segments) share the prefix tier of the cache but fan out at the manifest tier.
+
+## Multi-tier prefix breakpoints
+
+The manifest is partitioned along canonical breakpoints so different cache layers can find their own reuse boundary on the same data structure:
+
+```
+[ tools ][ system ][ history-prefix ][ summary ][ active ]
+   ▲         ▲           ▲              ▲          ▲
+   │         │           │              │          │
+   tool      system      reused turn    bounded    fresh
+   catalog   prompt      history        manifest   user input
+   tier      tier        tier           summary    +
+                                        tier       generation
+```
+
+Pass 4 routing reuses the leftmost breakpoints; Anthropic-style prompt cache hints reuse breakpoints further right; manifest-tier reuse spans the full structure. Every breakpoint produces its own digest, recorded on the manifest for downstream consumers.
+
+## Segment ordering
+
+Segments inside a manifest follow **canonical ordering** (ADR-003). The order is deterministic and renderer-invariant for the same input set, so two assemblies that consume the same inputs produce the same `stable_context_id`. The order is, in summary:
+
+1. Tool catalog segments (`tool_definitions`, in catalog order).
+2. System segments (`system_prompt`, then any system-scope memory injections).
+3. History prefix (turn history up to the last summarization point).
+4. Summary segments (compacted history if any).
+5. Active segments (current user message, current assistant draft, current generation).
+
+Runtimes provide *content*; GCM owns *order*. Runtimes do not influence the canonical position assigned to a segment.
+
+## Admission decision
+
+Every manifest carries the admission outcome from the [ContextBudget](/docs/concepts/policy/context-budgets) admission service. The decision is one of:
+
+| Decision | Meaning | Recorded transformations |
+|---|---|---|
+| `ALLOW` | Proceeded directly. | None. |
+| `WARN` | Proceeded with a warning. | None. |
+| `OFFLOAD_REQUIRED` | Re-admitted after artifact offload. | List of segments moved to artifact references. |
+| `COMPACT_REQUIRED` | Re-admitted after compaction. | Reference to the CompactionRecord that reduced the manifest. |
+| `DEGRADE` | Re-admitted under degraded shape. | Reduced `max_tokens`, dropped optional segments. |
+| `HARD_STOP` | Rejected. The manifest is recorded but no ModelCall references it. |
+
+The recorded transformations make the path from "raw assembly" to "admitted shape" reconstructible after the fact.
+
+## Identity-of-record for the rest of the system
+
+| Consumer | What it reads from the manifest |
+|---|---|
+| [ModelCall](/docs/concepts/run-hierarchy/model-calls) | `context_manifest_id` FK; full manifest accessible by join. |
+| [Cache-aware router](/docs/concepts/routing/manifest-aware-routing) | `stable_prefix_id`, `stable_context_id`, breakpoint digests, scope. |
+| [Checkpoint](/docs/concepts/recovery/checkpoints) | Frozen snapshot is the audit anchor for restore. |
+| [Sessions](/docs/concepts/continuity/sessions) | `current_manifest_id` and bounded manifest history. |
+| [ContextBudget admission](/docs/concepts/policy/admission) | Token counts and admission decision are produced here. |
+| [Run-level Budget pre-check](/docs/concepts/policy/budgets) | Cost estimate against `active_tokens` + tokenizer fingerprint. |
+| [CompactionRecord](/docs/concepts/context/compaction-records) | Source manifest reference; output segment list. |
+| [Sub-runs](/docs/concepts/run-hierarchy/sub-runs) | Parent's next manifest may include the child's summary segment without inflating the full child transcript. |
+
+## Wire shape
+
+```http
+GET /v1/ks/context/manifests/01J8X9Y2Z3K4M5N6P7Q8R9S0T6
+Authorization: Bearer ks_...
+```
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T6",
+  "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+  "step_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T5",
+  "model_call_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+  "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+  "stable_prefix_id": "sha256:9a1c…",
+  "stable_context_id": "sha256:7e44…",
+  "renderer_version": "v3",
+  "model_id": "qwen3-coder-30b",
+  "model_family": "qwen3-coder",
+  "tokenizer_fingerprint": "sha256:9f2c…",
+  "scope": {
+    "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+    "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    "context_share_scope": "project"
+  },
+  "token_counts": {
+    "stable_tokens": 1840,
+    "volatile_tokens": 312,
+    "active_tokens": 2152,
+    "offloaded_tokens": 7400
+  },
+  "byte_counts": {
+    "artifact_bytes": 3145728
+  },
+  "tool_catalog_id": "01J8X9Y2Z3K4M5N6P7Q8R9TC01",
+  "admission": {
+    "decision": "OFFLOAD_REQUIRED",
+    "transformations": [
+      {
+        "type": "artifact_offload",
+        "segment_ids": ["01J8X9Y2Z3K4M5N6P7Q8R9SG07"],
+        "artifact_ref_ids": ["01J8X9Y2Z3K4M5N6P7Q8R9AR03"]
+      }
+    ],
+    "timestamp": "2026-04-30T12:00:00Z"
+  },
+  "created_at": "2026-04-30T12:00:00Z"
+}
+```
+
+## What ContextManifests are not
+
+- **Not a prompt template.** GCM does not own prompt composition. The runtime supplies content; GCM normalizes shape, computes identity, and records the result.
+- **Not a retrieval framework.** GCM consumes references to retrieved content; retrieval strategy belongs to the runtime.
+- **Not regenerated on each read.** A manifest is written once and immutable thereafter. Re-admission produces a *new* manifest with its own id; the prior manifest stays addressable.
+- **Not the full prompt bytes.** The manifest stores segment metadata + identities. Large segment bodies are referenced via [ContextArtifacts](/docs/concepts/context/context-artifacts); inline segment bodies are stored on the [ContextSegment](/docs/concepts/context/context-segments) row.
+
+## See also
+
+- [Context segments](/docs/concepts/context/context-segments) — the typed fragments a manifest is built from
+- [Context artifacts](/docs/concepts/context/context-artifacts) — the offload backing for large segments
+- [Compaction records](/docs/concepts/context/compaction-records) — the lineage objects that explain how a manifest was reduced
+- [Manifest-aware routing](/docs/concepts/routing/manifest-aware-routing) — the consumer of `stable_context_id`
+- [Current manifest](/docs/concepts/continuity/current-manifest) — the Session-level pointer that tracks recency
+- [Admission](/docs/concepts/policy/admission) — the ContextBudget evaluator that produces the admission decision
+- [`GET /v1/ks/context/manifests/{id}`](/docs/api/context/manifests/get)

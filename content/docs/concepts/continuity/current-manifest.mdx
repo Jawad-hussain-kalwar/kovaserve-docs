@@ -1,0 +1,110 @@
+---
+title: Current manifest
+description: The `current_manifest_id` pointer on a Session — what it points at, when it advances, and the bounded manifest history that travels alongside it across Run binds.
+---
+
+The **current manifest** is the [ContextManifest](/docs/concepts/context/context-manifests) that produced the most recent [ModelCall](/docs/concepts/run-hierarchy/model-calls) on a [Session](/docs/concepts/continuity/sessions). It is exposed as `current_manifest_id` on the Session row, and it is the entry point for every resume, branch, or routing decision that needs to know "what was this Session thinking about most recently?"
+
+`current_manifest_id` is maintained by the **Session Registry**. It advances on every successful ModelCall recorded against the Session, and it survives across Run boundaries — when one Run completes and a new Run binds in, the pointer does not reset.
+
+## What it points at
+
+The pointer is always the most recent `ContextManifest` that admitted successfully and produced a ModelCall against this Session:
+
+```
+Session
+├── current_manifest_id  ──▶ ContextManifest M_n  (most recent admitted manifest)
+└── manifest_history[]   ──▶ [M_{n-1}, M_{n-2}, ..., M_{n-k}]
+                              (bounded window; oldest evicted as new ones arrive)
+```
+
+The pointer never references a manifest that was rejected at admission (`HARD_STOP`) or one that was assembled but never reached substrate dispatch. Until the Session's first successful ModelCall, `current_manifest_id` is `null`.
+
+## When it advances
+
+`current_manifest_id` advances at exactly one moment: when the Canonical Execution Service records a `ModelCall` row whose `context_manifest_id` is non-null, scoped to this Session. The update is atomic with the ModelCall write; there is no observable window where the ModelCall exists but the pointer still references the prior manifest.
+
+| Event | Effect on `current_manifest_id` |
+|---|---|
+| ModelCall recorded successfully | Advances to the new manifest. Prior manifest pushed onto `manifest_history`. |
+| ModelCall recorded with no manifest (anonymous v1 path) | Unchanged. |
+| Manifest assembled but admission rejected (`HARD_STOP`) | Unchanged. No ModelCall is created. |
+| Manifest re-admitted after `OFFLOAD_REQUIRED` / `COMPACT_REQUIRED` / `DEGRADE` | Advances when the re-admitted manifest finally produces a ModelCall. Transient advisory states do not move the pointer on their own. |
+| Run completes / fails / is canceled | Unchanged. Run boundaries do not reset the pointer. |
+| New Run binds to the Session | Unchanged. The new Run inherits the current manifest as its starting reference. |
+| Checkpoint capture | Unchanged. The Checkpoint freezes the manifest snapshot but does not move the live pointer. |
+| Checkpoint restore | Pointer is set to the manifest snapshot the Checkpoint was anchored to, then advances normally on the resumed Run's next ModelCall. |
+
+## Bounded manifest history
+
+Every Session also carries a bounded history of prior manifest pointers — the last `k` admitted manifests, oldest evicted as new ones arrive. The history exists so resume planning, branch creation, and operator inspection can reason about the Session's trajectory without joining through every ModelCall.
+
+| Field | Shape |
+|---|---|
+| `current_manifest_id` | Bare 26-char ULID, nullable until the Session's first ModelCall. |
+| `manifest_history` | Ordered array of bare ULIDs, most recent first, length ≤ `k`. |
+| `k` | Project-level configuration. The default retains enough manifests to support resume planning across the most common Session lengths without unbounded growth. |
+
+The history is bounded by count, not by time. Manifests evicted from the Session-level history remain queryable in the [Context Manifest Registry](/docs/concepts/context/context-manifests) for as long as their tenant retention policy allows — eviction from the Session pointer is not a deletion.
+
+## What survives across Run binds
+
+When one Run completes and a new Run binds to the Session, three Session-level pointers travel into the new Run as starting state:
+
+```
+Run R_a (terminal)                Run R_b (newly bound)
+└── last manifest M_n  ────▶      starts with Session.current_manifest_id = M_n
+                                  inherits Session.manifest_history = [M_{n-1}, ...]
+                                  may attach a fresh ContextManifest M_{n+1}
+                                  on its first ModelCall
+```
+
+The new Run does not need to recompute or replay the old manifest. It can reference `Session.current_manifest_id` directly to seed its first prompt, then assemble a fresh manifest for its own first ModelCall — at which point the pointer advances to the new manifest, and `M_n` joins the history.
+
+A Run is **not** required to consume the inherited manifest. A Run that arrives via the Session but composes a fresh prompt from scratch will produce a new manifest on its first ModelCall and the pointer will advance normally; the prior manifest simply moves into history without ever being referenced.
+
+## Survival across Checkpoint restore
+
+When a new Run resumes a [Checkpoint](/docs/concepts/recovery/checkpoints), the Checkpoint's frozen `context_manifest_id` becomes the new Run's starting manifest reference. If the Session being resumed against is the same Session as the original, the Session's `current_manifest_id` is set to the Checkpoint's manifest **before** the resumed Run's first Step is admitted. This makes manifest semantics consistent with the Run-level resume order:
+
+1. Load checkpoint.
+2. Validate compatibility.
+3. Set `Session.current_manifest_id` to the Checkpoint's manifest snapshot.
+4. Plan KV restore (optional).
+5. Resume Run; new ModelCalls advance the pointer normally.
+
+If the resume binds to a *different* Session (a branch into a fresh Session), the new Session's `current_manifest_id` is initialized to the Checkpoint's manifest and its `manifest_history` starts empty.
+
+## Why a pointer instead of a join
+
+The Canonical Execution Service can always reconstruct "the last manifest of this Session" by joining Session → Runs → Steps → ModelCalls and ordering by timestamp. The Session-level pointer is a denormalization, not new information. It exists for two reasons:
+
+- **Routing.** The [Cache-Aware Router](/docs/concepts/routing/manifest-aware-routing) consults `current_manifest_id` and `manifest_history` to score candidate placements without traversing the full execution graph on every request.
+- **Operator inspection.** "Show me Sessions whose current manifest is over budget" or "Sessions whose last manifest was compacted" are direct index lookups against the Session table; they do not require scanning ModelCall rows.
+
+The denormalization is exact, not approximate. The atomic write that records each ModelCall also updates the pointer, so reads of `Session.current_manifest_id` always return the same value as the last-by-timestamp join would.
+
+## Wire shape
+
+```json
+{
+  "id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+  "state": "OPEN",
+  "current_manifest_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T6",
+  "manifest_history": [
+    "01J8X9Y2Z3K4M5N6P7Q8R9S0T5",
+    "01J8X9Y2Z3K4M5N6P7Q8R9S0T4",
+    "01J8X9Y2Z3K4M5N6P7Q8R9S0T3"
+  ]
+}
+```
+
+`current_manifest_id` is `null` only between Session creation and the first successful ModelCall against it. `manifest_history` is empty when the current manifest is the first manifest the Session has ever admitted.
+
+## See also
+
+- [Sessions](/docs/concepts/continuity/sessions) — the entity that owns the pointer
+- [Session state machine](/docs/concepts/continuity/session-state-machine) — the lifecycle that hosts manifest advancement
+- [Context manifests](/docs/concepts/context/context-manifests) — what the pointer points at
+- [Checkpoints](/docs/concepts/recovery/checkpoints) — the surface that freezes a manifest snapshot for resume
+- [Manifest-aware routing](/docs/concepts/routing/manifest-aware-routing) — the consumer that reads the pointer at request time

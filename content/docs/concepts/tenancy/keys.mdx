@@ -1,0 +1,190 @@
+---
+title: Keys
+description: The Key entity — the Bearer credential that authenticates every request, bound to one (Organization, Project, Environment) triple, with hashed storage, scoped resolution, rotation, and revocation.
+---
+
+A **Key** is the Bearer credential that authenticates every request to KovaServe. Every Key is bound to exactly one `(organization_id, project_id, environment_id)` triple, and every authenticated request resolves through that triple to produce the [AuthContext](/docs/concepts/run-hierarchy/identity-and-ids) that propagates to every internal module.
+
+Keys are the bottom level of the [tenancy hierarchy](/docs/concepts/tenancy). They carry no permissions of their own beyond the resolved [PolicyScope](/docs/concepts/policy/policy-scopes) — they are bearers, not policies.
+
+## Key shape
+
+A Key on the wire is a single Bearer string:
+
+```
+Authorization: Bearer ks_live_3f2a8b7e6d4c1f0925a1b6c3d4e5f6a7b8c9d0e1f2
+```
+
+| Component | Meaning |
+|---|---|
+| `ks_` | KovaServe Key prefix. |
+| `live_` or `test_` | Mode marker. `test_` keys reject in admission against deployments with `tier = prod`. |
+| `<random>` | 32+ characters of base32 randomness. The full string is the secret. |
+
+The string after `Bearer ` is never logged in full. It appears in dashboards and logs as `ks_live_...e1f2` (last four characters only) and is searchable only by Key ID.
+
+## Storage
+
+Keys are stored as **SHA-256 hashes** — the raw secret is never persisted:
+
+| Column | Purpose |
+|---|---|
+| `id` | Bare 26-char Crockford ULID. The `key_id` referenced in events, audit logs, and PolicyScope resolution. |
+| `organization_id` | Bound parent. |
+| `project_id` | Bound parent. |
+| `environment_id` | Bound parent. |
+| `name` | Human-readable label. Surfaces in dashboards and audit logs. |
+| `key_hash` | SHA-256 of the raw Key secret. The lookup column. |
+| `last4` | Last four characters of the secret, for dashboard display. |
+| `mode` | `live` or `test`. |
+| `status` | `ACTIVE`, `REVOKED`, or `EXPIRED`. |
+| `created_at` | Timestamp. |
+| `expires_at` | Optional expiry. |
+| `last_used_at` | Updated on every successful resolve. |
+
+Resolution: the gateway hashes the incoming Bearer string with SHA-256, looks up the hash, and returns the Key row. The raw secret cannot be recovered from KovaServe — a lost Key must be rotated, not retrieved.
+
+## Wire shape
+
+### Create
+
+```http
+POST /v1/ks/keys
+Authorization: Bearer ks_admin_...
+Content-Type: application/json
+
+{
+  "organization_id": "01J8X9Y2Z3K4M5N6P7Q8R9ORG1",
+  "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9PRJ1",
+  "environment_id": "01J8X9Y2Z3K4M5N6P7Q8R9ENV1",
+  "name": "ci-bot",
+  "mode": "live",
+  "expires_at": "2027-04-30T00:00:00Z"
+}
+```
+
+The response is the **only time the raw secret is returned** — clients must store it immediately:
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9KEY1",
+  "organization_id": "01J8X9Y2Z3K4M5N6P7Q8R9ORG1",
+  "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9PRJ1",
+  "environment_id": "01J8X9Y2Z3K4M5N6P7Q8R9ENV1",
+  "name": "ci-bot",
+  "mode": "live",
+  "status": "ACTIVE",
+  "last4": "e1f2",
+  "secret": "ks_live_3f2a8b7e6d4c1f0925a1b6c3d4e5f6a7b8c9d0e1f2",
+  "created_at": "2026-04-30T12:00:00Z",
+  "expires_at": "2027-04-30T00:00:00Z"
+}
+```
+
+### Get / list
+
+`GET /v1/ks/keys/{id}` and `GET /v1/ks/keys` return the metadata fields only — `secret` is absent. A lost Key cannot be re-fetched; it must be rotated.
+
+## Scope binding
+
+A Key's `(organization_id, project_id, environment_id)` triple is **immutable after creation**. Re-binding is not an operation:
+
+- A Key issued for Project A cannot later be moved to Project B.
+- A Key issued for the `staging` Environment cannot later be promoted to `production`.
+- The pattern for promotion is: create a new Key for the target Environment and revoke the old one.
+
+The triple is the only thing the Key carries. Permissions, rate limits, model ACLs, and data boundary all come from the resolved [PolicyScope](/docs/concepts/policy/policy-scopes#resolution), which overlays Organization → Project → Environment defaults at admission time.
+
+## Rotation
+
+Rotation issues a new secret while preserving the Key ID, name, and bound scope:
+
+```http
+POST /v1/ks/keys/{id}/rotate
+Authorization: Bearer ks_admin_...
+```
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9KEY1",
+  "secret": "ks_live_<new-secret>",
+  "rotated_at": "2026-04-30T13:00:00Z",
+  "previous_revoked_at": "2026-04-30T13:05:00Z"
+}
+```
+
+Rotation provides a **5-minute grace window**: the previous secret continues to authenticate for five minutes after rotation, so a deployment cycle can swap secrets without an outage. The previous secret transitions to `REVOKED` at the end of the grace window.
+
+The Key ID does not change on rotation. Audit logs, event histories, and `last_used_at` continuity are preserved.
+
+## Revocation
+
+```http
+POST /v1/ks/keys/{id}/revoke
+Authorization: Bearer ks_admin_...
+```
+
+Revocation is **immediate and unconditional**:
+
+| Surface | Behavior under REVOKED |
+|---|---|
+| New requests | Return `401 Unauthorized` with `error.code = "key_revoked"`. |
+| In-flight requests | Continue to completion — revocation does not interrupt admitted Steps. |
+| Cached resolution | Invalidated within the gateway's resolution-cache TTL (configured at deployment time, never longer than 60 seconds). |
+| Re-issuance | Not possible. Revoked Keys cannot be reactivated. |
+
+A Key that expires (`expires_at` reached) follows the same path — it transitions to `EXPIRED` and rejects with `error.code = "key_expired"`.
+
+## Resolution flow
+
+```
+Authorization: Bearer ks_live_3f2a...e1f2
+        │
+        ▼  SHA-256
+   key_hash
+        │
+        ▼  SELECT FROM keys WHERE key_hash = ?
+   Key row
+        │
+        ▼  status = ACTIVE? mode matches deployment tier?
+   pass / 401
+        │
+        ▼  load Organization, Project, Environment
+   AuthContext { organization_id, project_id, environment_id, key_id }
+        │
+        ▼  overlay PolicyScope
+   resolved scope → admission, routing, metering
+```
+
+Resolution is the first step on every request; nothing else runs until the AuthContext is produced. See [authentication](/docs/api/authentication) for the full request-side contract.
+
+## Audit and visibility
+
+Every Key resolution updates `last_used_at`. Every admission decision tagged to the resolved Key emits `ks.policy.evaluated` with the `key_id` in the event envelope. Dashboards and the [`GET /v1/ks/keys`](/docs/api/keys/list) endpoint surface:
+
+- `last_used_at` timestamp
+- Last seven days of request count
+- Last seven days of admission decisions (allowed, denied, degraded)
+- Most recent rotation timestamp
+
+The full secret is never surfaced — only the Key ID, name, last four characters, and metadata.
+
+## Test mode
+
+A Key with `mode = "test"` resolves identically against `tier = "dev"` Environments and rejects against `tier = "prod"`. Test keys exist so a deployment with both production and development traffic on the same gateway cannot accidentally accept a development credential against production load. The gateway returns `403 Forbidden` with `error.code = "key_mode_environment_mismatch"`.
+
+## What a Key is not
+
+- **Not a user identity.** Keys are service credentials. End-user identity is mapped by the application; KovaServe records `key_id` on every request and the application is responsible for mapping users to Keys.
+- **Not a permission set.** Permissions come from the resolved PolicyScope, not the Key. Two Keys bound to the same triple resolve to identical permissions.
+- **Not editable.** Name and `expires_at` can be updated; everything else is immutable. To change the bound scope, issue a new Key and revoke the old one.
+- **Not transferable across Organizations.** A Key is rooted at a specific Organization at creation. Moving workloads between Organizations is a re-issuance operation, not a Key edit.
+
+## See also
+
+- [Tenancy](/docs/concepts/tenancy) — the four-level hierarchy
+- [Environments](/docs/concepts/tenancy/environments) — the parent
+- [PolicyScope](/docs/concepts/policy/policy-scopes) — the governance binding the Key resolves to
+- [Authentication](/docs/api/authentication) — the request-side contract
+- [Identity and IDs](/docs/concepts/run-hierarchy/identity-and-ids) — `key_id` ULID format
+- [`POST /v1/ks/keys`](/docs/api/keys/create) · [`POST /v1/ks/keys/{id}/rotate`](/docs/api/keys/rotate) · [`POST /v1/ks/keys/{id}/revoke`](/docs/api/keys/revoke)

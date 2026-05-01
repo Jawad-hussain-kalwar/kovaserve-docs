@@ -1,0 +1,9 @@
+{
+  "title": "Managed agents",
+  "pages": [
+    "index",
+    "coderuns",
+    "opsruns",
+    "docruns"
+  ]
+}

@@ -1,0 +1,108 @@
+---
+title: Organizations
+description: The Organization entity — the billing root and top-level governance container in the KovaServe tenancy hierarchy.
+---
+
+An **Organization** is the billing root and top-level governance container in the [tenancy hierarchy](/docs/concepts/tenancy). It owns the contract relationship, the default model ACLs, the default rate limits, the default data-boundary, and every [Project](/docs/concepts/tenancy/projects) underneath. One Organization corresponds to one billed customer.
+
+Every other entity in KovaServe — Projects, Environments, Keys, Sessions, Runs, ModelCalls, ContextArtifacts, MemoryEntries — resolves up to exactly one Organization.
+
+## What an Organization owns
+
+| Field | Purpose |
+|---|---|
+| `id` | Bare 26-char Crockford ULID. |
+| `name` | Human-readable identifier. Not used for routing or auth. |
+| `status` | `ACTIVE` or `SUSPENDED`. Suspended Organizations reject all admission with `403 Forbidden`. |
+| `default_policy_scope_id` | The PolicyScope applied to any Project that does not declare its own override. |
+| `default_data_boundary` | `tenant_local` / `region_local` / `unrestricted` — the residency floor for ContextArtifacts and KV exports across all Projects. |
+| `default_rate_limits` | Organization-wide ceiling on requests-per-second and tokens-per-second. Sums across all Projects. |
+| `default_model_acl` | Allowlist of model IDs the Organization is contracted for. Project-level ACLs can subset this list but not extend it. |
+| `created_at` | Timestamp. |
+
+The Organization-level fields are **defaults and ceilings**, not per-request enforcement. The actual enforcement happens at admission time after the full hierarchy overlays — see [PolicyScope](/docs/concepts/policy/policy-scopes#resolution).
+
+## Wire shape
+
+```http
+GET /v1/ks/organizations/{id}
+Authorization: Bearer ks_...
+```
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9ORG1",
+  "name": "Acme Corp",
+  "status": "ACTIVE",
+  "default_policy_scope_id": "01J8X9Y2Z3K4M5N6P7Q8R9P0K0",
+  "default_data_boundary": "tenant_local",
+  "default_rate_limits": {
+    "requests_per_second": 200,
+    "tokens_per_second": 4000000
+  },
+  "default_model_acl": ["qwen3-coder-30b", "qwen3-coder-7b"],
+  "created_at": "2026-01-15T09:00:00Z"
+}
+```
+
+A Bearer key resolves to exactly one Organization. The `GET /v1/ks/organizations/{id}` endpoint accepts only the resolved `organization_id` for the authenticated key — calls for other IDs return `404 Not Found`.
+
+## Identity scope
+
+The Organization is the **opaque boundary** of identity:
+
+- A Key in Organization A cannot read, write, or reference any entity in Organization B. Cross-organization access uniformly returns `404 Not Found`, not `403`, so probing leaks no information.
+- The Run, Session, ContextArtifact, and ModelCall ID spaces are tenant-scoped — the same ULID could in principle exist in two Organizations and neither would see the other's row.
+- Cache reuse never crosses Organizations. The [Cache-Aware Router](/docs/concepts/routing/manifest-aware-routing) treats `organization_id` as a hard scope filter regardless of how `context_share_scope` is configured at narrower levels.
+
+## What sums up at the Organization level
+
+Cost, usage, and budget surfaces aggregate up the hierarchy. Organization-level totals are the sum across all Projects and Environments:
+
+| Surface | Endpoint |
+|---|---|
+| Usage and cost | `GET /v1/ks/metering/usage?scope=organization` |
+| Per-day breakdown | `GET /v1/ks/metering/usage?scope=organization&group_by=day` |
+| Per-project breakdown | `GET /v1/ks/metering/usage?scope=organization&group_by=project` |
+| Per-model breakdown | `GET /v1/ks/metering/usage?scope=organization&group_by=model` |
+| JSONL export | `GET /v1/ks/metering/export?scope=organization` |
+
+ADR-023 governs error semantics on these queries. `scope=organization` returns `200` with zeros when there is no traffic in the requested period; the call does not 404.
+
+## Suspension
+
+An Organization can be moved to `SUSPENDED`. The effect is immediate:
+
+| Surface | Behavior under SUSPENDED |
+|---|---|
+| New ModelCall admission | Reject with `403 Forbidden`, `error.code = "organization_suspended"`. |
+| In-flight Runs | Continue until next Step admission, where they reject and the Run transitions to `FAILED` with `error.code = "organization_suspended"`. |
+| Read-only endpoints | Continue to serve. Suspended customers can still inspect their data and exports. |
+| Data retention | Unchanged — suspension is operational, not a deletion event. |
+
+Suspension is set out-of-band by the platform operator. There is no API for self-suspension.
+
+## Inheritance
+
+| Operation | Organization-level effect |
+|---|---|
+| Create [Project](/docs/concepts/tenancy/projects) | Inherits `default_policy_scope_id`, `default_data_boundary`, `default_rate_limits`, `default_model_acl`. The Project may narrow but not widen any of these. |
+| Create [Environment](/docs/concepts/tenancy/environments) | Same — Environment-level overrides narrow against the Project's resolved values, which already narrow against the Organization. |
+| Create [Key](/docs/concepts/tenancy/keys) | A Key cannot be issued for an Organization that is `SUSPENDED`. |
+
+The Organization's `default_model_acl` is a **hard ceiling**: a Project ACL cannot list a model not on the Organization's ACL. The resolution rule (more-specific can narrow, never widen) makes this property robust regardless of how many overlay levels are involved.
+
+## What an Organization is not
+
+- **Not a tenant in network terms.** Network isolation (VPC, region pinning) is a deployment-topology concern. The Organization is a logical entity inside a deployment.
+- **Not an end-user identity.** Keys are service credentials. End-user identity is mapped by the application; KovaServe records the Key.
+- **Not deletable.** Organizations are suspended, not deleted. The data retention surface is documented separately and is not an Organization-level CRUD operation.
+- **Not the same as a Project.** A small customer with one application still has one Organization with one Project beneath. The two levels exist independently because Organizations carry billing and Projects carry workloads.
+
+## See also
+
+- [Tenancy](/docs/concepts/tenancy) — the four-level hierarchy
+- [Projects](/docs/concepts/tenancy/projects) — the next level down
+- [PolicyScope](/docs/concepts/policy/policy-scopes) — the governance binding inheritance overlays through
+- [Identity and IDs](/docs/concepts/run-hierarchy/identity-and-ids) — bare ULIDs across the surface
+- [`GET /v1/ks/organizations/{id}`](/docs/api/organizations/get)

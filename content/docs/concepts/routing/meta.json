@@ -1,0 +1,10 @@
+{
+  "title": "Routing & cache",
+  "pages": [
+    "kv-cache",
+    "manifest-aware-routing",
+    "kv-index",
+    "placement-hints",
+    "cached-tokens"
+  ]
+}

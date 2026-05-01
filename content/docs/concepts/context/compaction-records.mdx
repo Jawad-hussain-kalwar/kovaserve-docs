@@ -1,0 +1,199 @@
+---
+title: Compaction records
+description: The CompactionRecord entity — the lineage object describing how a set of source segments became one or more compacted segments, including source manifest, source/output segment IDs, method, model, token counts before/after, and quality flags.
+---
+
+A **CompactionRecord** is the lineage object that describes how a set of source [ContextSegments](/docs/concepts/context/context-segments) was reduced into one or more compacted output segments. It records the source manifest, the source segment ids, the output segment ids, the method, the model used (if any), token counts before and after, and quality flags.
+
+CompactionRecords are produced by the **Compaction Lineage Service**. They make compaction reconstructible: every compacted segment in a [ContextManifest](/docs/concepts/context/context-manifests) carries a `compaction_record_id` that resolves to a complete description of how that segment came to exist.
+
+## Why a separate lineage entity
+
+Compaction is a lossy transformation — a 10,000-token tool transcript becomes a 400-token summary. Without a lineage record, that loss is irrecoverable: the manifest contains the summary but no trace of what it was summarized from, no way to verify quality, and no way to replay against the original source.
+
+The CompactionRecord is the lineage anchor that makes compaction safe to use as an automatic operation:
+
+- Resume can verify that compaction was applied correctly by checking source-to-output token deltas against recorded values.
+- Operators can audit which calls invoked compaction, with what method, against what input.
+- Re-compaction with a different method (or a managed summarizer roll-forward) can use the original sources, not the prior summary.
+- Quality regressions are debuggable — the record carries enough metadata to reproduce the prior compaction pass.
+
+## Two production paths
+
+The Compaction Lineage Service supports two identical-shape production paths:
+
+| Producer | Where the summary text comes from |
+|---|---|
+| Runtime-produced | The runtime calls a model itself, produces the summary, and reports the record via `POST /v1/ks/context/compact`. KovaServe records lineage; it does not generate the summary. |
+| KovaServe-managed | The Compaction Lineage Service runs a managed summarizer (model-specific policies, optional quality scoring) and writes both the output segments and the record. |
+
+The lineage contract is identical in both cases. The same downstream consumers — resume, observability, re-compaction — operate on records produced by either path without distinguishing them.
+
+## Shape
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9CR04",
+  "source_manifest_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T6",
+  "source_segment_ids": [
+    "01J8X9Y2Z3K4M5N6P7Q8R9SG10",
+    "01J8X9Y2Z3K4M5N6P7Q8R9SG11",
+    "01J8X9Y2Z3K4M5N6P7Q8R9SG12"
+  ],
+  "output_segment_ids": [
+    "01J8X9Y2Z3K4M5N6P7Q8R9SG20"
+  ],
+  "method": "summarize_history",
+  "model": "qwen3-coder-30b",
+  "token_counts": {
+    "source_total": 9842,
+    "output_total": 412,
+    "savings": 9430
+  },
+  "byte_counts": {
+    "source_total": 39280,
+    "output_total": 1648
+  },
+  "source_artifact_ids": [
+    "01J8X9Y2Z3K4M5N6P7Q8R9AR05"
+  ],
+  "output_artifact_id": "01J8X9Y2Z3K4M5N6P7Q8R9AR06",
+  "producer": "runtime",
+  "quality_flags": {
+    "verbatim_quotes_preserved": true,
+    "tool_call_records_preserved": true,
+    "decisions_preserved": true
+  },
+  "scope": {
+    "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+    "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1"
+  },
+  "created_at": "2026-04-30T12:00:00Z"
+}
+```
+
+## Fields
+
+| Field | Purpose |
+|---|---|
+| `id` | Bare 26-char ULID. |
+| `source_manifest_id` | The ContextManifest the source segments belonged to. |
+| `source_segment_ids[]` | Ordered ids of the segments that were compacted. |
+| `output_segment_ids[]` | Ids of the resulting segments. Usually one; may be more when the source spans distinct topics. |
+| `method` | Method tag — `summarize_history`, `summarize_tool_output`, `truncate_with_marker`, `extract_decisions`, etc. Closed enum maintained by the Compaction Lineage Service. |
+| `model` | The model used to produce the summary, if any. Null for non-model methods like `truncate_with_marker`. |
+| `token_counts.source_total` | Sum of source segment `token_count`s under the source manifest's tokenizer fingerprint. |
+| `token_counts.output_total` | Sum of output segment `token_count`s. |
+| `token_counts.savings` | `source_total - output_total`. Recorded so it does not need to be recomputed. |
+| `byte_counts` | Same shape, bytes. |
+| `source_artifact_ids[]` | Optional. When source segments were artifact-backed, the artifacts are recorded too so the source bytes survive segment retention. |
+| `output_artifact_id` | Optional. Pre/post-compaction transcripts may be retained as artifacts for replay. |
+| `producer` | `runtime` or `managed`. |
+| `quality_flags` | Method-specific structured flags asserting properties the runtime or managed summarizer guaranteed. |
+| `scope` | Tenant/project ownership. |
+
+## Records and segments
+
+A compacted output segment carries `compaction_record_id` pointing back at its CompactionRecord:
+
+```
+ContextSegment (compacted)
+├── id = 01J8X9Y2Z3K4M5N6P7Q8R9SG20
+├── context_type = "history_summary"
+├── compaction_record_id = 01J8X9Y2Z3K4M5N6P7Q8R9CR04   ◀── the record
+└── ...
+
+CompactionRecord
+├── id = 01J8X9Y2Z3K4M5N6P7Q8R9CR04
+├── source_segment_ids = [...SG10, SG11, SG12]
+└── output_segment_ids = [SG20]
+```
+
+The relationship is bidirectional and indexed: given a record, the source and output segments resolve directly; given a compacted segment, the record resolves directly.
+
+## Producing a record
+
+```http
+POST /v1/ks/context/compact
+Authorization: Bearer ks_...
+Content-Type: application/json
+
+{
+  "source_manifest_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T6",
+  "source_segment_ids": [
+    "01J8X9Y2Z3K4M5N6P7Q8R9SG10",
+    "01J8X9Y2Z3K4M5N6P7Q8R9SG11",
+    "01J8X9Y2Z3K4M5N6P7Q8R9SG12"
+  ],
+  "method": "summarize_history",
+  "model": "qwen3-coder-30b",
+  "output_segments": [
+    {
+      "context_type": "history_summary",
+      "memory_scope": "session",
+      "text": "<the summary>",
+      "token_count": 412
+    }
+  ],
+  "quality_flags": {
+    "verbatim_quotes_preserved": true,
+    "tool_call_records_preserved": true,
+    "decisions_preserved": true
+  }
+}
+```
+
+The Compaction Lineage Service writes the output segment rows, the CompactionRecord row, and the `compaction_record_id` back-reference in a single transaction. The next manifest assembled by GCM v2 may then drop the source segments and include the output segment instead — admission re-runs against the reduced shape.
+
+## Triggers
+
+CompactionRecords are produced when:
+
+| Trigger | Source |
+|---|---|
+| `ContextBudget` admission returned `COMPACT_REQUIRED` | The runtime (or managed summarizer) compacts to fit; the record is registered before re-admission. |
+| Runtime-driven proactive summarization | The runtime decides to compact ahead of an admission failure. |
+| Managed summarizer policy | A scheduled policy compacts long Sessions or large tool outputs without runtime involvement. |
+| Sub-run summary handoff | The child Run's summary registration produces both an artifact and a CompactionRecord whose `source_artifact_ids` reference the child's transcript. |
+
+The `COMPACT` [step type](/docs/concepts/run-hierarchy/step-types) is the canonical step under which the runtime performs runtime-produced compaction. Managed-summarizer compactions are not Steps on the runtime's Run; they are control-plane-internal operations that produce records but do not occupy step slots.
+
+## Retention
+
+CompactionRecords carry their own retention horizon, which dominates their source artifacts and source segments:
+
+- A `with_compaction_lineage`-retention source segment lives until **every** record listing it as a source has been pruned.
+- A `with_compaction_lineage`-retention source artifact lives under the same rule.
+- The CompactionRecord itself follows tenant retention, typically longer than per-call retention.
+
+This makes lineage replayable across the full retention window: a record from three months ago can still resolve its source segments and source artifacts to verify the compaction or to re-compact under a newer method.
+
+## Quality flags
+
+`quality_flags` is a method-specific JSON object whose keys depend on the `method`. The Compaction Lineage Service does not enforce semantics on the flag values — it stores them. Conventions for the most common methods:
+
+| Method | Typical flags |
+|---|---|
+| `summarize_history` | `verbatim_quotes_preserved`, `tool_call_records_preserved`, `decisions_preserved`, `latest_user_request_preserved`. |
+| `summarize_tool_output` | `error_messages_preserved`, `result_schema_preserved`, `numeric_values_preserved`. |
+| `truncate_with_marker` | `truncation_marker_inserted`, `head_kept_tokens`, `tail_kept_tokens`. |
+| `extract_decisions` | `decision_count`, `bullet_form`. |
+
+The flags are read by observability, by re-compaction policies, and by the `compaction-lineage` view in dashboards.
+
+## What CompactionRecords are not
+
+- **Not a summarizer.** The Compaction Lineage Service stores lineage. Summary generation is either the runtime's job or the managed summarizer's job; the record is the durable trace of the operation, not the operation itself.
+- **Not optional metadata.** Any compacted segment **must** carry `compaction_record_id`. A compacted segment without lineage is rejected at admission.
+- **Not chained automatically.** Re-compaction (compacting an already-compacted segment further) produces a fresh record whose sources include the prior output. The chain is explicit; there is no implicit transitive lineage.
+- **Not free.** Source-segment retention extension under `with_compaction_lineage` increases storage; tenants pay for it through standard metering.
+
+## See also
+
+- [Compaction lineage](/docs/concepts/context/compaction-lineage) — how source/output relationships chain across multiple compactions
+- [Context segments](/docs/concepts/context/context-segments) — the source and output rows
+- [Context manifests](/docs/concepts/context/context-manifests) — the source manifest a record references
+- [Context artifacts](/docs/concepts/context/context-artifacts) — the optional source/output backing for replayable lineage
+- [Admission](/docs/concepts/policy/admission) — the producer of the `COMPACT_REQUIRED` decision that triggers most records
+- [Step types](/docs/concepts/run-hierarchy/step-types) — the `COMPACT` step type
+- [`POST /v1/ks/context/compact`](/docs/api/context/compaction-records/get)

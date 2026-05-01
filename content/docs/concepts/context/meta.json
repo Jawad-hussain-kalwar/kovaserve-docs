@@ -1,0 +1,12 @@
+{
+  "title": "Context engineering",
+  "pages": [
+    "context-manifests",
+    "context-segments",
+    "context-artifacts",
+    "compaction-records",
+    "compaction-lineage",
+    "segment-types",
+    "renderer-versions"
+  ]
+}

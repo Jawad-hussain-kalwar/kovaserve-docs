@@ -3,7 +3,7 @@ title: Sub-run events
 description: The sub-run stream — sub-run lineage events covering subrun.dispatched, subrun.summary_attached, and subrun.joined for parent → single-child summary handoff.
 ---
 
-The **sub-run events** stream covers the lineage of [sub-runs](/docs/concepts/sub-runs) — child Runs dispatched by a parent Run with bounded budget and an inherited [PolicyScope](/docs/concepts/policy-scopes). Sub-run events are emitted from both the parent's and the child's Run paths and tie them together via `parent_run_id` on the envelope.
+The **sub-run events** stream covers the lineage of [sub-runs](/docs/concepts/run-hierarchy/sub-runs) — child Runs dispatched by a parent Run with bounded budget and an inherited [PolicyScope](/docs/concepts/policy/policy-scopes). Sub-run events are emitted from both the parent's and the child's Run paths and tie them together via `parent_run_id` on the envelope.
 
 Subjects: `ks.subrun.*`. Persisted in the `execution_events` JetStream stream. Consumed via [`GET /v1/ks/events/sub-run`](/docs/api/events/sub-run).
 
@@ -49,7 +49,7 @@ The envelope's `run_id` is the parent. `payload.child_run_id` is the new Run; `p
 }
 ```
 
-The envelope's `run_id` is the child Run. `payload.summary_artifact_id` is the [ContextArtifact](/docs/concepts/context-artifacts) carrying the full summary; `summary_segment_id` is the ContextSegment that wraps the summary at preview length for inclusion in the parent's manifest.
+The envelope's `run_id` is the child Run. `payload.summary_artifact_id` is the [ContextArtifact](/docs/concepts/context/context-artifacts) carrying the full summary; `summary_segment_id` is the ContextSegment that wraps the summary at preview length for inclusion in the parent's manifest.
 
 ### `ks.subrun.joined`
 
@@ -106,8 +106,8 @@ Multi-child fan-out and fan-in coordination follow the same event taxonomy: each
 
 ## See also
 
-- [Sub-runs](/docs/concepts/sub-runs) — the entity and the `parent_run_id` / `summary_artifact_id` model
-- [Run state machine](/docs/concepts/run-state-machine) — the FSM child Runs traverse independently
+- [Sub-runs](/docs/concepts/run-hierarchy/sub-runs) — the entity and the `parent_run_id` / `summary_artifact_id` model
+- [Run state machine](/docs/concepts/run-hierarchy/run-state-machine) — the FSM child Runs traverse independently
 - [Execution events](/docs/concepts/events/execution) — the per-Run lifecycle the child also emits to
 - [Context engineering events](/docs/concepts/events/context-engineering) — the manifest events that carry the summary segment
 - [`GET /v1/ks/events/sub-run`](/docs/api/events/sub-run)

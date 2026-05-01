@@ -1,0 +1,129 @@
+---
+title: Budgets
+description: The Budget entity — Run-level execution control over cost, tokens, steps, time, and tool count, evaluated as an active control object before every Step admission.
+---
+
+A **Budget** is a Run-level execution control object that bounds cost, tokens, steps, time, or tool count for a single [Run](/docs/concepts/run-hierarchy/runs). Budgets are **active** — they evaluate before every Step admission and produce explicit decisions (`ALLOW`, `WARN`, `DEGRADED_ALLOWED`, `HARD_STOP`) — not passive billing records.
+
+Budgets are produced and consumed by the **Metering / Cost / Budget Layer**. Every non-anonymous Run carries exactly one Budget; the Budget is bound at Run creation and immutable thereafter.
+
+## Dimensions
+
+A Budget can constrain any subset of these dimensions. Limits left unset are unbounded.
+
+| Dimension | Limit field | Counter |
+|---|---|---|
+| Cost | `cost_cents_limit` | `cost_cents_consumed` |
+| Tokens | `token_limit` | `token_consumed` |
+| Steps | `step_count_limit` | `step_count_consumed` |
+| Wall time | `time_seconds_limit` | `time_seconds_consumed` |
+| Tool calls | `tool_call_limit` | `tool_call_consumed` |
+
+Cost values are 4-decimal-digit strings (`"0.0420"`) per ADR-025. Token counts are real measurements from the substrate, never client-side estimates.
+
+## Run-level vs context-level
+
+Budgets are distinct from [ContextBudgets](/docs/concepts/policy/context-budgets):
+
+| | Budget | ContextBudget |
+|---|---|---|
+| Governs | Cost / tokens / steps / time / tool count | Active context size |
+| Scope | Whole Run | Per ModelCall |
+| Decision moment | Step admission | Manifest admission, before GPU dispatch |
+| Decisions | `ALLOW` / `WARN` / `DEGRADED_ALLOWED` / `HARD_STOP` | `ALLOW` / `WARN` / `OFFLOAD_REQUIRED` / `COMPACT_REQUIRED` / `DEGRADE` / `HARD_STOP` |
+
+Both are evaluated. The Run-level Budget runs *after* ContextBudget admission, against the *admitted* manifest's token counts and cost estimate (not raw client estimates).
+
+## State machine
+
+```
+ACTIVE ──▶ WARNING ──▶ DEGRADED_ALLOWED ──▶ HARD_STOP ──▶ CLOSED
+   │           │                                 ▲
+   └───────────┴─────────────────────────────────┘
+```
+
+| State | Meaning |
+|---|---|
+| `ACTIVE` | Consumption below the warning threshold. Decisions are `ALLOW`. |
+| `WARNING` | Consumption above the warning threshold but below the limit. Emits `ks.budget.warning` events. Decisions are still `ALLOW`. |
+| `DEGRADED_ALLOWED` | Consumption above limit on a non-strict dimension; the runtime is allowed to continue under reduced parameters (smaller `max_tokens`, dropped optional segments). |
+| `HARD_STOP` | Consumption hit a strict limit. Further Steps are rejected with `error.code = "budget_exceeded"`. |
+| `CLOSED` | Run terminal. Counters are frozen for audit. |
+
+`HARD_STOP` is enforced on every Step admission, retry or not. A Run that exhausts its `step_count` Budget on retries cannot continue retrying.
+
+## Inheritance on branches and sub-runs
+
+| Operation | Budget behavior |
+|---|---|
+| [Branch](/docs/concepts/recovery/branches) from a Checkpoint | Limits inherited from parent (overridable downward); counters reset to zero. |
+| [Sub-run](/docs/concepts/run-hierarchy/sub-runs) dispatch | Parent allocates a fraction of its Budget to the child explicitly; child runs under its own ACTIVE Budget. |
+| [Resume](/docs/concepts/recovery/resume-flow) from a Checkpoint | New Run, fresh Budget — typically inheriting the original limits but with consumed counters at zero. |
+| [Retry](/docs/concepts/recovery/retries) (new Step within same Run) | Counters continue advancing; the Run's Budget is not reset. |
+
+Budgets cannot be raised after Run creation. The intent is to scope work, not to expand limits dynamically.
+
+## Wire shape
+
+```http
+POST /v1/ks/runs
+Authorization: Bearer ks_...
+Content-Type: application/json
+
+{
+  "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+  "budget": {
+    "cost_cents_limit": 5000,
+    "token_limit": 1000000,
+    "step_count_limit": 100,
+    "time_seconds_limit": 1800,
+    "warning_threshold_pct": 80
+  }
+}
+```
+
+The Budget appears on the Run row and on every event tagged to the Run:
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+  "budget": {
+    "state": "ACTIVE",
+    "cost_cents_limit": 5000,
+    "cost_cents_consumed": 1240,
+    "token_limit": 1000000,
+    "token_consumed": 98412,
+    "step_count_limit": 100,
+    "step_count_consumed": 23,
+    "time_seconds_limit": 1800,
+    "time_seconds_consumed": 412,
+    "warning_threshold_pct": 80
+  }
+}
+```
+
+## Events
+
+| Event | Emitted on |
+|---|---|
+| `ks.budget.warning` | Threshold crossed into `WARNING`. |
+| `ks.budget.forecast_updated` | Forecast model updates (typically every Step admission). |
+| `ks.budget.hard_stop` | Limit reached; subsequent admissions reject. |
+
+See [budget events](/docs/concepts/events/budget) for the full taxonomy and envelope.
+
+## What Budgets are not
+
+- **Not billing records.** Budgets are control objects. Billing comes from metering against real consumed values.
+- **Not raise-able.** A Run's Budget is bound at creation and immutable.
+- **Not retroactive.** A Budget that crosses `HARD_STOP` does not cancel in-flight ModelCalls; it rejects subsequent Step admissions.
+- **Not a substitute for [PolicyScope](/docs/concepts/policy/policy-scopes).** Budgets bound resource consumption; PolicyScope bounds *what* a Run is allowed to do.
+
+## See also
+
+- [Context budgets](/docs/concepts/policy/context-budgets) — admission control over context size
+- [Policy scopes](/docs/concepts/policy/policy-scopes) — governance binding
+- [Admission](/docs/concepts/policy/admission) — the evaluation flow that includes Budget pre-check
+- [Cost model](/docs/concepts/cost/cost-model) — gross / net / cache savings accounting
+- [Branches](/docs/concepts/recovery/branches) — Budget inheritance on forks
+- [`POST /v1/ks/budgets`](/docs/api/budgets/create) · [`GET /v1/ks/budgets/{id}`](/docs/api/budgets/get)

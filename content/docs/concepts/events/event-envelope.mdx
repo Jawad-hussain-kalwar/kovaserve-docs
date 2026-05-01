@@ -1,0 +1,134 @@
+---
+title: Event envelope
+description: The minimum field set every KovaServe event carries — identity, tenancy, correlation, timestamp, and payload — uniform across every stream so events are joinable across streams without normalization at consume time.
+---
+
+The **event envelope** is the closed set of top-level fields that appear on every KovaServe event regardless of which [stream](/docs/concepts/events) it belongs to. It is the contract that makes events joinable across streams: a [routing](/docs/concepts/events/routing) decision, a [substrate cache hit](/docs/concepts/events/state), and a [model call completion](/docs/concepts/events/execution) for the same ModelCall all carry the same `model_call_id`, the same `run_id`, the same tenancy triple, and the same `trace_id`.
+
+The envelope is fixed by Blueprint §8.4. Adding a new top-level field is an ADR-driven schema change; per-stream variation lives under the `payload` key.
+
+## The fields
+
+| Field | Type | Purpose |
+|---|---|---|
+| `event_id` | ULID | Globally unique event identifier. Cursor for replay. |
+| `event_type` | string | Wire subject (e.g. `ks.run.started`, `kv.state.accessed`). |
+| `timestamp` | RFC 3339 | Producer-side wall clock at emit. |
+| `organization_id` | ULID | Resolved Organization. |
+| `project_id` | ULID | Resolved Project. |
+| `environment_id` | ULID | Resolved Environment. |
+| `run_id` | ULID \| null | Run the event belongs to, when applicable. |
+| `parent_run_id` | ULID \| null | Parent Run for [sub-run](/docs/concepts/run-hierarchy/sub-runs) events. |
+| `session_id` | `ses_<24hex>` \| null | Session continuity link. |
+| `step_id` | ULID \| null | Step the event belongs to. |
+| `model_call_id` | ULID \| null | ModelCall the event belongs to. |
+| `context_manifest_id` | ULID \| null | Manifest in effect. |
+| `checkpoint_id` | ULID \| null | Checkpoint the event references. |
+| `state_handle_id` | ULID \| null | StateHandle the event references. |
+| `node_id` | string \| null | Substrate node identifier. |
+| `model_id` | string \| null | Model identifier (e.g. `qwen3-coder-30b`). |
+| `tool_catalog_id` | ULID \| null | ToolCatalog reference. |
+| `trace_id` | hex(32) | W3C `traceparent` trace ID for cross-system correlation. |
+| `payload` | object | Stream-specific fields. |
+
+Every field is present on the envelope — non-applicable fields are emitted as `null`, not omitted. This makes consumers' field access uniform: a consumer querying `event.run_id` can rely on the key existing.
+
+## Wire shape
+
+```json
+{
+  "event_id": "01J8X9Y2Z3K4M5N6P7Q8R9EVT1",
+  "event_type": "ks.model_call.completed",
+  "timestamp": "2026-04-30T12:00:00.412Z",
+  "organization_id": "01J8X9Y2Z3K4M5N6P7Q8R9ORG1",
+  "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9PRJ1",
+  "environment_id": "01J8X9Y2Z3K4M5N6P7Q8R9ENV1",
+  "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+  "parent_run_id": null,
+  "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+  "step_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+  "model_call_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T3",
+  "context_manifest_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T7",
+  "checkpoint_id": null,
+  "state_handle_id": null,
+  "node_id": "node-gpu-2",
+  "model_id": "qwen3-coder-30b",
+  "tool_catalog_id": "01J8X9Y2Z3K4M5N6P7Q8R9TC01",
+  "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+  "payload": {
+    "duration_ms": 412,
+    "prompt_tokens": 4218,
+    "completion_tokens": 312,
+    "cached_tokens": 3640,
+    "cost_cents": "0.0420"
+  }
+}
+```
+
+## Field semantics
+
+### `event_id`
+
+Bare 26-char Crockford ULID. Lexicographically ordered by emit time. The `event_id` is the cursor used by `GET /v1/ks/events/*` endpoints — clients store the last seen `event_id` and pass it as `after=` to resume.
+
+### `event_type`
+
+Wire subject — the same string used as the NATS subject and the discriminator the consumer dispatches on. The full taxonomy is enumerated in the per-stream pages. New event types are added under the same envelope without schema migration.
+
+### `timestamp`
+
+Producer-side wall clock at emit, RFC 3339 with millisecond precision. Not the database `created_at` of the underlying row — the two are within milliseconds of each other but the event timestamp is what consumers use for ordering.
+
+### Tenancy fields
+
+`organization_id`, `project_id`, `environment_id` are always populated. They are resolved from the request that produced the underlying transition, frozen at admission time, and stamped on every event downstream.
+
+### Correlation fields
+
+`run_id`, `session_id`, `step_id`, `model_call_id`, `context_manifest_id`, `checkpoint_id`, `state_handle_id`, `tool_catalog_id` are populated when applicable to the event. A `kv.state.evicted` event has no `run_id` because eviction is a substrate-driven transition; a `ks.run.created` event has no `model_call_id`.
+
+### `parent_run_id`
+
+Populated only on events emitted under a [sub-run](/docs/concepts/run-hierarchy/sub-runs). The parent's events do not carry it; the child's events carry the parent's `run_id` here so a consumer can reconstruct the lineage without joining.
+
+### `node_id` and `model_id`
+
+Substrate identifiers. Populated on every event tied to a specific substrate execution (KV state events, model call lifecycle, routing decisions). Absent on purely control-plane transitions (Run create, Budget warning, PolicyScope evaluation).
+
+### `trace_id`
+
+The W3C `traceparent` trace ID — 32 hex characters. Joins events to OpenTelemetry traces from the gateway, manifest assembly, routing decision, and substrate execution. The `trace_id` is the only correlation identifier guaranteed to span KovaServe and external systems that integrate via OTel.
+
+### `payload`
+
+The single object that varies per `event_type`. Closed per type — every `event_type` has a defined payload shape documented on its stream page. Adding a payload field to an existing `event_type` is additive (consumers ignore unknown fields); removing or repurposing one is an ADR-driven contract change.
+
+## Joinability
+
+The envelope is what makes cross-stream analysis cheap. A consumer reconstructing the timeline of a single ModelCall reads:
+
+```
+ks.model_call.started      (execution)
+ks.context.manifest.admitted (context engineering)
+ks.route.planned           (routing)
+ks.route.selected          (routing)
+kv.state.accessed          (state)
+ks.tool.invocation.started (runtime, if tools fired)
+ks.tool.invocation.completed (runtime)
+ks.model_call.completed    (execution)
+```
+
+Filtering each stream by `model_call_id = ...` returns the subset for that call; merging by `timestamp` produces the timeline. No additional join keys are needed.
+
+## What the envelope is not
+
+- **Not extensible per-tenant.** The envelope is closed. Custom per-tenant fields belong in `payload` or in a separate consumer-side enrichment layer.
+- **Not a free-form metadata bag.** Every top-level field has a defined type and meaning. Adding a field is a schema decision.
+- **Not the database row.** The event reflects the row; the row is the source of truth. A consumer that needs more than the envelope and payload reads the underlying entity through the API.
+
+## See also
+
+- [Events](/docs/concepts/events) — the eleven streams
+- [Identity and IDs](/docs/concepts/run-hierarchy/identity-and-ids) — ULID and Session ID formats
+- [Tenancy](/docs/concepts/tenancy) — the `(organization_id, project_id, environment_id)` triple
+- [`GET /v1/ks/events/index`](/docs/api/events/index) — combined cursor across streams

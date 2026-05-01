@@ -3,7 +3,7 @@ title: Memory events
 description: The memory stream — MemoryEntry lifecycle events covering memory.entry.written, memory.entry.read, memory.entry.expired, and memory.entry.deleted.
 ---
 
-The **memory events** stream covers the lifecycle of [MemoryEntry](/docs/concepts/memory-entries) rows in the [Memory Store Service](/docs/concepts/memory-store). Every read, write, expiry, and deletion lands here so consumers can audit cross-session memory access and surface memory utilization in dashboards.
+The **memory events** stream covers the lifecycle of [MemoryEntry](/docs/concepts/memory/memory-entries) rows in the [Memory Store Service](/docs/concepts/memory/memory-store). Every read, write, expiry, and deletion lands here so consumers can audit cross-session memory access and surface memory utilization in dashboards.
 
 Subjects: `ks.memory.*`. Persisted in the `execution_events` JetStream stream. Consumed via [`GET /v1/ks/events/memory`](/docs/api/events/memory).
 
@@ -34,7 +34,7 @@ Subjects: `ks.memory.*`. Persisted in the `execution_events` JetStream stream. C
 }
 ```
 
-`scope_type` ∈ `ephemeral`, `session`, `user`, `tenant`, `global` — see [memory scopes](/docs/concepts/memory-scopes). `operation` ∈ `insert`, `update`. `step_id_origin` is the [Step](/docs/concepts/steps) that triggered the write — populated for `MEMORY_WRITE` step types, null for direct API writes.
+`scope_type` ∈ `ephemeral`, `session`, `user`, `tenant`, `global` — see [memory scopes](/docs/concepts/memory/memory-scopes). `operation` ∈ `insert`, `update`. `step_id_origin` is the [Step](/docs/concepts/run-hierarchy/steps) that triggered the write — populated for `MEMORY_WRITE` step types, null for direct API writes.
 
 The full value is **not** in the event payload. The `memory_entry_id` is the addressable handle; consumers fetch the value through the API if authorized.
 
@@ -92,7 +92,7 @@ The `scope_type` and `scope_id` in the payload are the canonical key for downstr
 
 ## Why values are out of band
 
-Memory entry values can be large (the Memory Store backs Anthropic's memory tool and LangGraph's `Store`), and they can carry sensitive data. The events carry the addressable `memory_entry_id` and `value_byte_count`, never the value bytes. This makes the event stream cheap to retain, replicate, and consume without leaking the underlying data — and it forces every consumer that needs the value to go through the authenticated API path that respects [PolicyScope](/docs/concepts/policy-scopes) `data_boundary` constraints.
+Memory entry values can be large (the Memory Store backs Anthropic's memory tool and LangGraph's `Store`), and they can carry sensitive data. The events carry the addressable `memory_entry_id` and `value_byte_count`, never the value bytes. This makes the event stream cheap to retain, replicate, and consume without leaking the underlying data — and it forces every consumer that needs the value to go through the authenticated API path that respects [PolicyScope](/docs/concepts/policy/policy-scopes) `data_boundary` constraints.
 
 ## Common consumers
 
@@ -103,15 +103,15 @@ Memory entry values can be large (the Memory Store backs Anthropic's memory tool
 
 ## Tenancy and scope
 
-Every memory event carries the `(organization_id, project_id, environment_id)` of the request that produced it. The `scope_type = "tenant"` events span Projects within the Organization; `scope_type = "global"` events span Organizations within the deployment under admin control — see [memory scopes](/docs/concepts/memory-scopes) for the full retention model.
+Every memory event carries the `(organization_id, project_id, environment_id)` of the request that produced it. The `scope_type = "tenant"` events span Projects within the Organization; `scope_type = "global"` events span Organizations within the deployment under admin control — see [memory scopes](/docs/concepts/memory/memory-scopes) for the full retention model.
 
-A consumer's visibility into memory events is bounded by its [AuthContext](/docs/concepts/identity-and-ids): a Project-bound key sees events for its Project plus Organization-wide tenant-scope writes. Cross-Organization memory events are never visible.
+A consumer's visibility into memory events is bounded by its [AuthContext](/docs/concepts/run-hierarchy/identity-and-ids): a Project-bound key sees events for its Project plus Organization-wide tenant-scope writes. Cross-Organization memory events are never visible.
 
 ## See also
 
 - [Memory](/docs/concepts/memory) — the overview
-- [Memory scopes](/docs/concepts/memory-scopes) — the retention model
-- [Memory entries](/docs/concepts/memory-entries) — the row shape
-- [Memory store](/docs/concepts/memory-store) — the service surface
-- [Step types](/docs/concepts/step-types) — `MEMORY_READ` and `MEMORY_WRITE`
+- [Memory scopes](/docs/concepts/memory/memory-scopes) — the retention model
+- [Memory entries](/docs/concepts/memory/memory-entries) — the row shape
+- [Memory store](/docs/concepts/memory/memory-store) — the service surface
+- [Step types](/docs/concepts/run-hierarchy/step-types) — `MEMORY_READ` and `MEMORY_WRITE`
 - [`GET /v1/ks/events/memory`](/docs/api/events/memory)

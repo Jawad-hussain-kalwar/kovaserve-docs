@@ -38,96 +38,96 @@ Living roadmap for `docs.kovaserve.com`. Source of structure for `content/docs/`
 
 ### Layered model — Blueprint Part 2
 
-- [x] `concepts/layered-model.mdx` — Layer 1 / 2 / 3 boundaries
-- [x] `concepts/execution-substrate.mdx` — Layer 1: vLLM alignment, what the substrate exposes
-- [x] `concepts/control-plane.mdx` — Layer 2: KovaServe control plane responsibilities
-- [x] `concepts/runtime-wedge.mdx` — Layer 3: runtime wedge (CodeRuns)
+- [x] `concepts/layers/index.mdx` — Layer 1 / 2 / 3 boundaries
+- [x] `concepts/layers/execution-substrate.mdx` — Layer 1: vLLM alignment, what the substrate exposes
+- [x] `concepts/layers/control-plane.mdx` — Layer 2: KovaServe control plane responsibilities
+- [x] `concepts/layers/runtime-wedge.mdx` — Layer 3: runtime wedge (CodeRuns)
 
 ### Run hierarchy — Blueprint §7.2 entities, §7.4 FSMs
 
-- [x] `concepts/runs.mdx` — Run entity
-- [x] `concepts/sub-runs.mdx` — `parent_run_id`, `summary_artifact_id`, sub-run lineage
-- [x] `concepts/steps.mdx` — Step entity
-- [x] `concepts/step-types.mdx` — canonical Pass 7 set + `COMPACT`, `MEMORY_READ`, `MEMORY_WRITE`, `SUB_RUN_DISPATCH`, `SUB_RUN_JOIN`
-- [x] `concepts/model-calls.mdx` — ModelCall entity
-- [x] `concepts/run-state-machine.mdx` — 12-state Run FSM (CREATED → … → BRANCHING → COMPLETED/FAILED/CANCELED)
-- [x] `concepts/step-state-machine.mdx` — Step FSM
-- [x] `concepts/identity-and-ids.mdx` — ULIDs, Session ID shape, idempotency keys
+- [x] `concepts/run-hierarchy/runs.mdx` — Run entity
+- [x] `concepts/run-hierarchy/sub-runs.mdx` — `parent_run_id`, `summary_artifact_id`, sub-run lineage
+- [x] `concepts/run-hierarchy/steps.mdx` — Step entity
+- [x] `concepts/run-hierarchy/step-types.mdx` — canonical Pass 7 set + `COMPACT`, `MEMORY_READ`, `MEMORY_WRITE`, `SUB_RUN_DISPATCH`, `SUB_RUN_JOIN`
+- [x] `concepts/run-hierarchy/model-calls.mdx` — ModelCall entity
+- [x] `concepts/run-hierarchy/run-state-machine.mdx` — 12-state Run FSM (CREATED → … → BRANCHING → COMPLETED/FAILED/CANCELED)
+- [x] `concepts/run-hierarchy/step-state-machine.mdx` — Step FSM
+- [x] `concepts/run-hierarchy/identity-and-ids.mdx` — ULIDs, Session ID shape, idempotency keys
 
 ### Continuity — Blueprint §5.9, §7.2
 
-- [x] `concepts/sessions.mdx` — Session entity
-- [x] `concepts/session-state-machine.mdx` — `OPEN → IDLE → RESUMABLE → ARCHIVED | EXPIRED`
-- [x] `concepts/current-manifest.mdx` — `current_manifest_id` semantics
+- [x] `concepts/continuity/sessions.mdx` — Session entity
+- [x] `concepts/continuity/session-state-machine.mdx` — `OPEN → IDLE → RESUMABLE → ARCHIVED | EXPIRED`
+- [x] `concepts/continuity/current-manifest.mdx` — `current_manifest_id` semantics
 
 ### Checkpoints, recovery, branches — Blueprint §5.10, §6.10, §7.4
 
-- [x] `concepts/checkpoints.mdx` — Checkpoint entity
-- [x] `concepts/checkpoint-state-machine.mdx` — `REQUESTED → CAPTURING → STORED → VALIDATED → RESTORING → RESTORED`
-- [x] `concepts/state-handles.mdx` — StateHandle (`kv_prefix | context_manifest | checkpoint | artifact_bundle | memory_entry | runtime_state`)
-- [x] `concepts/resume-flow.mdx` — `RECOVERING → RESUMING → RUNNING` (logical-context-first)
-- [x] `concepts/retries.mdx` — runtime retry semantics
-- [x] `concepts/branches.mdx` — Branch concept (`BRANCHING` state)
-- [x] `concepts/branch-flow.mdx` — branching from a checkpoint into a child run
+- [x] `concepts/recovery/checkpoints.mdx` — Checkpoint entity
+- [x] `concepts/recovery/checkpoint-state-machine.mdx` — `REQUESTED → CAPTURING → STORED → VALIDATED → RESTORING → RESTORED`
+- [x] `concepts/recovery/state-handles.mdx` — StateHandle (`kv_prefix | context_manifest | checkpoint | artifact_bundle | memory_entry | runtime_state`)
+- [x] `concepts/recovery/resume-flow.mdx` — `RECOVERING → RESUMING → RUNNING` (logical-context-first)
+- [x] `concepts/recovery/retries.mdx` — runtime retry semantics
+- [x] `concepts/recovery/branches.mdx` — Branch concept (`BRANCHING` state)
+- [x] `concepts/recovery/branch-flow.mdx` — branching from a checkpoint into a child run
 
 ### Context engineering — Blueprint §5.17, §7.2, §8.1 context APIs
 
-- [x] `concepts/context-manifests.mdx` — ContextManifest (audit anchor)
-- [x] `concepts/context-segments.mdx` — ContextSegment, `context_type`, `parts` wire format
-- [x] `concepts/context-artifacts.mdx` — ContextArtifact (object-storage)
-- [x] `concepts/compaction-records.mdx` — CompactionRecord entity
-- [x] `concepts/compaction-lineage.mdx` — source/output relationships
-- [x] `concepts/segment-types.mdx` — canonical `context_type` values (ADR-003)
-- [x] `concepts/renderer-versions.mdx` — renderer + tokenizer fingerprinting
+- [x] `concepts/context/context-manifests.mdx` — ContextManifest (audit anchor)
+- [x] `concepts/context/context-segments.mdx` — ContextSegment, `context_type`, `parts` wire format
+- [x] `concepts/context/context-artifacts.mdx` — ContextArtifact (object-storage)
+- [x] `concepts/context/compaction-records.mdx` — CompactionRecord entity
+- [x] `concepts/context/compaction-lineage.mdx` — source/output relationships
+- [x] `concepts/context/segment-types.mdx` — canonical `context_type` values (ADR-003)
+- [x] `concepts/context/renderer-versions.mdx` — renderer + tokenizer fingerprinting
 
 ### Memory — Blueprint §7.2 MemoryScope/MemoryEntry, §8.3 memory events
 
-- [x] `concepts/memory.mdx` — overview of the memory model
-- [x] `concepts/memory-scopes.mdx` — `ephemeral | session | user | tenant | global`
-- [x] `concepts/memory-entries.mdx` — MemoryEntry row shape, namespacing
-- [x] `concepts/memory-store.mdx` — Memory Store Service surface
+- [x] `concepts/memory/index.mdx` — overview of the memory model
+- [x] `concepts/memory/memory-scopes.mdx` — `ephemeral | session | user | tenant | global`
+- [x] `concepts/memory/memory-entries.mdx` — MemoryEntry row shape, namespacing
+- [x] `concepts/memory/memory-store.mdx` — Memory Store Service surface
 
 ### Tools — Blueprint §7.2
 
-- [x] `concepts/tool-catalogs.mdx` — ToolCatalog (hashed, immutable, versioned)
-- [x] `concepts/tool-context-disposition.mdx` — `inline_full | inline_preview | summary_required | artifact_ref | drop | blocked`
-- [x] `concepts/tool-governance.mdx` — tool policy enforcement model
+- [x] `concepts/tools/tool-catalogs.mdx` — ToolCatalog (hashed, immutable, versioned)
+- [x] `concepts/tools/tool-context-disposition.mdx` — `inline_full | inline_preview | summary_required | artifact_ref | drop | blocked`
+- [x] `concepts/tools/tool-governance.mdx` — tool policy enforcement model
 
 ### Budgets & policy — Blueprint §5.12, §5.13, §7.2, §7.4
 
-- [x] `concepts/budgets.mdx` — Budget entity
-- [x] `concepts/budget-state-machine.mdx` — `ACTIVE → WARNING → DEGRADED_ALLOWED | HARD_STOP → CLOSED`
-- [x] `concepts/context-budgets.mdx` — ContextBudget entity, dimensions
-- [x] `concepts/context-budget-state-machine.mdx` — ACTIVE / WARN / OFFLOAD_REQUIRED / COMPACT_REQUIRED / DEGRADE / HARD_STOP
-- [x] `concepts/policy-scopes.mdx` — PolicyScope hierarchy + enrichment fields
-- [x] `concepts/admission.mdx` — admission decision flow
+- [x] `concepts/policy/budgets.mdx` — Budget entity
+- [x] `concepts/policy/budget-state-machine.mdx` — `ACTIVE → WARNING → DEGRADED_ALLOWED | HARD_STOP → CLOSED`
+- [x] `concepts/policy/context-budgets.mdx` — ContextBudget entity, dimensions
+- [x] `concepts/policy/context-budget-state-machine.mdx` — ACTIVE / WARN / OFFLOAD_REQUIRED / COMPACT_REQUIRED / DEGRADE / HARD_STOP
+- [x] `concepts/policy/policy-scopes.mdx` — PolicyScope hierarchy + enrichment fields
+- [x] `concepts/policy/admission.mdx` — admission decision flow
 
 ### Routing & cache — Blueprint §5.6–5.8
 
-- [x] `concepts/kv-cache.mdx` — KV cache fundamentals
-- [x] `concepts/manifest-aware-routing.mdx` — Cache-Aware Router behaviour
-- [x] `concepts/kv-index.mdx` — KV Index Service surface
-- [x] `concepts/placement-hints.mdx` — PlacementHint
-- [x] `concepts/cached-tokens.mdx` — `cached_tokens` accounting
+- [x] `concepts/routing/kv-cache.mdx` — KV cache fundamentals
+- [x] `concepts/routing/manifest-aware-routing.mdx` — Cache-Aware Router behaviour
+- [x] `concepts/routing/kv-index.mdx` — KV Index Service surface
+- [x] `concepts/routing/placement-hints.mdx` — PlacementHint
+- [x] `concepts/routing/cached-tokens.mdx` — `cached_tokens` accounting
 
 ### Cost — Blueprint §5.13; positioning §12 Cost Per Completed Run
 
-- [x] `concepts/cost-model.mdx` — gross / net / cache savings (ADR-019/020/021)
-- [x] `concepts/pricing-snapshots.mdx` — `*_price_snapshot` columns (ADR-022)
-- [x] `concepts/cost-per-completed-run.mdx` — the unit of value (positioning voice)
+- [x] `concepts/cost/cost-model.mdx` — gross / net / cache savings (ADR-019/020/021)
+- [x] `concepts/cost/pricing-snapshots.mdx` — `*_price_snapshot` columns (ADR-022)
+- [x] `concepts/cost/cost-per-completed-run.mdx` — the unit of value (positioning voice)
 
 ### Tenancy — Blueprint §5.14
 
-- [x] `concepts/tenancy.mdx` — overview of the hierarchy
-- [x] `concepts/organizations.mdx`
-- [x] `concepts/projects.mdx`
-- [x] `concepts/environments.mdx`
-- [x] `concepts/keys.mdx` — keys and key scopes
+- [x] `concepts/tenancy/index.mdx` — overview of the hierarchy
+- [x] `concepts/tenancy/organizations.mdx`
+- [x] `concepts/tenancy/projects.mdx`
+- [x] `concepts/tenancy/environments.mdx`
+- [x] `concepts/tenancy/keys.mdx` — keys and key scopes
 
 ### Events — Blueprint §8.3 (10 streams) + §8.4 envelope
 
 - [x] `concepts/events.mdx` — overview, envelope, taxonomy
-- [x] `concepts/event-envelope.mdx` — minimum envelope
+- [x] `concepts/events/event-envelope.mdx` — minimum envelope
 - [x] `concepts/events/execution.mdx`
 - [x] `concepts/events/state.mdx` — `kv_events` stream
 - [x] `concepts/events/routing.mdx`
@@ -141,29 +141,29 @@ Living roadmap for `docs.kovaserve.com`. Source of structure for `content/docs/`
 
 ### Product modes — Blueprint Part 9
 
-- [x] `concepts/byo-runtime.mdx` — BYO runtime mode (§9.2)
-- [x] `concepts/managed-runtime.mdx` — KovaServe runtime mode (§9.3)
-- [x] `concepts/managed-cloud.mdx` — managed cloud (§9.4)
-- [x] `concepts/private-deployment.mdx` — self-hosted / private / sovereign (§9.5)
+- [x] `concepts/deployment/byo-runtime.mdx` — BYO runtime mode (§9.2)
+- [x] `concepts/deployment/managed-runtime.mdx` — KovaServe runtime mode (§9.3)
+- [x] `concepts/deployment/managed-cloud.mdx` — managed cloud (§9.4)
+- [x] `concepts/deployment/private-deployment.mdx` — self-hosted / private / sovereign (§9.5)
 
 ### Runtime / Layer 3 — Blueprint Part 6
 
-- [x] `concepts/runtime-architecture.mdx`
-- [x] `concepts/runtime-execution-semantics.mdx`
-- [x] `concepts/workers.mdx`
-- [x] `concepts/sandboxes.mdx`
-- [x] `concepts/tool-invocations.mdx`
-- [x] `concepts/workspaces.mdx`
-- [x] `concepts/workspace-artifacts.mdx`
-- [x] `concepts/runtime-local-state.mdx`
-- [x] `concepts/runtime-observability.mdx`
+- [x] `concepts/runtime/runtime-architecture.mdx`
+- [x] `concepts/runtime/runtime-execution-semantics.mdx`
+- [x] `concepts/runtime/workers.mdx`
+- [x] `concepts/runtime/sandboxes.mdx`
+- [x] `concepts/runtime/tool-invocations.mdx`
+- [x] `concepts/runtime/workspaces.mdx`
+- [x] `concepts/runtime/workspace-artifacts.mdx`
+- [x] `concepts/runtime/runtime-local-state.mdx`
+- [x] `concepts/runtime/runtime-observability.mdx`
 
 ### Managed-agent SKUs — positioning §11 (positioning voice)
 
-- [x] `concepts/managed-agents.mdx` — SKU model overview
-- [x] `concepts/coderuns.mdx`
-- [x] `concepts/opsruns.mdx`
-- [x] `concepts/docruns.mdx`
+- [x] `concepts/managed-agents/index.mdx` — SKU model overview
+- [x] `concepts/managed-agents/coderuns.mdx`
+- [x] `concepts/managed-agents/opsruns.mdx`
+- [x] `concepts/managed-agents/docruns.mdx`
 
 ## 4. Guides
 
@@ -487,35 +487,35 @@ Tracked for context — outside the product surface.
 
 | Entity | Page |
 |---|---|
-| Run | `concepts/runs.mdx` |
-| Session | `concepts/sessions.mdx` |
-| Step | `concepts/steps.mdx` (+ `concepts/step-types.mdx`) |
-| ModelCall | `concepts/model-calls.mdx` |
-| ContextManifest | `concepts/context-manifests.mdx` |
-| ContextSegment | `concepts/context-segments.mdx` |
-| ContextArtifact | `concepts/context-artifacts.mdx` |
-| CompactionRecord | `concepts/compaction-records.mdx` |
-| Checkpoint | `concepts/checkpoints.mdx` |
-| MemoryScope | `concepts/memory-scopes.mdx` |
-| MemoryEntry | `concepts/memory-entries.mdx` |
-| ToolCatalog | `concepts/tool-catalogs.mdx` |
-| ToolContextDisposition | `concepts/tool-context-disposition.mdx` |
-| PolicyScope | `concepts/policy-scopes.mdx` |
-| Budget | `concepts/budgets.mdx` |
-| ContextBudget | `concepts/context-budgets.mdx` |
-| PlacementHint | `concepts/placement-hints.mdx` |
-| StateHandle | `concepts/state-handles.mdx` |
+| Run | `concepts/run-hierarchy/runs.mdx` |
+| Session | `concepts/continuity/sessions.mdx` |
+| Step | `concepts/run-hierarchy/steps.mdx` (+ `concepts/run-hierarchy/step-types.mdx`) |
+| ModelCall | `concepts/run-hierarchy/model-calls.mdx` |
+| ContextManifest | `concepts/context/context-manifests.mdx` |
+| ContextSegment | `concepts/context/context-segments.mdx` |
+| ContextArtifact | `concepts/context/context-artifacts.mdx` |
+| CompactionRecord | `concepts/context/compaction-records.mdx` |
+| Checkpoint | `concepts/recovery/checkpoints.mdx` |
+| MemoryScope | `concepts/memory/memory-scopes.mdx` |
+| MemoryEntry | `concepts/memory/memory-entries.mdx` |
+| ToolCatalog | `concepts/tools/tool-catalogs.mdx` |
+| ToolContextDisposition | `concepts/tools/tool-context-disposition.mdx` |
+| PolicyScope | `concepts/policy/policy-scopes.mdx` |
+| Budget | `concepts/policy/budgets.mdx` |
+| ContextBudget | `concepts/policy/context-budgets.mdx` |
+| PlacementHint | `concepts/routing/placement-hints.mdx` |
+| StateHandle | `concepts/recovery/state-handles.mdx` |
 
 ### Blueprint §7.4 state machines → concept page
 
 | FSM | Page |
 |---|---|
-| Run | `concepts/run-state-machine.mdx` |
-| Step | `concepts/step-state-machine.mdx` |
-| Checkpoint | `concepts/checkpoint-state-machine.mdx` |
-| Budget | `concepts/budget-state-machine.mdx` |
-| ContextBudget | `concepts/context-budget-state-machine.mdx` |
-| Session | `concepts/session-state-machine.mdx` |
+| Run | `concepts/run-hierarchy/run-state-machine.mdx` |
+| Step | `concepts/run-hierarchy/step-state-machine.mdx` |
+| Checkpoint | `concepts/recovery/checkpoint-state-machine.mdx` |
+| Budget | `concepts/policy/budget-state-machine.mdx` |
+| ContextBudget | `concepts/policy/context-budget-state-machine.mdx` |
+| Session | `concepts/continuity/session-state-machine.mdx` |
 
 ### Blueprint §8.3 event streams → concept + API pages
 
@@ -536,18 +536,18 @@ Tracked for context — outside the product surface.
 
 | Mode | Page |
 |---|---|
-| BYO runtime | `concepts/byo-runtime.mdx` |
-| KovaServe runtime (managed) | `concepts/managed-runtime.mdx` |
-| Managed cloud | `concepts/managed-cloud.mdx` |
-| Self-hosted / private / sovereign | `concepts/private-deployment.mdx` |
+| BYO runtime | `concepts/deployment/byo-runtime.mdx` |
+| KovaServe runtime (managed) | `concepts/deployment/managed-runtime.mdx` |
+| Managed cloud | `concepts/deployment/managed-cloud.mdx` |
+| Self-hosted / private / sovereign | `concepts/deployment/private-deployment.mdx` |
 
 ### Positioning §11 SKUs → concept + cookbook
 
 | SKU | Concept | Cookbook |
 |---|---|---|
-| CodeRuns | `concepts/coderuns.mdx` | `cookbook/coding-agent.mdx` |
-| OpsRuns | `concepts/opsruns.mdx` | `cookbook/ops-automation.mdx` |
-| DocRuns | `concepts/docruns.mdx` | `cookbook/document-review.mdx` |
+| CodeRuns | `concepts/managed-agents/coderuns.mdx` | `cookbook/coding-agent.mdx` |
+| OpsRuns | `concepts/managed-agents/opsruns.mdx` | `cookbook/ops-automation.mdx` |
+| DocRuns | `concepts/managed-agents/docruns.mdx` | `cookbook/document-review.mdx` |
 
 ---
 

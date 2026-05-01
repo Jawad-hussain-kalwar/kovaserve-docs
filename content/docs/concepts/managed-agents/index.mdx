@@ -1,0 +1,127 @@
+---
+title: Managed agents
+description: The KovaServe SKU model — how neoclouds, sovereign AI platforms, and enterprises package agentic work into repeatable managed-agent products with cost per completed run, governance, recovery, and private-deployment options built in.
+---
+
+A **managed agent** is a productized, durable, governed agent execution that completes a defined kind of task on the Agentic Execution Cloud. It is the unit a customer of a neocloud, a sovereign AI platform, or an enterprise actually buys — not a model endpoint, not a token bucket, not a fleet of GPUs. The unit of value is a **completed agent run**.
+
+KovaServe ships managed agents as **SKUs** — repeatable product offerings that wrap the Agentic Execution Cloud's capabilities into a workload-specific package. A neocloud uses the SKU model to launch differentiated agent products on top of its existing GPU infrastructure; an enterprise uses it to roll out governed agents across business units; an AI-native builder uses it as the foundation that means they don't rebuild the execution stack for every product.
+
+```
+                    ┌──────────────────────┐
+                    │    Managed-agent     │
+                    │       SKUs           │
+                    │                      │
+                    │  ┌────────────────┐  │
+                    │  │   CodeRuns     │  │  software engineering work
+                    │  └────────────────┘  │
+                    │                      │
+                    │  ┌────────────────┐  │
+                    │  │   OpsRuns      │  │  IT, cloud, security operations
+                    │  └────────────────┘  │
+                    │                      │
+                    │  ┌────────────────┐  │
+                    │  │   DocRuns      │  │  document-heavy enterprise workflows
+                    │  └────────────────┘  │
+                    └──────────┬───────────┘
+                               │
+                               ▼
+              ┌────────────────────────────────────┐
+              │     Agentic Execution Cloud        │
+              │                                    │
+              │  durable runs · checkpoint         │
+              │  recovery · context and state      │
+              │  control · tool governance ·       │
+              │  budget enforcement · cost per     │
+              │  completed run · private and       │
+              │  sovereign deployment              │
+              └────────────────────────────────────┘
+```
+
+## What every managed agent ships with
+
+Every managed-agent SKU — KovaServe's first-party SKUs and the ones a partner builds on top — delivers the same execution guarantees, drawn from the Agentic Execution Cloud's core capabilities:
+
+| Capability | What it means for a managed agent |
+|---|---|
+| Durable runs | The agent runs as a durable execution that survives interruptions, failures, and pauses. A failed task does not start from zero. |
+| Context and state control | The agent's working context is bounded, compacted, offloaded, and restored under explicit policy — a long-running task does not pay prefill cost over and over, and it does not lose its place when context fills. |
+| Checkpoint recovery | Important execution points are saved before risky actions and on schedule. A failed run resumes from the last checkpoint, paying for the new work, not for everything before. |
+| Tool governance | Agents are allowed, restricted, blocked, or forced through policy checks before taking actions. Sensitive tools require explicit policy. |
+| Budget enforcement | Runs are constrained by cost, runtime, steps, token usage, tool calls, or policy-defined limits. Out-of-bounds runs are warned, degraded, or hard-stopped before they overrun. |
+| Execution audit | Every model call, tool call, policy decision, checkpoint, cost, failure, resume, and output is recorded. The history is queryable and exportable. |
+| Cost per completed run | The economic unit is what it costs to finish useful work — not what a token costs in isolation. Aggregable per agent, per SKU, per deployment, per organization. |
+| Private infrastructure support | Every managed agent runs on managed cloud, on partner infrastructure, on private deployments, on sovereign clouds, or air-gapped. Same SKU, different topology. |
+
+A SKU is the bundle of *what kind of task* the agent does plus *which tools, sandboxes, defaults, and guardrails are appropriate* for that task. The Agentic Execution Cloud is what makes the bundle a product instead of a demo.
+
+## The first-party SKU set
+
+KovaServe ships three reference SKUs, picked because each represents a distinct shape of agentic work and proves a different set of platform capabilities. None of them is the company — they are the proof workloads.
+
+| SKU | Workload shape | Use cases |
+|---|---|---|
+| [CodeRuns](/docs/concepts/managed-agents/coderuns) | Software engineering work — repository-bound, sandbox-heavy, tool-heavy, file-mutating, long-running. | Bug fixing, test repair, repo analysis, migration assistance, CI failure investigation. |
+| [OpsRuns](/docs/concepts/managed-agents/opsruns) | IT, cloud, and security operations — incident-bound, log-heavy, runbook-driven, policy-tight. | Incident investigation, log analysis, runbook execution, infrastructure diagnostics, policy-controlled remediation. |
+| [DocRuns](/docs/concepts/managed-agents/docruns) | Document-heavy enterprise workflows — text-bound, retrieval-heavy, citation-driven, audit-grade. | Contract review, compliance checks, redline assistance, clause extraction, document reconciliation. |
+
+These SKUs are documented as full concepts. A neocloud or partner can offer them under the partner's brand; an enterprise can deploy them internally with their own tools and policies; an AI-native builder can adopt one as the foundation for a product. The SKU model is meant to be repeated — what matters is the *contract* (durable runs, governance, budget, recovery, cost per completed run on private infrastructure), not the brand on it.
+
+## How a SKU is configured
+
+A SKU is the combination of:
+
+| Layer | Configured by |
+|---|---|
+| Agent definition | The model, the system prompt, the planner discipline, the tool list. |
+| Tool catalog | The set of tools the agent may call, hashed into a versioned bundle. |
+| Sandbox profile | Container image, mounted workspace shape, file and network policy, resource limits, persistence behavior. |
+| Default budget | Cost, time, steps, and tool-call limits appropriate for the workload. |
+| Default context budget | Active context, stable context, volatile context, and tool-result limits. |
+| Default policy scope | Tool policy, data boundary, context share scope, audit retention. |
+| Checkpoint trigger rules | When to checkpoint — before risky file mutations, before unsafe shell actions, after stable analysis phases, on budget warning, on schedule. |
+| Observability surfaces | The runtime-native timeline, branch lineage, and audit export the SKU presents to its operator. |
+
+A SKU operator changes the agent definition (the prompt, the tool list) and the policies (budget, governance, residency); the platform-side guarantees stay constant. This is the property that turns a one-off agent into a managed product.
+
+## How customers consume managed agents
+
+A managed agent is reachable through whatever surface its operator chooses to expose:
+
+- A neocloud's customer-facing console, where end customers click "investigate this incident" and get a managed run.
+- An enterprise platform team's internal portal, where business units submit tasks against pre-approved agents.
+- An AI-native SaaS product's API, where the customer's user submits a task and the product translates it into a managed run.
+
+Underneath, the consumer surface posts a task into the agent's `POST /v1/ks/runtime/runs` endpoint or its OpenAI-compatible inference endpoint with the [`kovaserve` envelope](/docs/api/inference/extension-envelope) and waits for the `COMPLETED` outcome. The completed run carries its full execution history, its cost per completed run, and its outputs.
+
+## Cost per completed run is the metric
+
+The headline metric for every managed-agent SKU is [cost per completed run](/docs/concepts/cost/cost-per-completed-run) — what it cost to bridge the task to the result. Every model call, every tool action, every workspace artifact rolls up into the run cost, with cache savings and offload savings credited and pricing snapshots frozen on the row. The same metric exposes:
+
+- per-run, for the consumer
+- per-SKU, for the operator (what does a typical CodeRun cost to complete?)
+- per-deployment, for the buyer (what do my managed agents cost this month?)
+
+This is the metric that makes managed agents a *product*: priced and governed in the same shape across every customer, every workload, every deployment.
+
+## What a managed agent is not
+
+- **Not an inference endpoint.** A token-priced API call is not a managed agent. Managed agents complete tasks; tasks span many calls and many tools.
+- **Not a fixed workflow.** Managed agents reason inside a controlled execution boundary; they are not statically defined DAGs.
+- **Not a bespoke implementation.** A SKU is a *repeatable product* — the same SKU runs across customers with their own data, their own policies, and their own deployment.
+- **Not a coding-agent product.** [CodeRuns](/docs/concepts/managed-agents/coderuns) is the first reference workload. The SKU model — and the company — is broader.
+- **Not a SaaS lock-in.** Managed agents run on managed cloud, on partner clouds, on private deployments, and on sovereign clouds. Same SKU, different topology.
+
+## Building your own SKU
+
+A neocloud, partner, or enterprise team builds a SKU by configuring the layers above on top of the Agentic Execution Cloud. The SKU inherits durable runs, checkpoint recovery, governance, budget enforcement, and cost per completed run automatically — what the SKU adds is the workload-specific opinion: the tool catalog, the sandbox profile, the prompt discipline, the policy defaults, the consumer-facing surface.
+
+The reference for this path is the SKU pages — they show how each first-party SKU is configured, what tools and policies they ship with, and how they expose their results.
+
+## See also
+
+- [CodeRuns](/docs/concepts/managed-agents/coderuns) · [OpsRuns](/docs/concepts/managed-agents/opsruns) · [DocRuns](/docs/concepts/managed-agents/docruns) — the reference managed-agent SKUs
+- [Cost per completed run](/docs/concepts/cost/cost-per-completed-run) — the unit of value a managed agent ships against
+- [KovaServe runtime mode](/docs/concepts/deployment/managed-runtime) — the runtime SKUs are built on
+- [Managed cloud](/docs/concepts/deployment/managed-cloud) · [Private deployment](/docs/concepts/deployment/private-deployment) — where SKUs run
+- [Tenancy](/docs/concepts/tenancy) — the hierarchy SKU operators provision against

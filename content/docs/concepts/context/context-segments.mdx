@@ -1,0 +1,131 @@
+---
+title: Context segments
+description: The ContextSegment entity — typed fragments of context with context_type, memory_scope, digest, token counts, optional artifact_ref, and the `parts` wire format.
+---
+
+A **ContextSegment** is a typed fragment of context inside a [ContextManifest](/docs/concepts/context/context-manifests). Each segment carries a `context_type` (its canonical position per ADR-003), a [`memory_scope`](/docs/concepts/memory/memory-scopes) classification, a content digest, token and byte counts, an optional `artifact_ref_id` for offloaded payloads, a `checkpoint_relevant` flag, and retention metadata.
+
+Segments are the granularity at which the context-engineering subsystem reasons about identity, accounting, retention, offload, and compaction. A manifest is an ordered list of segments; routing identities are computed from segment digests; budgets are accounted by per-segment token counts; checkpoints freeze segment references; offload moves a segment's payload to object storage while its row in the manifest remains.
+
+## Wire format — `parts`
+
+ContextSegments serialize as `parts` on the wire. The name follows the cross-vendor convergence: Anthropic content blocks, Gemini parts, and the Vercel AI SDK all use `parts` for the same role.
+
+```json
+{
+  "parts": [
+    {
+      "type": "text",
+      "context_type": "system_prompt",
+      "memory_scope": "tenant",
+      "text": "You are a senior engineer..."
+    },
+    {
+      "type": "text",
+      "context_type": "history",
+      "memory_scope": "session",
+      "text": "..."
+    },
+    {
+      "type": "tool_result",
+      "context_type": "tool_output",
+      "memory_scope": "session",
+      "artifact_ref_id": "01J8X9Y2Z3K4M5N6P7Q8R9AR03",
+      "preview": "First 512 chars of the tool result..."
+    },
+    {
+      "type": "text",
+      "context_type": "active",
+      "memory_scope": "ephemeral",
+      "text": "The current user message."
+    }
+  ]
+}
+```
+
+`type` is the wire-shape tag (text, tool_use, tool_result, image, etc.). `context_type` is the canonical position. The two are independent — the same `text` part can carry different `context_type`s depending on where it lands in the manifest.
+
+## Fields
+
+| Field | Type | Purpose |
+|---|---|---|
+| `id` | ULID | Stable segment identity within a manifest. |
+| `context_type` | enum | Canonical position. See [segment types](/docs/concepts/context/segment-types). |
+| `memory_scope` | enum | `ephemeral` / `session` / `user` / `tenant` / `global`. Drives retention and reuse boundaries. |
+| `digest` | hash | Content hash. Identical content produces identical digest across calls. |
+| `token_count` | int | Real token count under the manifest's `tokenizer_fingerprint`, never an estimate. |
+| `byte_count` | int | Raw byte size of the segment payload (inline + artifact). |
+| `artifact_ref_id` | ULID? | When set, the segment's payload lives in a [ContextArtifact](/docs/concepts/context/context-artifacts); the segment row stores only a preview. |
+| `checkpoint_relevant` | bool | Whether the segment must be preserved into a Checkpoint snapshot. |
+| `retention` | enum | Per-segment retention policy: `with_call`, `with_session`, `with_compaction_lineage`, `with_tenant`. |
+| `compaction_record_id` | ULID? | When the segment was produced by compaction, refs the [CompactionRecord](/docs/concepts/context/compaction-records) that produced it. |
+| `position` | int | Ordinal within the manifest (canonical ADR-003 order). |
+
+Segment IDs are bare 26-character ULIDs.
+
+## Inline vs offloaded
+
+A segment's payload lives in one of two places:
+
+- **Inline.** The text or structured payload is stored on the segment row itself. Used for small segments — system prompts, history turns, the active user message.
+- **Offloaded.** The payload is in a [ContextArtifact](/docs/concepts/context/context-artifacts) in object storage; the segment row stores a short preview (typically the first 512 characters) and `artifact_ref_id`. Used for large tool outputs, file diffs, retrieved documents, workspace snapshots.
+
+The choice is made by the [ContextBudget admission](/docs/concepts/policy/admission) service. A segment marked `OFFLOAD_REQUIRED` during admission is rewritten to its offloaded form; the manifest re-admitted after offload references the artifact rather than the inline body.
+
+The wire serialization is symmetric: an offloaded part includes both `artifact_ref_id` and a `preview` field; consumers that want the full payload resolve the artifact, consumers that only need rough shape inspect the preview.
+
+## Digest and identity
+
+Every segment's digest is a content hash over its payload (inline body or artifact bytes) and its `context_type`. Two segments with identical content and identical type produce identical digests, which is what makes manifest-tier reuse work — the [stable_context_id](/docs/concepts/context/context-manifests) is built by cascading segment digests in canonical order.
+
+When a segment is offloaded, its digest is preserved across the offload — it is computed over the original payload, not over the preview. This is essential: offloading must not invalidate the manifest's identity.
+
+## Retention
+
+`retention` governs how long the segment row survives.
+
+| Value | Survives until |
+|---|---|
+| `with_call` | The ModelCall is closed. The default for one-shot segments. |
+| `with_session` | The owning [Session](/docs/concepts/continuity/sessions) reaches `ARCHIVED` or `EXPIRED`. |
+| `with_compaction_lineage` | Every [CompactionRecord](/docs/concepts/context/compaction-records) that references this segment as a source has been pruned. |
+| `with_tenant` | Tenant retention policy decides — typically until tenant-level retention expires. |
+
+The retention rule is the segment's own; it is not derived from `memory_scope`. A `session`-scoped segment may be `with_call` retention (e.g. a one-shot in-session injection) or `with_session` retention (e.g. a turn that should remain queryable for the Session's lifetime).
+
+## Checkpoint relevance
+
+`checkpoint_relevant: true` marks a segment as **required** in any Checkpoint snapshot taken on the manifest. Most segments are checkpoint-relevant by default; the exceptions are short-lived ephemeral segments (volatile system messages, transient debug parts) that the runtime explicitly opts out of capture for.
+
+The Checkpoint Manager refuses to capture a Checkpoint if any `checkpoint_relevant` segment is unreachable — for example if its artifact has been deleted past retention. This makes resume's logical-context-first guarantee real: every segment the resumed Run will need is guaranteed durable at capture time.
+
+## How segments are created
+
+GCM v2 produces ContextSegments at manifest assembly time. Inputs include:
+
+- The runtime's `messages` and `tool_results` blocks on `POST /v1/chat/completions`.
+- [Session](/docs/concepts/continuity/sessions) turn history fetched by the Canonical Execution Service.
+- [Memory Store](/docs/concepts/memory/memory-store) entries selected by `memory_class_hints`.
+- [ContextArtifact](/docs/concepts/context/context-artifacts) previews referenced via `artifact_refs` on the request.
+- [ToolCatalog](/docs/concepts/tools/tool-catalogs) tool definitions, when a `tool_catalog_id` is bound.
+
+GCM normalizes each input into a typed segment, assigns a digest, computes a real token count under the deployment's tokenizer, and orders the segment list canonically. The set of segments and their order is then frozen as the manifest.
+
+Segments are **not authored by runtimes**. Runtimes supply content; GCM owns shape.
+
+## What segments are not
+
+- **Not opaque text.** Every segment is typed. `context_type` and `memory_scope` are required fields, not advisory metadata.
+- **Not mutable.** Once written into a manifest, a segment row is immutable. A re-admitted manifest produces fresh segment rows with their own IDs; the prior segments remain addressable.
+- **Not the only place context lives.** Long-term cross-Session content lives in the [Memory Store](/docs/concepts/memory/memory-store) as MemoryEntries. Segments are the per-call materialization; MemoryEntries are the durable backing.
+- **Not synonymous with `parts`.** `parts` is the wire serialization. ContextSegment is the durable record. The two map cleanly but are not the same artifact.
+
+## See also
+
+- [Context manifests](/docs/concepts/context/context-manifests) — the parent entity that orders segments
+- [Segment types](/docs/concepts/context/segment-types) — the canonical `context_type` enum (ADR-003)
+- [Context artifacts](/docs/concepts/context/context-artifacts) — the offload backing for large segment payloads
+- [Memory scopes](/docs/concepts/memory/memory-scopes) — the scope classification carried on every segment
+- [Compaction records](/docs/concepts/context/compaction-records) — the lineage object for compacted segments
+- [Admission](/docs/concepts/policy/admission) — the service that decides offload vs inline
+- [`GET /v1/ks/context/segments/{id}`](/docs/api/context/segments/get)

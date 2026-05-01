@@ -1,0 +1,141 @@
+---
+title: Budget state machine
+description: The Budget FSM — `ACTIVE → WARNING → DEGRADED_ALLOWED | HARD_STOP → CLOSED` — and how each transition is driven by consumption thresholds, admission decisions, and Run termination.
+---
+
+The **Budget state machine** is the lifecycle every [Budget](/docs/concepts/policy/budgets) travels from creation to closure. It has five states and three drivers: consumption against limits, admission decisions on each Step, and Run termination.
+
+The FSM is enforced by the **Metering / Cost / Budget Layer**. Illegal transitions are rejected at the service layer; `CLOSED` is terminal and frozen.
+
+## The graph
+
+```
+ACTIVE ──▶ WARNING ──┬──▶ DEGRADED_ALLOWED ──▶ HARD_STOP ──▶ CLOSED
+   │           │     │                              ▲
+   │           │     └──────────────────────────────┤
+   │           │                                    │
+   │           └────────────────────────────────────┤
+   │                                                │
+   └──▶ HARD_STOP ──────────────────────────────────┘
+
+ACTIVE / WARNING / DEGRADED_ALLOWED ──▶ CLOSED      (Run terminal)
+```
+
+`CLOSED` is the only durable terminal. `HARD_STOP` is a terminal *gate* — once entered, the only legal next transition is `CLOSED`. Recovery from `HARD_STOP` to a live state is not permitted; a Run that exhausts its Budget cannot be revived.
+
+## States
+
+### `ACTIVE`
+
+Consumption below the warning threshold. Every Step admission returns `ALLOW`. `ACTIVE` is the default state on Run creation and the state most reads encounter.
+
+`ACTIVE` carries no implicit timeout — a Run can sit in `ACTIVE` indefinitely (within the Run's wall-clock budget). The state machine does not advance simply because time passes; it advances because consumption advances.
+
+**Transitions out:** `WARNING`, `HARD_STOP` (rare — a single oversize Step can blow the limit directly), `CLOSED` (Run terminates cleanly while well under budget).
+
+### `WARNING`
+
+Consumption is at or above the warning threshold (`warning_threshold_pct`, default `80`) on at least one dimension but no dimension is over its hard limit. Step admissions still return `ALLOW`; the runtime sees no behavior change.
+
+`WARNING` exists so dashboards, runtime callbacks, and operator alerts have a structured signal that a Run is approaching its limit. It emits `ks.budget.warning` events on entry. The state is reversible — if forecast updates lower projected consumption, the Budget can drop back to `ACTIVE` (e.g. after a successful compaction reduces the cost trajectory).
+
+**Transitions out:** `ACTIVE` (consumption recedes — typically after a manifest re-admission reduces token use), `DEGRADED_ALLOWED`, `HARD_STOP`, `CLOSED`.
+
+### `DEGRADED_ALLOWED`
+
+Consumption has crossed a soft limit on a non-strict dimension; the runtime is permitted to continue under reduced parameters (smaller `max_tokens`, dropped optional segments, narrower context). The Budget itself is not closed — Steps continue admitting under degraded shape, and the [admission service](/docs/concepts/policy/admission) returns `DEGRADE` decisions for the [ContextBudget](/docs/concepts/policy/context-budgets) until the run completes or hits `HARD_STOP`.
+
+`DEGRADED_ALLOWED` is opt-in via `degraded_mode_policy` on the [PolicyScope](/docs/concepts/policy/policy-scopes). A scope configured `reject` skips this state — `WARNING` advances directly to `HARD_STOP`. A scope configured `allow` accepts degraded execution silently; a scope configured `warn` emits additional events on every degraded admission.
+
+`DEGRADED_ALLOWED` is non-recoverable upward — once entered, the Budget does not return to `WARNING` or `ACTIVE`. The only forward transitions are `HARD_STOP` (eventual exhaustion) or `CLOSED` (Run completes successfully under degraded shape).
+
+**Transitions out:** `HARD_STOP`, `CLOSED`.
+
+### `HARD_STOP`
+
+Consumption has hit a strict limit on at least one dimension. Subsequent Step admissions return `ALLOW: false` with `error.code = "budget_exceeded"`. In-flight ModelCalls are not cancelled; only new Step admissions are rejected.
+
+`HARD_STOP` is enforced uniformly — retries do not exempt a Run from the gate. A Run that exhausts its `step_count` budget on retries cannot continue retrying.
+
+The Run typically transitions to `FAILED` shortly after the Budget enters `HARD_STOP`, but the two FSMs are independent. A Run that lands in `HARD_STOP` may still be `CANCELED` (operator action) or `COMPLETED` (the in-flight Step was the last one, finishing cleanly before the gate took effect).
+
+**Transitions out:** `CLOSED` only.
+
+### `CLOSED` (terminal)
+
+The Run has terminated. The Budget row is frozen for audit; consumption counters reflect the final state. `CLOSED` is reached from any non-`CLOSED` state when the Run hits `COMPLETED`, `FAILED`, or `CANCELED` on the [Run state machine](/docs/concepts/run-hierarchy/run-state-machine).
+
+After `CLOSED`:
+
+- All counters are immutable.
+- Admission against the Run is rejected even for late-arriving requests (the Run no longer accepts Steps regardless).
+- The row remains queryable indefinitely subject to tenant retention.
+
+## Drivers
+
+### Consumption updates
+
+Every Step admission updates consumed counters on every Budget dimension. The update is atomic with the Step row write; reads of the Budget always reflect counters consistent with the most recent admitted Step.
+
+| Update outcome | Possible state transition |
+|---|---|
+| Counters cross `warning_threshold_pct` on any dimension | `ACTIVE → WARNING` |
+| Counters cross any hard limit | `* → HARD_STOP` (skipping intermediate states if necessary) |
+| Counters recede below `warning_threshold_pct` (forecast revision) | `WARNING → ACTIVE` |
+| Counters cross a soft-limit on a degrade-eligible dimension | `WARNING → DEGRADED_ALLOWED` (when policy permits) |
+
+### Admission decisions
+
+The Budget pre-check is the second admission gate, evaluated against the *admitted* manifest's token counts and cost estimate (after [ContextBudget](/docs/concepts/policy/context-budgets) admission has completed). A decision of:
+
+| Decision | Effect on Budget state |
+|---|---|
+| `ALLOW` | Counters advance; state may transition by threshold. |
+| `WARN` | Counters advance; ensures `WARNING` if not already. |
+| `DEGRADED_ALLOWED` | Counters advance under reduced shape; transitions to `DEGRADED_ALLOWED` on first occurrence. |
+| `HARD_STOP` | Step rejected; transitions to `HARD_STOP`. |
+
+### Run termination
+
+When the [Run state machine](/docs/concepts/run-hierarchy/run-state-machine) reaches `COMPLETED`, `FAILED`, or `CANCELED`, the Budget transitions to `CLOSED` atomically with the Run state write. There is no observable window where the Run is terminal and the Budget is still live.
+
+## Forecast updates
+
+The Metering Layer maintains a forecast of remaining consumption for each dimension. Forecasts are recomputed after each Step admission and emitted as `ks.budget.forecast_updated` events. Forecasts can drive `WARNING` early — a Run whose projected `cost_cents_consumed` will exceed the limit before completion enters `WARNING` even when current counters are still below the threshold.
+
+Forecasts never cause `HARD_STOP` directly; only realized consumption does. This is intentional — the gate enforces actual spend, not projected spend.
+
+## Validated transitions
+
+The Metering Layer rejects any transition not listed below.
+
+| From → To | Allowed |
+|---|---|
+| `ACTIVE → WARNING` | yes (threshold crossed) |
+| `WARNING → ACTIVE` | yes (forecast or counter recession) |
+| `ACTIVE → DEGRADED_ALLOWED` | yes (soft-limit on a degrade dimension, policy permits) |
+| `WARNING → DEGRADED_ALLOWED` | yes |
+| `DEGRADED_ALLOWED → ACTIVE` / `WARNING` | rejected |
+| any of `ACTIVE` / `WARNING` / `DEGRADED_ALLOWED` → `HARD_STOP` | yes (hard limit reached) |
+| `HARD_STOP → CLOSED` | yes (Run terminal) |
+| `HARD_STOP → ACTIVE` / `WARNING` / `DEGRADED_ALLOWED` | rejected |
+| any non-`CLOSED` → `CLOSED` | yes (Run terminal) |
+| anything from `CLOSED` | rejected |
+
+## Events
+
+| Event | Emitted on |
+|---|---|
+| `ks.budget.warning` | `WARNING` entered. |
+| `ks.budget.forecast_updated` | Forecast recompute (every Step admission). |
+| `ks.budget.hard_stop` | `HARD_STOP` entered. |
+
+`CLOSED` does not emit a dedicated event; the Run's terminal event (`ks.run.completed` / `ks.run.failed` / etc.) is the close signal.
+
+## See also
+
+- [Budgets](/docs/concepts/policy/budgets) — the entity this FSM governs
+- [Context budget state machine](/docs/concepts/policy/context-budget-state-machine) — the per-call admission FSM
+- [Admission](/docs/concepts/policy/admission) — the evaluator that drives transitions
+- [Run state machine](/docs/concepts/run-hierarchy/run-state-machine) — the FSM that closes the Budget on terminal
+- [Cost model](/docs/concepts/cost/cost-model) — gross / net / cache savings accounting

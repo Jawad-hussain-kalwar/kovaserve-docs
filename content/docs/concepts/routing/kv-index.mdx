@@ -1,0 +1,137 @@
+---
+title: KV index
+description: The KV Index Service — the near-real-time authoritative lookup of reusable substrate state, mapping stable identities to nodes, tiers, and freshness.
+---
+
+The **KV Index Service** is the near-real-time authoritative lookup of reusable substrate state. It maps the stable identities computed by GCM v2 — `stable_prefix_id` and `stable_context_id` — to the nodes and storage tiers that hold the corresponding KV cache or [StateHandle](/docs/concepts/recovery/state-handles), and to freshness, completeness, and compatibility metadata.
+
+The index is consumed by [manifest-aware routing](/docs/concepts/routing/manifest-aware-routing) to score candidate placements, and by the [resume flow](/docs/concepts/recovery/resume-flow) to plan KV restore. It is fed by the **KV Event System** — every entry is the projection of a real substrate event, never a synthetic approximation.
+
+## What the index stores
+
+For each known stable identity, the index records every replica-tier-residency tuple that holds it:
+
+```
+Index entry
+├── stable_id              (stable_prefix_id or stable_context_id)
+├── locations[]
+│   ├── node_id
+│   ├── replica_id
+│   ├── tier              (HBM | RAM | NVMe | object)
+│   ├── warmness          (hot | warm | cool | cold | partial)
+│   ├── completeness      (exact | partial)
+│   ├── compatibility     (exact | tokenizer_mismatch | renderer_mismatch)
+│   ├── freshness_seconds
+│   └── last_event_id     (the kv event that placed this row)
+└── scope                 (tenant_id, project_id, context_share_scope)
+```
+
+A single stable identity can have many locations — the same prefix may be resident in HBM on one node, swapped to NVMe on another, and exported to MinIO as part of a Checkpoint. The router scores each location independently against the request's needs.
+
+## Event-driven projection
+
+The index is **strictly event-driven**. Every entry mutation is the projection of a `kv.state.*` event from the KV Event System:
+
+| Event | Effect on the index |
+|---|---|
+| `kv.state.stored` | Add a location; warmness derived from tier. |
+| `kv.state.accessed` | Update `freshness_seconds`. |
+| `kv.state.partial_match` | Mark `completeness = partial`. |
+| `kv.state.demoted` | Move location across tiers (HBM → RAM, RAM → NVMe). |
+| `kv.state.promoted` | Move location across tiers in the other direction. |
+| `kv.state.transferred` | Add a location at the destination node. |
+| `kv.state.restored` | Add a location at the target replica after a Checkpoint restore. |
+| `kv.state.evicted` | Remove a location. |
+| `kv.state.invalidated` | Remove all locations for the affected identity. |
+
+The index does **not** poll, ping, or estimate. If the KV Event System is paused, the index freezes at last-known truth — wrong, but not synthetic. Operators can observe lag through the difference between an event's wall-clock timestamp and its index-application timestamp.
+
+## Lookup API
+
+```http
+POST /v1/ks/cache/lookup
+Authorization: Bearer ks_...
+Content-Type: application/json
+
+{
+  "stable_context_id": "sha256:7e44…",
+  "stable_prefix_id": "sha256:9a1c…",
+  "scope": {
+    "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+    "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    "context_share_scope": "project"
+  }
+}
+```
+
+```json
+{
+  "stable_context_id": "sha256:7e44…",
+  "locations": [
+    {
+      "node_id": "01J8X9Y2Z3K4M5N6P7Q8R9N002",
+      "replica_id": "01J8X9Y2Z3K4M5N6P7Q8R9R007",
+      "tier": "HBM",
+      "warmness": "hot",
+      "completeness": "exact",
+      "compatibility": "exact",
+      "freshness_seconds": 12
+    },
+    {
+      "node_id": "01J8X9Y2Z3K4M5N6P7Q8R9N003",
+      "replica_id": "01J8X9Y2Z3K4M5N6P7Q8R9R009",
+      "tier": "NVMe",
+      "warmness": "cool",
+      "completeness": "exact",
+      "compatibility": "tokenizer_mismatch",
+      "freshness_seconds": 380
+    }
+  ]
+}
+```
+
+The response is filtered by scope — locations warmed under a foreign `context_share_scope` are not returned. Cross-tenant lookups return no locations even when content matches.
+
+## Multi-tier lookup
+
+The index supports lookups at the manifest level (`stable_context_id`) and the prefix level (`stable_prefix_id`). For each manifest, four lookups can be made — one per breakpoint digest (tools / system / history-prefix / summary). The router uses each independently to score the deepest matching breakpoint as the manifest's effective reuse boundary.
+
+A request with no manifest match but a tools-tier match still benefits — the substrate reuses the tools breakpoint and re-prefills only beyond it.
+
+## Compatibility tagging
+
+Each location carries a compatibility tag so the router can filter without a second join:
+
+| Tag | Meaning |
+|---|---|
+| `exact` | Renderer version, tokenizer fingerprint, model family all match. |
+| `tokenizer_mismatch` | Same model family but different tokenizer fingerprint. KV restore must be skipped; manifest replay only. |
+| `renderer_mismatch` | Same model and tokenizer but renderer version differs. KV restore proceeds only when the pair is on the forward-compatible allow-list. |
+
+Mismatched locations are still visible — the router or [resume flow](/docs/concepts/recovery/resume-flow) decides whether to use them under degraded terms.
+
+## Freshness
+
+`freshness_seconds` advances with every `kv.state.accessed` event. The router uses freshness as a tiebreaker — equal warmness, prefer fresher; equal warmness across tiers, prefer the tier that fits the request best.
+
+## Storage and consistency
+
+The index is backed by Redis for hot lookups and PostgreSQL for durable projection. The Redis layer applies events with a microsecond-class lag; the PostgreSQL layer is the system of record and reconciles within the deployment's commit window.
+
+The index is **eventually consistent** — a fresh `kv.state.stored` may take milliseconds to appear in lookups. Routing tolerates this: a missed warm location simply produces a colder routing decision, not a correctness violation.
+
+## What the KV index is not
+
+- **Not the cache itself.** The KV cache lives on substrate replicas. The index is the *map* to it.
+- **Not synchronous with substrate.** Index reads do not contact replicas. Truth is projected from events; operator confidence comes from event lag dashboards, not from re-querying nodes.
+- **Not a synthetic estimate.** No heuristic, no polling, no cron sweep populates the index. If the events stop, the index freezes.
+- **Not cross-tenant.** Scope filtering is enforced at lookup time.
+
+## See also
+
+- [Manifest-aware routing](/docs/concepts/routing/manifest-aware-routing) — the primary consumer
+- [State events](/docs/concepts/events/state) — the `kv_events` stream the index projects
+- [State handles](/docs/concepts/recovery/state-handles) — the typed references the index resolves for `kv_prefix` handles
+- [Resume flow](/docs/concepts/recovery/resume-flow) — the consumer that uses the index for KV restore planning
+- [Renderer versions](/docs/concepts/context/renderer-versions) — the source of compatibility tagging
+- [`POST /v1/ks/cache/lookup`](/docs/api/cluster/cache-lookup)

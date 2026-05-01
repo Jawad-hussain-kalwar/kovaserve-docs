@@ -1,0 +1,157 @@
+---
+title: KovaServe runtime mode
+description: The opinionated managed runtime mode for coding, terminal, and tool-heavy long-running agents — workspace, sandbox, tool registry, checkpoint triggers, branch lineage, and a runtime-native timeline, all wired into the same canonical execution model.
+---
+
+**KovaServe runtime mode** is the product mode where the runtime, the sandbox, the workspace, the tool gateway, and the checkpoint trigger rules all live inside KovaServe. It is the opinionated alternative to [BYO runtime mode](/docs/concepts/deployment/byo-runtime), built for the focused wedge — coding, terminal, tool-heavy, filesystem- and process-heavy long-running agents — where tighter coupling between runtime semantics and control-plane semantics produces clearly better outcomes.
+
+```
+agent spec  ──▶  KovaServe runtime  ──▶  KovaServe control plane  ──▶  vLLM substrate
+   (Python              (worker, sandbox,         (Runs, Steps,
+    SDK, agent           tool gateway,             ContextManifests,
+    decorators)          workspace, artifacts,     Budgets, Checkpoints,
+                         checkpoint triggers,      manifest-aware routing,
+                         retry / branch UX)        events)
+```
+
+The runtime owns wedge-specific UX. The control plane owns canonical truth. The two share the same Run / Session / Step / ModelCall / ContextManifest / Budget / Checkpoint vocabulary, so a Run executed in this mode is queryable, restorable, and budget-controlled through the same APIs and dashboards as a Run executed in [BYO mode](/docs/concepts/deployment/byo-runtime).
+
+## Where it fits
+
+| Goal | KovaServe runtime mode |
+|---|---|
+| Migration friction | Higher than BYO — the runtime is opinionated. |
+| Orchestration ownership | KovaServe owns the worker loop, retry/resume/branch, and step progression. |
+| Workspace / sandbox / file model | First-class. Workers run inside [sandboxes](/docs/concepts/runtime/sandboxes) over a managed [workspace](/docs/concepts/runtime/workspaces). |
+| Tool registration and invocation | First-class. Tools register through the runtime tool gateway and emit [ToolInvocation](/docs/concepts/runtime/tool-invocations) records. |
+| Checkpoint trigger rules | First-class. The runtime drops [Checkpoints](/docs/concepts/recovery/checkpoints) before risky file mutations, before unsafe shell actions, after stable analysis phases, on budget warning, and on schedule. |
+| Runtime-native timeline | Typed [step](/docs/concepts/run-hierarchy/step-types) timeline with model / tool / process / file actions, diffs, [branch lineage](/docs/concepts/recovery/branch-flow), and failure classification. |
+
+A team building a long-running coding agent picks this mode when the workspace, the sandbox, and the checkpoint-before-risk semantics are part of the value — not infrastructure they want to assemble themselves.
+
+## What the runtime owns
+
+The [runtime architecture](/docs/concepts/runtime/runtime-architecture) breaks the runtime into the subsystems below. Each is a Layer 3 component that uses canonical Layer 2 entities — it does not invent parallel ones.
+
+| Subsystem | Owns |
+|---|---|
+| Runtime API Service | The runtime's public surface — `POST /v1/ks/runtime/runs`, pause / resume / branch / retry / timeline / artifacts. |
+| Runtime Orchestrator | Lease assignment, run progression, step transitions, runtime event emission. |
+| [Worker](/docs/concepts/runtime/workers) Manager | Lease-based ownership of runnable work, runtime state materialization, model-call dispatch into the control plane. |
+| [Sandbox](/docs/concepts/runtime/sandboxes) Manager | Container-based isolated execution environments with policy-limited file and network access, branchable from snapshot points. |
+| Tool Registry and Tool Gateway | Wedge-specific [tool invocation](/docs/concepts/runtime/tool-invocations) — shell, file, repo/git, test/build, HTTP/API, structured external. |
+| [Workspace](/docs/concepts/runtime/workspaces) / Artifact Manager | The structured workspace model — root, source binding, mutation log, snapshots, branch lineage — and the [WorkspaceArtifact](/docs/concepts/runtime/workspace-artifacts) catalog. |
+| [Runtime State Store](/docs/concepts/runtime/runtime-local-state) | Durable runtime-local state — planner scratchpad, active process handles, tool loop position, branch pointers, last safe checkpoint. |
+| Checkpoint Integration Module | Wedge-aware checkpoint trigger rules layered on top of the [Checkpoint Manager](/docs/concepts/recovery/checkpoints). |
+| Retry / Resume / Branch Manager | The runtime UX for [retries](/docs/concepts/recovery/retries), [resumes](/docs/concepts/recovery/resume-flow), and [branches](/docs/concepts/recovery/branches). |
+| Timeline / Event Projection Service | The [runtime-native timeline](/docs/concepts/runtime/runtime-observability) — typed step list, diffs, branch tree. |
+| Runtime SDK | Python-first SDK with `@kova.run`, `@kova.session`, `@kova.budget`, `@kova.step` decorators. |
+
+## Step progression
+
+The runtime uses **typed step progression** drawn from the canonical 19-value `StepType` enum — richer than a generic orchestrator's opaque internal loop because it matches the wedge:
+
+| Group | Step types |
+|---|---|
+| Standard agent loop | `MODEL_CALL`, `TOOL_PLAN`, `TOOL_EXECUTE` |
+| Workspace and process | `FILE_READ`, `FILE_WRITE`, `PROCESS_START` |
+| Reflection markers | `OBSERVE`, `THINK` |
+| Durability and lineage | `CHECKPOINT`, `PAUSE`, `RESUME`, `BRANCH` |
+| Terminal | `COMPLETE`, `FAIL` |
+| Context engineering | `COMPACT`, `MEMORY_READ`, `MEMORY_WRITE` |
+| Sub-run lineage | `SUB_RUN_DISPATCH`, `SUB_RUN_JOIN` |
+
+See [step types](/docs/concepts/run-hierarchy/step-types) for the full reference. Validation is application-level, so new types extend the canonical list without DDL changes.
+
+## Developer flow
+
+The end-to-end loop a developer follows:
+
+1. **Create a Project** — under an [Organization](/docs/concepts/tenancy/organizations) and an [Environment](/docs/concepts/tenancy/environments).
+2. **Define an agent spec** — model, system prompt, tool list, sandbox profile, default [Budget](/docs/concepts/policy/budgets), default [ContextBudget](/docs/concepts/policy/context-budgets), [PolicyScope](/docs/concepts/policy/policy-scopes).
+3. **Register tools** — through the runtime tool gateway. Tool definitions hash into a [ToolCatalog](/docs/concepts/tools/tool-catalogs) so cache breakpoints stay stable.
+4. **Choose a sandbox profile** — container image, mounted [workspace](/docs/concepts/runtime/workspaces), file and network policy, resource limits.
+5. **Configure checkpoint and budget defaults** — when to checkpoint, when to warn, when to hard-stop.
+6. **Trigger a Run** — `POST /v1/ks/runtime/runs` with the agent spec id, the workspace source binding, and the inputs.
+7. **Inspect** — typed step timeline, [workspace artifacts](/docs/concepts/runtime/workspace-artifacts), [Checkpoint](/docs/concepts/recovery/checkpoints) tree, [branch](/docs/concepts/recovery/branches) lineage, budget burn, policy decisions.
+8. **Retry, resume, pause, or branch** — explicitly, through the runtime API or the dashboard.
+
+## Wire shape — creating a Run
+
+```http
+POST /v1/ks/runtime/runs
+Authorization: Bearer ks_...
+Content-Type: application/json
+
+{
+  "agent_id":     "01J8X9Y2Z3K4M5N6P7Q8R9AGT1",
+  "session_id":   "ses_a7f3c2b8d4e1f0925a1b6c3d",
+  "workspace": {
+    "source": { "type": "git", "url": "git@github.com:acme/payments.git", "ref": "main" },
+    "writable": true
+  },
+  "inputs": {
+    "objective": "Investigate and fix the failing test in payments_test.py."
+  },
+  "budget":          { "cost_cents_limit": 5000, "step_limit": 200 },
+  "context_budget":  { "active_token_limit": 96000 },
+  "checkpoint_policy": { "before_file_write": true, "before_shell_exec": true, "periodic_seconds": 600 }
+}
+```
+
+Response:
+
+```json
+{
+  "id":              "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+  "agent_id":        "01J8X9Y2Z3K4M5N6P7Q8R9AGT1",
+  "session_id":      "ses_a7f3c2b8d4e1f0925a1b6c3d",
+  "workspace_id":    "01J8X9Y2Z3K4M5N6P7Q8R9WSP1",
+  "sandbox_id":      "01J8X9Y2Z3K4M5N6P7Q8R9SBX1",
+  "budget_id":       "01J8X9Y2Z3K4M5N6P7Q8R9BDG1",
+  "context_budget_id":"01J8X9Y2Z3K4M5N6P7Q8R9CBG1",
+  "status":          "CREATED",
+  "created_at":      "2026-04-30T12:00:00Z"
+}
+```
+
+The Run progresses through the canonical [12-state Run FSM](/docs/concepts/run-hierarchy/run-state-machine) — not a runtime-private state machine.
+
+## What the runtime adds on top of BYO mode
+
+Everything BYO mode delivers is also delivered here. On top, the managed runtime adds:
+
+| Capability | Surface |
+|---|---|
+| Managed worker loop | [Worker](/docs/concepts/runtime/workers) Manager claims runs under leases and emits `ks.tool.invocation.*`, `ks.process.*`, `ks.file.write.applied`, `ks.branch.created` runtime events. |
+| Container sandbox | Isolated [sandbox](/docs/concepts/runtime/sandboxes) per Run with file and network policy, optional persistence, branchable from snapshots. |
+| Workspace model | Source-bound [workspace](/docs/concepts/runtime/workspaces) with mutation log, snapshots, branch lineage, read/write policy. |
+| Workspace artifacts | First-class [WorkspaceArtifact](/docs/concepts/runtime/workspace-artifacts) catalog — stdout, stderr, file diffs, patches, test reports, model outputs, workspace snapshots. |
+| Tool gateway | Built-in tool classes — shell, file, repo/git, test/build, HTTP/API, structured external. |
+| Checkpoint trigger rules | Before risky file mutations, before unsafe shell actions, after stable analysis phases, on budget warning, manual, periodic. |
+| Branch from any checkpoint | A [branch](/docs/concepts/recovery/branch-flow) starts a new Run lineage from a Checkpoint or stable point with bounded inherited budgets and policies. |
+| Runtime-native timeline | Typed step list, model / tool / process / file actions, [diffs](/docs/concepts/runtime/workspace-artifacts), checkpoint tree, branch lineage, failure classification, retry/resume reasons. |
+| Python-first SDK | `@kova.run`, `@kova.session`, `@kova.budget`, `@kova.step` decorators that emit the same canonical entities. |
+
+## Boundary with the control plane
+
+The runtime does not duplicate Layer 2. It uses the canonical entities directly:
+
+- A runtime [Worker](/docs/concepts/runtime/workers) calling a model goes through the same `POST /v1/chat/completions` path that BYO mode uses, with the same `kovaserve` extension envelope. The runtime fills the envelope; the control plane records the [ModelCall](/docs/concepts/run-hierarchy/model-calls) under the right [Step](/docs/concepts/run-hierarchy/steps).
+- A runtime [Checkpoint](/docs/concepts/recovery/checkpoints) is a Layer 2 Checkpoint with a `runtime_state` [StateHandle](/docs/concepts/recovery/state-handles) attached. Restore goes through the same logical-context-first [resume flow](/docs/concepts/recovery/resume-flow).
+- A runtime [Budget](/docs/concepts/policy/budgets) is a Layer 2 Budget with the runtime as one of its consumers.
+- A runtime [tool invocation](/docs/concepts/runtime/tool-invocations) emits a `ks.tool.invocation.*` event into the same NATS stream that BYO consumers read.
+
+This is what makes the canonical model load-bearing. Every dashboard, every API, every event consumer sees the same data regardless of which mode produced it.
+
+## Managed and private parity
+
+KovaServe runtime mode runs in both [managed cloud](/docs/concepts/deployment/managed-cloud) and [private deployment](/docs/concepts/deployment/private-deployment). The runtime workers, sandboxes, and tool gateway are part of the same Helm chart that ships the control plane. A coding agent that starts on managed cloud and migrates to a sovereign deployment carries identical agent specs, identical Run shapes, identical workspace and artifact records, and identical timelines.
+
+## See also
+
+- [BYO runtime mode](/docs/concepts/deployment/byo-runtime) — the alternative product mode where an external runtime keeps owning agent logic
+- [Runtime architecture](/docs/concepts/runtime/runtime-architecture) — the runtime subsystem inventory
+- [Runtime execution semantics](/docs/concepts/runtime/runtime-execution-semantics) — typed step progression
+- [Workers](/docs/concepts/runtime/workers) · [Sandboxes](/docs/concepts/runtime/sandboxes) · [Workspaces](/docs/concepts/runtime/workspaces) · [Workspace artifacts](/docs/concepts/runtime/workspace-artifacts) · [Tool invocations](/docs/concepts/runtime/tool-invocations) · [Runtime-local state](/docs/concepts/runtime/runtime-local-state) · [Runtime observability](/docs/concepts/runtime/runtime-observability)
+- [Managed agents](/docs/concepts/managed-agents) — the SKU model the runtime is built to deliver

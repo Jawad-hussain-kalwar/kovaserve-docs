@@ -1,0 +1,144 @@
+---
+title: Environments
+description: The Environment entity — production / staging / development isolation under a Project, with independent traffic, deployments, cache namespaces, and rate limits.
+---
+
+An **Environment** is the stage-isolation level inside a [Project](/docs/concepts/tenancy/projects). It separates production, staging, and development traffic so a deploy under test cannot affect production cache, production rate limits, production memory, or production cost. Every [Key](/docs/concepts/tenancy/keys), every [Run](/docs/concepts/run-hierarchy/runs), every [event](/docs/concepts/events) carries the Environment it ran against.
+
+A Project has at least one Environment. Most have three: `production`, `staging`, `development`.
+
+## What an Environment owns
+
+| Field | Purpose |
+|---|---|
+| `id` | Bare 26-char Crockford ULID. |
+| `organization_id` | Inherited from Project. |
+| `project_id` | Parent Project. |
+| `name` | One of `production`, `staging`, `development` — or a custom label allowed by the Organization's policy. |
+| `tier` | Canonical tier: `prod`, `staging`, `dev`. Drives default policy posture. |
+| `status` | `ACTIVE` or `ARCHIVED`. |
+| `policy_scope_id` | Environment-level [PolicyScope](/docs/concepts/policy/policy-scopes) override. Narrows against the Project resolved scope. |
+| `rate_limits` | Per-Environment rate limit override. Defaults to inherited Project limits. |
+| `deployment_restrictions[]` | Deployment IDs this Environment may execute against. Empty = all deployments allowed by the Project. |
+| `created_at` | Timestamp. |
+
+## Why Environments exist
+
+The Environment level is what makes safe iteration practical:
+
+- **Independent cache.** Cache reuse is bounded by `(organization_id, project_id, environment_id)` at the substrate. A development Run never benefits from a production prefix and never warms one — see [manifest-aware routing](/docs/concepts/routing/manifest-aware-routing).
+- **Independent rate limits.** A staging load test cannot burn through the production Project's rate limit budget.
+- **Independent memory.** [MemoryEntry](/docs/concepts/memory/memory-entries) rows are namespaced by Environment for `session`, `user`, and `tenant` scopes — production memory is invisible to staging callers.
+- **Independent cost.** Cost accumulates per Environment so a staging spike is visible without inflating the production bill in the headline.
+- **Deploy-target restrictions.** A `production` Environment can be pinned to specific deployments via `deployment_restrictions[]`; staging can run anywhere.
+
+## Wire shape
+
+```http
+POST /v1/ks/environments
+Authorization: Bearer ks_...
+Content-Type: application/json
+
+{
+  "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9PRJ1",
+  "name": "production",
+  "tier": "prod",
+  "policy_scope_id": "01J8X9Y2Z3K4M5N6P7Q8R9P0K2",
+  "rate_limits": {
+    "requests_per_second": 100,
+    "tokens_per_second": 2000000
+  },
+  "deployment_restrictions": ["dep_us_east_1", "dep_us_west_2"]
+}
+```
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9ENV1",
+  "organization_id": "01J8X9Y2Z3K4M5N6P7Q8R9ORG1",
+  "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9PRJ1",
+  "name": "production",
+  "tier": "prod",
+  "status": "ACTIVE",
+  "policy_scope_id": "01J8X9Y2Z3K4M5N6P7Q8R9P0K2",
+  "rate_limits": {
+    "requests_per_second": 100,
+    "tokens_per_second": 2000000
+  },
+  "deployment_restrictions": ["dep_us_east_1", "dep_us_west_2"],
+  "created_at": "2026-04-30T12:00:00Z"
+}
+```
+
+## Tier semantics
+
+The `tier` field carries the canonical posture independent of the human-readable `name`:
+
+| Tier | Default posture |
+|---|---|
+| `prod` | Strict admission. `degraded_mode_policy = reject`. Hard rate limits enforced. ContextArtifacts pinned to `tenant_local` data boundary unless the Organization permits otherwise. |
+| `staging` | Same admission as prod by default; intended for pre-release verification. Rate limits typically a fraction of prod. |
+| `dev` | Permissive. `degraded_mode_policy = warn`. Optional segments may drop without `HARD_STOP`. Suitable for iteration. |
+
+The defaults are configurable per Organization through the parent PolicyScope; the tier identifies the *posture class* so downstream subsystems can apply class-specific defaults. The [Cache-Aware Router](/docs/concepts/routing/manifest-aware-routing) treats `tier` as a hard partition: a `prod` Run never reuses cache warmed by a `dev` Run, even within the same Project.
+
+## What carries the Environment ID
+
+Every workload-bearing entity stamps the resolved `environment_id`:
+
+```
+Run.environment_id
+Step.environment_id
+ModelCall.environment_id
+Checkpoint.environment_id
+ContextArtifact.environment_id
+MemoryEntry.environment_id        (for session/user/tenant scopes)
+usage_records.environment_id
+event_envelope.environment_id
+```
+
+The denormalization makes scoped queries (`scope=environment`) trivially indexable and makes scope-leaking bugs structurally impossible — there is no internal path that produces a Run row without an `environment_id`.
+
+## Aggregation
+
+Environment-level totals are sums over `usage_records` rows tagged with the Environment's `environment_id`:
+
+| Surface | Endpoint |
+|---|---|
+| Usage and cost | `GET /v1/ks/metering/usage?scope=environment&environment_id=...` |
+| Per-day breakdown | `GET /v1/ks/metering/usage?scope=environment&environment_id=...&group_by=day` |
+| Per-Run breakdown | `GET /v1/ks/metering/usage?scope=environment&environment_id=...&group_by=run` |
+
+Like other scoped queries, an unknown `environment_id` for the authenticated Organization returns `200` with zeros (ADR-023 error semantics carried through the cost model — see [cost-model aggregation](/docs/concepts/cost/cost-model#aggregation)).
+
+## Inheritance
+
+| Resolved value | Resolution rule |
+|---|---|
+| PolicyScope | Environment's `policy_scope_id` overlays the Project's resolved scope. Narrowing only. |
+| Rate limits | Environment limits cap this Environment. Project limits cap the sum of all Environments. |
+| Model ACL | Intersection of inherited ACL and any Environment-level allowlist. |
+| Data boundary | Most-restrictive of inherited boundary and Environment setting. |
+| Deployment restrictions | Intersection of Project's restrictions and Environment's. |
+
+A more-specific Environment cannot widen any inherited limit. The narrowest resolved value wins.
+
+## Archival
+
+An Environment can be moved to `ARCHIVED`. New admission rejects; in-flight Runs continue to completion; existing rows remain queryable; existing Keys for the Environment continue to authenticate but every admission attempt rejects with `error.code = "environment_archived"`.
+
+## What an Environment is not
+
+- **Not a deployment.** A deployment is a substrate placement — a cluster, region, or fleet. An Environment is a logical scope; multiple deployments can serve one Environment, and one deployment can host multiple Environments under different Organizations.
+- **Not a release stage.** Promotion between Environments is the application's concern. KovaServe does not orchestrate "promote staging to prod" — it isolates the runtime so the application can.
+- **Not a network boundary.** Network isolation is a deployment property carried in `data_boundary`. Environments are independent in the logical model regardless of network topology.
+- **Not free-form.** The `tier` field is closed (`prod`, `staging`, `dev`). The `name` field is a human-readable label and does not affect routing or policy.
+
+## See also
+
+- [Tenancy](/docs/concepts/tenancy) — the four-level hierarchy
+- [Projects](/docs/concepts/tenancy/projects) — the parent
+- [Keys](/docs/concepts/tenancy/keys) — the next level down
+- [PolicyScope](/docs/concepts/policy/policy-scopes) — the governance binding overlay
+- [Manifest-aware routing](/docs/concepts/routing/manifest-aware-routing) — the consumer of Environment scope on cache lookup
+- [`POST /v1/ks/environments`](/docs/api/environments/create) · [`GET /v1/ks/environments/{id}`](/docs/api/environments/get)

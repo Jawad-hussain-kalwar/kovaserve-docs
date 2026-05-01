@@ -28,7 +28,7 @@ The `execution_events` JetStream stream uses the broad subject filter `ks.>` so 
 
 ## What every event carries
 
-Every event — regardless of stream — carries the same minimum [event envelope](/docs/concepts/event-envelope): identity, tenancy, correlation, and timestamp fields. The envelope makes events joinable across streams without normalization at consume time.
+Every event — regardless of stream — carries the same minimum [event envelope](/docs/concepts/events/event-envelope): identity, tenancy, correlation, and timestamp fields. The envelope makes events joinable across streams without normalization at consume time.
 
 ```json
 {
@@ -95,7 +95,7 @@ Authorization: Bearer ks_...
 | Memory | `GET /v1/ks/events/memory` |
 | Sub-run | `GET /v1/ks/events/sub-run` |
 
-Filters available on every endpoint: `run_id`, `session_id`, `step_id`, `model_call_id`, `event_type[]`, `since` (timestamp), `limit`. Tenancy is implicit — the resolved [AuthContext](/docs/concepts/identity-and-ids) bounds visibility to the caller's Organization.
+Filters available on every endpoint: `run_id`, `session_id`, `step_id`, `model_call_id`, `event_type[]`, `since` (timestamp), `limit`. Tenancy is implicit — the resolved [AuthContext](/docs/concepts/run-hierarchy/identity-and-ids) bounds visibility to the caller's Organization.
 
 ## Retention and replay
 
@@ -107,11 +107,11 @@ Within the retention window, events are replayable: a consumer that drops a curs
 
 - **Not webhooks.** KovaServe does not push events to consumer URLs in v1. Consumers pull from the cursor-paginated endpoints. The v1 surface explicitly excludes a webhook management API.
 - **Not metrics.** Metrics are exposed via Prometheus on `/metrics`. Events carry the per-transition record; metrics carry rolling counters.
-- **Not the source of truth for cost.** Cost is on `usage_records` with [pricing snapshots](/docs/concepts/pricing-snapshots) — the audit anchor. Events convey transitions; they do not redefine economics.
+- **Not the source of truth for cost.** Cost is on `usage_records` with [pricing snapshots](/docs/concepts/cost/pricing-snapshots) — the audit anchor. Events convey transitions; they do not redefine economics.
 - **Not push to all clients.** Pulled cursor-paginated reads are the only public consumption surface in v1.
 
 ## See also
 
-- [Event envelope](/docs/concepts/event-envelope) — the minimum fields every event carries
+- [Event envelope](/docs/concepts/events/event-envelope) — the minimum fields every event carries
 - Per-stream pages — [execution](/docs/concepts/events/execution), [state](/docs/concepts/events/state), [routing](/docs/concepts/events/routing), [policy](/docs/concepts/events/policy), [budget](/docs/concepts/events/budget), [checkpoint](/docs/concepts/events/checkpoint), [runtime](/docs/concepts/events/runtime), [context engineering](/docs/concepts/events/context-engineering), [memory](/docs/concepts/events/memory), [sub-run](/docs/concepts/events/sub-run)
 - [`GET /v1/ks/events/index`](/docs/api/events/index) — combined cursor across streams

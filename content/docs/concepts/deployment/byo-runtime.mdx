@@ -1,0 +1,158 @@
+---
+title: BYO runtime mode
+description: The product mode where an existing runtime — LangGraph, Temporal, or a custom orchestrator — keeps owning agent logic while KovaServe sits underneath as the execution control plane.
+---
+
+**BYO runtime mode** is the KovaServe product mode for teams that already run an external orchestrator and want continuity, budgets, routing, checkpoints, and observability without migrating off it. The runtime keeps its planner, retry policy, and tool-loop semantics; KovaServe takes over the execution-boundary primitives — [Runs](/docs/concepts/run-hierarchy/runs), [Sessions](/docs/concepts/continuity/sessions), [Steps](/docs/concepts/run-hierarchy/steps), [ContextManifests](/docs/concepts/context/context-manifests), [Budgets](/docs/concepts/policy/budgets), [Checkpoints](/docs/concepts/recovery/checkpoints), and [events](/docs/concepts/events) — through an OpenAI-compatible endpoint extended with a `kovaserve` metadata envelope.
+
+```
+external runtime  ──▶  /v1/chat/completions  ──▶  KovaServe control plane  ──▶  vLLM substrate
+   (LangGraph,            with `kovaserve`         (canonical entities,
+    Temporal,             extension envelope        admission, routing,
+    custom)                                          checkpoints, metering)
+```
+
+The runtime stays in charge of planning, prompting, retrieval, and agent memory authoring. KovaServe stays in charge of segment identity, manifest durability, admission, offload, compaction lineage, retention, restore, governance, and observability. Neither side reaches across the boundary.
+
+## Where it fits
+
+KovaServe ships two product modes ([§9.1](/docs/concepts/deployment/managed-runtime) is the other). BYO mode is the one that minimizes migration friction:
+
+| Goal | BYO runtime mode |
+|---|---|
+| Migration friction | Minimal — change two lines (base URL, API key) and add a metadata envelope. |
+| Orchestration ownership | The external runtime keeps it. |
+| Run / Session / Step semantics | KovaServe owns them; the runtime supplies correlation IDs. |
+| Context engineering primitives | KovaServe owns manifest, admission, artifact, compaction, memory, tool catalog, governance. |
+| Workspace / sandbox / file model | Not provided in this mode (those live in the [managed runtime](/docs/concepts/deployment/managed-runtime)). |
+
+A team running LangGraph, Temporal, or a custom orchestrator points at KovaServe's OpenAI-compatible endpoint and immediately gains durable Runs, ContextBudgets, manifest-aware routing, and a real event stream — without reorganizing the agent code.
+
+## What the runtime sends
+
+Every model call enters through `POST /v1/chat/completions`. The standard OpenAI request body is unchanged. Runtime-supplied metadata travels in the `kovaserve` extension field — the canonical 16-field envelope defined by the BYO contract:
+
+| Field | Purpose |
+|---|---|
+| `external_runtime` | The orchestrator name (e.g. `langgraph`, `temporal`, `custom`). Used for adapter dispatch and analytics. |
+| `run_id` | The KovaServe Run ULID. Created by the runtime or returned by `POST /v1/ks/runs`. |
+| `external_run_id` | The runtime's own run identifier. Stored alongside `run_id` for cross-system lookup. |
+| `parent_run_id` | Set when the call is part of a [sub-run](/docs/concepts/run-hierarchy/sub-runs) dispatched by another Run. |
+| `session_id` | The [Session](/docs/concepts/continuity/sessions) the Run belongs to. Drives `current_manifest_id` continuity. |
+| `step_id` | The current Step ULID. Bound to one ContextManifest and zero-or-more ModelCalls. |
+| `checkpoint_id` | Set on a resume, points at the [Checkpoint](/docs/concepts/recovery/checkpoints) the Run is restoring from. |
+| `resume_marker` | Runtime-defined marker indicating where in its own logic to pick back up. |
+| `memory_class_hints` | Typed [MemoryScope](/docs/concepts/memory/memory-scopes) annotations on inbound segments — `{selector, memory_scope, retention, checkpoint_relevant}`. |
+| `budget_context` | Reference to the active run-level [Budget](/docs/concepts/policy/budgets). |
+| `context_budget_ref` | Reference to the active [ContextBudget](/docs/concepts/policy/context-budgets). |
+| `policy_scope_ref` | Reference to the resolved [PolicyScope](/docs/concepts/policy/policy-scopes). |
+| `context_scope_ref` | Reference to the `context_share_scope` overlay applied to cache reuse. |
+| `placement_hint` | Optional [PlacementHint](/docs/concepts/routing/placement-hints) — affinity, region, residency. |
+| `tool_catalog_id` | The hashed [ToolCatalog](/docs/concepts/tools/tool-catalogs) id under which this call's tools are registered. |
+| `artifact_refs` | List of [ContextArtifact](/docs/concepts/context/context-artifacts) ids referenced by the prompt. |
+| `compaction_policy` | Optional runtime-supplied compaction strategy hint. |
+
+Layer 2 maps each field into the canonical model. Missing fields are tolerated — anonymous traffic without a `kovaserve` envelope is also accepted (this is the `v1` discriminator path) but does not produce Run-level continuity, budgets, or checkpoints.
+
+## Wire shape
+
+```http
+POST /v1/chat/completions
+Authorization: Bearer ks_...
+Content-Type: application/json
+
+{
+  "model": "kova/llama-3.1-70b-instruct",
+  "messages": [
+    { "role": "system", "content": "You are a coding assistant." },
+    { "role": "user",   "content": "Investigate the failing test in payments_test.py." }
+  ],
+  "kovaserve": {
+    "external_runtime":    "langgraph",
+    "run_id":              "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    "external_run_id":     "lg-thread-7c4f",
+    "session_id":          "ses_a7f3c2b8d4e1f0925a1b6c3d",
+    "step_id":             "01J8X9Y2Z3K4M5N6P7Q8R9STP1",
+    "memory_class_hints": [
+      { "selector": "messages[0]", "memory_scope": "session", "retention": "session", "checkpoint_relevant": true }
+    ],
+    "tool_catalog_id":     "01J8X9Y2Z3K4M5N6P7Q8R9TLC1",
+    "budget_context":      { "budget_id": "01J8X9Y2Z3K4M5N6P7Q8R9BDG1" },
+    "context_budget_ref":  { "context_budget_id": "01J8X9Y2Z3K4M5N6P7Q8R9CBG1" },
+    "policy_scope_ref":    { "policy_scope_id": "01J8X9Y2Z3K4M5N6P7Q8R9PSC1" },
+    "placement_hint":      { "affinity": "session" }
+  }
+}
+```
+
+The response is an OpenAI-shape `chat.completion` augmented with cost headers — see [cost headers](/docs/api/cost-headers). The created [ContextManifest](/docs/concepts/context/context-manifests), [ModelCall](/docs/concepts/run-hierarchy/model-calls), [admission](/docs/concepts/policy/admission) decision, and [`cached_tokens`](/docs/concepts/routing/cached-tokens) usage are addressable through the native control-plane and metering APIs against the `run_id` and `step_id` the runtime supplied.
+
+## Runtime Integration Adapters
+
+The control plane normalizes inbound metadata through **Runtime Integration Adapters** — a Layer 2 surface that ingests the runtime's own execution identifiers and maps them to canonical entities. Adapters:
+
+- read the `external_runtime` discriminator and dispatch the right field interpretation
+- resolve or create the `Run`, `Session`, and `Step` rows under the canonical model
+- attach the runtime's own `external_run_id` for cross-system lookup
+- preserve `placement_hint`, `memory_class_hints`, `budget_context`, `context_budget_ref`, `policy_scope_ref`, `tool_catalog_id`, `artifact_refs`, and `compaction_policy` so the rest of the control plane sees the same envelope regardless of which runtime produced it
+- never take over orchestration logic — the runtime keeps its retry policy, planner, and tool loop
+
+Adapters ship for LangGraph and Temporal; the same contract is what a custom runtime targets when it wants the BYO surface.
+
+## What BYO mode delivers
+
+The runtime keeps its agent code. KovaServe adds:
+
+| Capability | Surface |
+|---|---|
+| Durable Runs | `POST /v1/ks/runs`, `GET /v1/ks/runs/{id}`, the [Run state machine](/docs/concepts/run-hierarchy/run-state-machine). |
+| Session continuity | [Session Registry](/docs/concepts/continuity/sessions) with `current_manifest_id` and bounded manifest history. |
+| ContextManifest per call | Every ModelCall is bound to a durable [ContextManifest](/docs/concepts/context/context-manifests) row. |
+| Context admission | [ContextBudget](/docs/concepts/policy/context-budgets) decides `ALLOW | WARN | OFFLOAD_REQUIRED | COMPACT_REQUIRED | DEGRADE | HARD_STOP` before GPU dispatch. |
+| Run-level budget control | [Budget](/docs/concepts/policy/budgets) evaluates against admitted manifest counts and cost estimate. |
+| Cache-aware routing | The [Cache-Aware Router](/docs/concepts/routing/manifest-aware-routing) considers manifest reuse, restore cost, and budget pressure. |
+| Checkpoint + resume | [Checkpoint Manager](/docs/concepts/recovery/checkpoints) with logical-context-first restore. |
+| Tool governance | [ToolCatalog](/docs/concepts/tools/tool-catalogs) versioning + [ToolContextDisposition](/docs/concepts/tools/tool-context-disposition). |
+| Memory store | [MemoryScope](/docs/concepts/memory/memory-scopes)-typed entries; LangGraph `Store`-compatible. |
+| Cost per completed run | Roll-up across every ModelCall and tool action, with frozen [pricing snapshots](/docs/concepts/cost/pricing-snapshots). |
+| Real event stream | Ten [event streams](/docs/concepts/events) under `ks.>` and `kv_events`. |
+| Tenancy | [Organization → Project → Environment → Key](/docs/concepts/tenancy) on every record. |
+
+Workspace, sandbox, and file primitives are *not* part of BYO mode. A coding agent that needs them adopts the [managed runtime](/docs/concepts/deployment/managed-runtime) instead.
+
+## What stays with the runtime
+
+The runtime owns — and KovaServe never takes over — the following. The boundary is enforced by what the metadata envelope does and does not carry.
+
+- prompt composition and assembly logic
+- planner / agent graph / state machine
+- retrieval strategy and indexing
+- agent memory authoring (what to remember semantically)
+- retry policy at the application layer
+- tool loop control flow
+
+If the runtime wants any of these to *interact* with KovaServe primitives — for example, asking the [admission](/docs/concepts/policy/admission) service whether a candidate prompt fits, or registering a [CompactionRecord](/docs/concepts/context/compaction-records) it produced itself — it does so through the explicit context-engineering APIs, not by handing over orchestration.
+
+## Authoring a Run from a BYO runtime
+
+The minimum loop is three calls:
+
+1. **Create the Run.** `POST /v1/ks/runs` with the `Session`, the [Budget](/docs/concepts/policy/budgets), and the [PolicyScope](/docs/concepts/policy/policy-scopes). Returns the Run id.
+2. **Drive ModelCalls.** `POST /v1/chat/completions` with the `kovaserve` envelope on every call. The runtime keeps its own loop; KovaServe records each ModelCall under the right Step.
+3. **Close the Run.** `POST /v1/ks/runs/{id}` with `status: COMPLETED` (or let the runtime emit a final tool result and rely on the configured completion hook).
+
+[Checkpoints](/docs/concepts/recovery/checkpoints), [branches](/docs/concepts/recovery/branches), and [resumes](/docs/concepts/recovery/resume-flow) are explicit operations the runtime opts into when it wants them — they are not implicit.
+
+## Managed and private parity
+
+BYO mode runs identically against managed cloud (`https://api.kovaserve.com`) and against a [private deployment](/docs/concepts/deployment/private-deployment). The base URL is the only thing that changes. The metadata envelope, the canonical entities, the event taxonomy, and the wire shapes match across both.
+
+## See also
+
+- [KovaServe runtime mode](/docs/concepts/deployment/managed-runtime) — the opinionated managed-runtime alternative for the wedge
+- [Managed cloud](/docs/concepts/deployment/managed-cloud) — the hosted multi-tenant deployment
+- [Private deployment](/docs/concepts/deployment/private-deployment) — self-hosted, sovereign, and neocloud topologies
+- [Identity and IDs](/docs/concepts/run-hierarchy/identity-and-ids) — `external_run_id` correlation and ID conventions
+- [`POST /v1/chat/completions`](/docs/api/inference/chat-completions) — the OpenAI-compatible endpoint
+- [`kovaserve` extension envelope](/docs/api/inference/extension-envelope) — the 16-field metadata contract
+- [Runs](/docs/concepts/run-hierarchy/runs) · [Sessions](/docs/concepts/continuity/sessions) · [Checkpoints](/docs/concepts/recovery/checkpoints) · [Budgets](/docs/concepts/policy/budgets) — the canonical entities BYO mode populates

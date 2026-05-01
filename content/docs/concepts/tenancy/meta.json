@@ -1,0 +1,10 @@
+{
+  "title": "Tenancy",
+  "pages": [
+    "index",
+    "organizations",
+    "projects",
+    "environments",
+    "keys"
+  ]
+}

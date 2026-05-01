@@ -1,0 +1,152 @@
+---
+title: Manifest-aware routing
+description: How the Cache-Aware Router scores candidate replicas using ContextManifest identity, KV state lifecycle, scope filters, placement hints, and budget pressure.
+---
+
+**Manifest-aware routing** is the placement decision the **Cache-Aware Router** makes for every admitted ModelCall. It chooses execution placement using continuity, context reuse value, and economics — not blind load-balancing or raw prefix hash. The router consumes the admitted [ContextManifest](/docs/concepts/context/context-manifests) and the [KV Index](/docs/concepts/routing/kv-index), and produces a selected route, fallback routes, and an explanation.
+
+The router runs *after* admission and *before* substrate dispatch:
+
+```
+admission → ▶▶ routing ◀◀ → substrate execution
+```
+
+## What the router optimizes
+
+The router scores candidates against a multi-input objective:
+
+| Input | Effect on score |
+|---|---|
+| Cache hit potential (legacy `stable_prefix_id` lookup) | + when the prefix matches a warm replica. |
+| Manifest reuse estimate (`stable_context_id` match across breakpoint tiers) | + when the manifest matches at deeper breakpoints. |
+| Expected prefill savings tokens | + proportional to `manifest.token_counts.stable_tokens` reused. |
+| Rehydrate / restore cost (KV state) | − when restore is needed. |
+| Artifact reload cost (ContextArtifact bytes) | − when artifacts must be re-fetched. |
+| Queue cost | − proportional to candidate replica's queue depth. |
+| Isolation penalty | − when a candidate violates colocation preferences. |
+| Model availability | hard filter — incompatible models are excluded. |
+| Node health | hard filter — degraded nodes excluded. |
+| Placement hints | + when the runtime supplied a hint that matches. |
+| Resume priority | + when this is a resume and a warm KV is available. |
+| Policy constraints | hard filter — `policy_scope.context_share_scope` boundary. |
+| ContextBudget admission state | DEGRADED Runs prefer cache reuse more aggressively. |
+| Run-level Budget pressure | + cache-reuse weight when budget is near limit. |
+| Session affinity | + when a Session is bound and prior calls warmed a replica. |
+
+## Inputs read from the manifest
+
+| Manifest field | Used for |
+|---|---|
+| `stable_prefix_id` | Pass 4 prefix-tier lookup. |
+| `stable_context_id` | Manifest-tier identity. |
+| Breakpoint digests (tools / system / history-prefix / summary) | Multi-tier cache reuse scoring. |
+| `model_id`, `model_family`, `tokenizer_fingerprint`, `renderer_version` | Hard scope filters — incompatible replicas excluded. |
+| `scope.context_share_scope` | Hard scope filter — replicas warmed under foreign scope excluded. |
+| `token_counts.stable_tokens` | Prefill savings estimate. |
+| `byte_counts.artifact_bytes` | Artifact reload cost estimate. |
+
+## Outputs
+
+```json
+{
+  "selected": {
+    "node_id": "01J8X9Y2Z3K4M5N6P7Q8R9N002",
+    "replica_id": "01J8X9Y2Z3K4M5N6P7Q8R9R007",
+    "warmness": "warm",
+    "kv_match": "exact",
+    "expected_prefill_savings_tokens": 1840
+  },
+  "fallbacks": [
+    { "node_id": "01J8X9Y2Z3K4M5N6P7Q8R9N003", "warmness": "cool" },
+    { "node_id": "01J8X9Y2Z3K4M5N6P7Q8R9N004", "warmness": "cold" }
+  ],
+  "rationale": {
+    "manifest_reuse_estimate": "high",
+    "restore_cost_tokens": 0,
+    "scope_filter_applied": "project",
+    "queue_depth": 2,
+    "rejected_candidates": 4
+  },
+  "resume_feasible": true
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `selected` | The chosen route. |
+| `fallbacks[]` | Ordered backup routes if the selected node rejects or times out. |
+| `rationale` | Explanation payload, surfaced on `ks.route.planned` events and on dashboards. |
+| `resume_feasible` | Whether this placement can KV-restore a referenced Checkpoint. |
+
+The `warmness` classes are: `hot` (KV in HBM), `warm` (KV in host RAM), `cool` (KV in local NVMe), `cold` (no relevant KV), `partial` (some breakpoints match, others don't).
+
+## Scope filters
+
+Some inputs are **hard filters** rather than scoring weights — replicas that fail them are not scored at all:
+
+| Filter | Source |
+|---|---|
+| Model availability | `manifest.model_id` matches replica's loaded model. |
+| Renderer compatibility | `manifest.renderer_version` matches replica's renderer or is on the forward-compatible allow-list. |
+| Tokenizer compatibility | `manifest.tokenizer_fingerprint` matches replica's tokenizer; non-match excludes. |
+| Policy scope | `manifest.scope.context_share_scope` agrees with replica's cache origin scope. |
+| Data boundary | `policy_scope.data_boundary` allows the replica's region. |
+| Deployment restrictions | `policy_scope.deployment_restrictions[]`. |
+
+Hard filters always run first. The score function is only invoked over candidates that pass every filter.
+
+## Resume-feasible routing
+
+When the manifest references a [Checkpoint](/docs/concepts/recovery/checkpoints) (the call is a resume), the router consults the Checkpoint's `kv_prefix` [StateHandle](/docs/concepts/recovery/state-handles) and prefers replicas where KV import is feasible at low cost. If no such replica is available, the router falls through to a compatible cold replica and the [resume flow](/docs/concepts/recovery/resume-flow) reconstructs from manifest replay.
+
+`resume_feasible: true` does not promise KV restore will succeed — the substrate still validates the import. It signals the router judges restore feasible at the chosen placement.
+
+## Session affinity
+
+When a Run is bound to a [Session](/docs/concepts/continuity/sessions), the router treats the Session's most recently used replica as a warm hint. Affinity is a soft preference, not a hard binding — a heavily loaded prior replica yields to a fresh cold one when the queue cost outweighs reuse.
+
+The Session's [`current_manifest_id`](/docs/concepts/continuity/current-manifest) and bounded manifest history are read directly from the Session row to score continuity without joining through ModelCalls.
+
+## Events
+
+| Event | Emitted on |
+|---|---|
+| `ks.route.planned` | A route is computed; rationale included. |
+| `ks.route.selected` | The selected route accepts the dispatch. |
+| `ks.route.fallback_used` | The selected route rejected or timed out and a fallback was used. |
+| `ks.route.override_applied` | An operator override changed the selected route. |
+
+## Operator override
+
+Operators can override the router's choice by posting an explicit route plan:
+
+```http
+POST /v1/ks/routing/plan
+Authorization: Bearer ks_admin_...
+Content-Type: application/json
+
+{
+  "context_manifest_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T6",
+  "force_node_id": "01J8X9Y2Z3K4M5N6P7Q8R9N005",
+  "reason": "evacuating node 002 for maintenance"
+}
+```
+
+Overrides are recorded as `ks.route.override_applied` events with the operator and reason.
+
+## What manifest-aware routing is not
+
+- **Not load balancing.** The router is not a generic least-loaded chooser. It is a continuity-and-economics planner.
+- **Not the same as admission.** Admission decides whether a request runs and in what shape. Routing decides where it runs.
+- **Not synthetic.** Every signal is a real substrate event from the [KV Event System](/docs/concepts/events/state) and the [KV Index](/docs/concepts/routing/kv-index). The router does not estimate cache state from heuristics.
+- **Not KV-only.** Routing scores manifest-tier reuse alongside KV-tier reuse. A manifest match without KV is still valuable.
+
+## See also
+
+- [KV index](/docs/concepts/routing/kv-index) — the lookup the router consults
+- [Context manifests](/docs/concepts/context/context-manifests) — the input
+- [Renderer versions](/docs/concepts/context/renderer-versions) — fields that act as hard filters
+- [Policy scopes](/docs/concepts/policy/policy-scopes) — `context_share_scope` and `data_boundary` filters
+- [Resume flow](/docs/concepts/recovery/resume-flow) — the consumer of `resume_feasible`
+- [Placement hints](/docs/concepts/routing/placement-hints) — runtime-supplied preferences
+- [`POST /v1/ks/routing/plan`](/docs/api/cluster/routing-plan)

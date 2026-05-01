@@ -3,7 +3,7 @@ title: State events
 description: The kv_events stream — substrate KV cache lifecycle events covering store, access, partial match, demote, promote, restore, transfer, evict, and invalidate transitions on the open inference substrate.
 ---
 
-The **state events** stream — `kv_events` — covers the lifecycle of reusable KV state on the open inference substrate (Layer 1). Every meaningful KV transition — a cache miss that stored new state, a hit that reused it, a tier movement, an eviction — emits one event. The [KV Index Service](/docs/concepts/kv-index) consumes this stream to maintain its near-real-time projection.
+The **state events** stream — `kv_events` — covers the lifecycle of reusable KV state on the open inference substrate (Layer 1). Every meaningful KV transition — a cache miss that stored new state, a hit that reused it, a tier movement, an eviction — emits one event. The [KV Index Service](/docs/concepts/routing/kv-index) consumes this stream to maintain its near-real-time projection.
 
 Subjects: `kv.state.*`. Persisted in the **`kv_events` JetStream stream** — operationally separate from the `execution_events` stream because substrate volume is high and retention semantics differ. Consumed via [`GET /v1/ks/events/state`](/docs/api/events/state).
 
@@ -137,7 +137,7 @@ A failed restore replaces `outcome` with `failed` and carries `error.code` and `
 
 The envelope's `node_id` is always populated for state events — every KV transition is local to one substrate node. The `model_id` is populated when the transition is model-bound (most events). `run_id` and `model_call_id` are populated only on `kv.state.accessed` events that fired during a specific request — eviction and tier movement carry no Run linkage because they happen independently of the request that originally stored the state.
 
-The `stable_prefix_id` and `stable_context_id` in payload tie events to the [manifest identity](/docs/concepts/context-manifests) that produced them. A consumer reconstructing "what happened to this manifest's cache" filters by these payload fields, not by `run_id`.
+The `stable_prefix_id` and `stable_context_id` in payload tie events to the [manifest identity](/docs/concepts/context/context-manifests) that produced them. A consumer reconstructing "what happened to this manifest's cache" filters by these payload fields, not by `run_id`.
 
 ## Why a separate stream
 
@@ -158,8 +158,8 @@ The separation is operational. Consumers query the same envelope and the same co
 
 ## See also
 
-- [KV cache](/docs/concepts/kv-cache) — the substrate mechanism
-- [KV index](/docs/concepts/kv-index) — the across-time projection consuming this stream
-- [Cached tokens](/docs/concepts/cached-tokens) — the per-call accounting that joins to `kv.state.accessed`
-- [Event envelope](/docs/concepts/event-envelope)
+- [KV cache](/docs/concepts/routing/kv-cache) — the substrate mechanism
+- [KV index](/docs/concepts/routing/kv-index) — the across-time projection consuming this stream
+- [Cached tokens](/docs/concepts/routing/cached-tokens) — the per-call accounting that joins to `kv.state.accessed`
+- [Event envelope](/docs/concepts/events/event-envelope)
 - [`GET /v1/ks/events/state`](/docs/api/events/state)

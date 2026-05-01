@@ -3,7 +3,7 @@ title: Routing events
 description: The routing stream — Cache-Aware Router decisions, fallback usage, and operator overrides covering route.planned, route.selected, route.fallback_used, and route.override_applied.
 ---
 
-The **routing events** stream covers placement decisions made by the [Cache-Aware Router](/docs/concepts/manifest-aware-routing). Every routing decision emits a sequence of events that record the candidates considered, the chosen route, and any fallback or override applied.
+The **routing events** stream covers placement decisions made by the [Cache-Aware Router](/docs/concepts/routing/manifest-aware-routing). Every routing decision emits a sequence of events that record the candidates considered, the chosen route, and any fallback or override applied.
 
 Subjects: `ks.route.*`. Persisted in the `execution_events` JetStream stream. Consumed via [`GET /v1/ks/events/routing`](/docs/api/events/routing).
 
@@ -114,15 +114,15 @@ The envelope carries `run_id`, `step_id`, `model_call_id`, `context_manifest_id`
 
 ## Common consumers
 
-- **Routing-quality dashboards.** Compare `expected_cached_tokens` from `selected` against realized [`cached_tokens`](/docs/concepts/cached-tokens) on `ks.model_call.completed`. Persistent divergence is a routing-quality signal.
+- **Routing-quality dashboards.** Compare `expected_cached_tokens` from `selected` against realized [`cached_tokens`](/docs/concepts/routing/cached-tokens) on `ks.model_call.completed`. Persistent divergence is a routing-quality signal.
 - **Run timeline.** Routing events sit between `ks.step.started` and `ks.model_call.started`, showing the placement step in the per-Run timeline.
 - **Operator audit.** `ks.route.override_applied` events are the audit trail for operator overrides — every override is logged with source and selected target.
 - **Fallback monitoring.** `ks.route.fallback_used` rate is a primary substrate-health signal.
 
 ## See also
 
-- [Manifest-aware routing](/docs/concepts/manifest-aware-routing) — the subsystem these events project
-- [KV index](/docs/concepts/kv-index) — the lookup feeding scorer inputs
-- [Placement hints](/docs/concepts/placement-hints) — runtime-supplied overrides
+- [Manifest-aware routing](/docs/concepts/routing/manifest-aware-routing) — the subsystem these events project
+- [KV index](/docs/concepts/routing/kv-index) — the lookup feeding scorer inputs
+- [Placement hints](/docs/concepts/routing/placement-hints) — runtime-supplied overrides
 - [State events](/docs/concepts/events/state) — the substrate-side counterpart that confirms predictions
 - [`GET /v1/ks/events/routing`](/docs/api/events/routing)

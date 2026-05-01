@@ -1,0 +1,121 @@
+---
+title: Pricing snapshots
+description: The `input_price_snapshot`, `output_price_snapshot`, and `discount_snapshot` columns on `usage_records` — frozen rates that make every row self-contained for audit (ADR-022).
+---
+
+A **pricing snapshot** is the trio of columns — `input_price_snapshot`, `output_price_snapshot`, `discount_snapshot` — that freeze the model-pricing rates onto every `usage_records` row at compute time. They make each row independently auditable: an auditor can re-derive `cost_cents` from the row alone, without consulting the `model_pricing` table.
+
+Pricing snapshots are how KovaServe handles forward-only re-pricing. Pricing changes do not rewrite history; new rates apply from the moment they land, and every prior row keeps the rate that produced its `cost_cents`. ADR-022 governs the contract.
+
+## The three columns
+
+| Column | Type | Source |
+|---|---|---|
+| `input_price_snapshot` | NUMERIC | `model_pricing.input_price_per_1k` at compute time. Rate per 1,000 input tokens. |
+| `output_price_snapshot` | NUMERIC | `model_pricing.output_price_per_1k` at compute time. Rate per 1,000 output tokens. |
+| `discount_snapshot` | FLOAT | `model_pricing.cached_discount_pct` at compute time. Fractional discount (`0.0` – `1.0`) applied to `cached_tokens`. |
+
+The snapshots are written at insert time on the same row as `cost_cents`, `gross_cost_cents`, and `cache_savings_cents`. Together they make the row self-contained: every input to the [cost formula](/docs/concepts/cost/cost-model#the-formula) is on the row.
+
+## Why snapshots, not pricing history
+
+The `model_pricing` table carries the **current** rate for each model. Pricing changes overwrite the row; there is no `effective_from` / `effective_to` window and no separate history table. The snapshot columns substitute for that history at the level that matters — the audit record.
+
+ADR-022 chose this shape over a pricing-history table for three reasons:
+
+1. **Self-contained rows.** An auditor reading a single `usage_records` row can re-derive `cost_cents` without joining to a pricing-history table or reasoning about time windows. JSONL exports (ADR-024) carry the snapshots inline so external auditors can verify cost from the export alone.
+2. **No time-windowed joins.** Aggregation queries over `usage_records` do not need `pricing_history JOIN ON time BETWEEN ...` — the snapshot is on the row and the query is a simple SUM.
+3. **Industry convention.** Stripe snapshots `unit_amount_decimal` per invoice line item; AWS Cost and Usage Reports snapshot `UnblendedRate` per line item. Every major billing system snapshots the rate on the usage record.
+
+## When snapshots are NULL
+
+The snapshots are nullable. NULL has a specific meaning:
+
+| Snapshot state | Meaning |
+|---|---|
+| All three populated | The row was costed against a `model_pricing` entry. `cost_status` is `"ok"`. |
+| All three NULL, post-snapshot | No `model_pricing` row existed for the model at compute time. `cost_status` is `"no-pricing"` and all three cost values are `0`. |
+
+The `"no-pricing"` case is distinct from a row whose call legitimately rounds to zero cents. A normally-priced row with sub-cent rounding has populated snapshots, `cost_status = "ok"`, and `cost_cents = 0.0000`. The snapshots are what tell the consumer apart.
+
+## Re-deriving cost from snapshots
+
+The pricing-snapshot contract is this property: given a populated row, the cost formula reproduces `cost_cents` exactly.
+
+```python
+gross = input_tokens  * input_price_snapshot  / 1000 * 100
+      + output_tokens * output_price_snapshot / 1000 * 100
+
+net_input = input_tokens - (cached_tokens * discount_snapshot)
+
+cost = net_input        * input_price_snapshot  / 1000 * 100
+     + output_tokens    * output_price_snapshot / 1000 * 100
+
+# After HALF_UP quantization to 4-decimal cents (ADR-025):
+assert quantized(gross) == row.gross_cost_cents
+assert quantized(cost)  == row.cost_cents
+assert row.gross_cost_cents - row.cost_cents == row.cache_savings_cents
+```
+
+Auditors run this re-derivation against exported JSONL rows. Any divergence is a bug in the pipeline, not a pricing question — the snapshot says exactly what rate produced the row.
+
+## Wire shape
+
+JSONL export (`GET /v1/ks/metering/export`) emits one line per `usage_records` row including the snapshots:
+
+```json
+{
+  "id": 14821,
+  "created_at": "2026-04-30T12:00:00Z",
+  "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+  "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+  "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+  "step_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T3",
+  "model_call_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T4",
+  "model": "qwen3-coder-30b",
+  "prompt_tokens": 4218,
+  "completion_tokens": 312,
+  "cached_tokens": 3640,
+  "cost_cents": "0.0420",
+  "gross_cost_cents": "0.0680",
+  "cache_savings_cents": "0.0260",
+  "cost_status": "ok",
+  "input_price_snapshot": "0.0010",
+  "output_price_snapshot": "0.0040",
+  "discount_snapshot": 0.9
+}
+```
+
+Decimal columns serialize as decimal-strings (ADR-025) so the recipient does not widen them to IEEE-754 floats and lose precision before re-deriving cost.
+
+## Ordering and immutability
+
+Snapshots are written at `INSERT` time on the same statement as the rest of the row. They are **never** updated:
+
+| Operation | Snapshot effect |
+|---|---|
+| Cost computation completes | Row inserted with snapshots populated. |
+| `model_pricing` updated later | Existing rows untouched; future rows see the new rate. |
+| Pricing entry deleted | Existing rows untouched. New calls without a pricing match insert NULL snapshots and `cost_status = "no-pricing"`. |
+| Re-pricing requested | Out of scope — the cost record is immutable. Re-pricing is handled at the contract level, not the row level. |
+
+This is why the snapshots survive: the row is an audit record, not a working value. Every consumer — exports, dashboards, dispute resolution, scoped queries — reads the rates from the row, not from the live pricing table.
+
+## Anonymous traffic
+
+The v1 anonymous path computes cost and writes snapshots on the same `usage_records` schema. An anonymous row has NULL `run_id`, `step_id`, `model_call_id`, but the snapshot columns are populated identically. JSONL export emits anonymous rows with the same field set; the only difference is the three execution-identity fields are missing.
+
+## What pricing snapshots are not
+
+- **Not the model_pricing table.** `model_pricing` is the live current-rate registry. The snapshots are the historical record of what was applied per row.
+- **Not per-tenant rates.** A tenant whose contract specifies a discounted rate has that rate written into the `model_pricing` row that applies to its calls; the snapshot mechanism is the same.
+- **Not editable.** Snapshot columns are immutable post-insert. Manual edits would break the audit identity that downstream systems depend on.
+- **Not present on pre-Slice 7.3 rows.** Rows that predate the snapshot contract were never re-snapshotted (forward-only backfill). Such rows are surfaced through the `cost_status` indicator.
+
+## See also
+
+- [Cost model](/docs/concepts/cost/cost-model) — the formula the snapshots feed
+- [`cached_tokens`](/docs/concepts/routing/cached-tokens) — the input-side variable that, with `discount_snapshot`, produces cache savings
+- [Cost per completed run](/docs/concepts/cost/cost-per-completed-run) — the run-level economic metric these rows roll up to
+- [`GET /v1/ks/metering/export`](/docs/api/metering/export) — JSONL export carrying snapshots inline
+- [`GET /v1/ks/metering/usage`](/docs/api/metering/usage)

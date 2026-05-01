@@ -1,0 +1,168 @@
+---
+title: Tool catalogs
+description: The ToolCatalog entity — hash-identified, immutable, semantically-versioned bundles of tool definitions referenced by `tool_catalog_id` so manifest reuse stays on the same cache breakpoint tier.
+---
+
+A **ToolCatalog** is a hash-identified, immutable, versioned bundle of tool definitions. Every catalog is referenced from manifests by `tool_catalog_id` so two requests sharing a catalog stay on the same cache breakpoint tier — the catalog's serialized definitions form the leftmost (tools) breakpoint in canonical [ContextManifest](/docs/concepts/context/context-manifests) ordering, and identical `tool_catalog_id`s produce identical breakpoint digests.
+
+ToolCatalogs are owned by the **Tool Catalog Registry**. The pattern is inspired by Gemini `cachedContents.tools` (immutable named resource) and extended with semantic versioning — KovaServe-novel.
+
+## Shape
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9TC01",
+  "name": "coding-tools",
+  "version": "2.4.0",
+  "content_hash": "sha256:b91d…",
+  "tool_definitions": [
+    {
+      "name": "run_tests",
+      "description": "...",
+      "input_schema": { "type": "object", "properties": { "...": "..." } },
+      "idempotent": true,
+      "risk_level": "low"
+    },
+    {
+      "name": "shell_exec",
+      "description": "...",
+      "input_schema": { "...": "..." },
+      "idempotent": false,
+      "risk_level": "high"
+    }
+  ],
+  "scope": {
+    "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+    "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1"
+  },
+  "created_at": "2026-04-30T12:00:00Z"
+}
+```
+
+| Field | Purpose |
+|---|---|
+| `id` | Bare 26-char ULID. **Hash-derived** — `id` is computed from `content_hash` so identical content produces an identical id. |
+| `name` | Logical name. Used for human-friendly references in dashboards and logs. |
+| `version` | Semantic version — `MAJOR.MINOR.PATCH`. |
+| `content_hash` | SHA-256 over the canonicalized `tool_definitions` array. The id is derived from this hash. |
+| `tool_definitions[]` | Ordered array of tool definitions. Order is part of the content hash. |
+| `scope` | Tenant/project ownership. `global`-scoped catalogs are admin-controlled. |
+
+## Immutability
+
+A catalog is **immutable** once written. Editing any field — even reordering definitions — produces a new catalog with a new `content_hash` and a new `id`. The Tool Catalog Registry rejects writes against an existing `id` other than idempotent re-registrations of identical content.
+
+This is what makes catalog-tier cache reuse work. If a catalog could mutate in place, two requests carrying the same `tool_catalog_id` could be sent against different definitions; the substrate would silently miss the cache. Hashing the id from the content makes the breakpoint digest deterministic by construction.
+
+## Semantic versioning
+
+`version` is a human-readable tag attached to the immutable id. The Registry maintains a separate **alias** table mapping `(name, version_spec)` to catalog ids:
+
+```
+coding-tools / 2.4.0  →  01J8X9Y2Z3K4M5N6P7Q8R9TC01
+coding-tools / 2.4    →  01J8X9Y2Z3K4M5N6P7Q8R9TC01   (latest 2.4.x)
+coding-tools / 2      →  01J8X9Y2Z3K4M5N6P7Q8R9TC01   (latest 2.x.x)
+coding-tools / latest →  01J8X9Y2Z3K4M5N6P7Q8R9TC01
+```
+
+Requests can reference a catalog either by id (immutable, cache-stable) or by `(name, version_spec)` which the gateway resolves to an id at request time. Resolving by version spec produces the same `tool_catalog_id` only as long as no newer matching catalog has been registered — the moment `coding-tools/2.4.1` is registered, the spec `coding-tools/2.4` resolves to the new id and cache reuse moves with it.
+
+For high-cache-reuse workloads, reference catalogs by id, not by version spec.
+
+## Reference on the inference path
+
+```json
+{
+  "kovaserve": {
+    "tool_catalog_id": "01J8X9Y2Z3K4M5N6P7Q8R9TC01"
+  }
+}
+```
+
+GCM v2 fetches the catalog's `tool_definitions` and emits a single `tool_definitions` [ContextSegment](/docs/concepts/context/context-segments) at the tools breakpoint. The segment's digest is a function of the catalog's `content_hash` — identical catalogs produce identical digests, which is what lets the [Cache-Aware Router](/docs/concepts/routing/manifest-aware-routing) route on tools-tier reuse.
+
+## Tool definition shape
+
+| Field | Purpose |
+|---|---|
+| `name` | Tool name. Unique within the catalog. |
+| `description` | Human-readable description for the model. |
+| `input_schema` | JSON Schema for the tool's inputs. |
+| `idempotent` | Whether re-invocation with the same inputs is safe. Drives [retry](/docs/concepts/recovery/retries) eligibility. |
+| `risk_level` | `low` / `medium` / `high`. Hint to [Tool Context Governance](/docs/concepts/tools/tool-governance) for policy decisions. |
+| `cache_disposition` | Default [ToolContextDisposition](/docs/concepts/tools/tool-context-disposition) for outputs of this tool — `inline_full` / `inline_preview` / `summary_required` / `artifact_ref` / `drop` / `blocked`. The policy may override. |
+
+`name` ordering inside `tool_definitions[]` matters: the ordering is part of `content_hash`, so two catalogs with identical tools in different orders are different rows.
+
+## Registering a catalog
+
+```http
+POST /v1/ks/tool-catalogs
+Authorization: Bearer ks_...
+Content-Type: application/json
+
+{
+  "name": "coding-tools",
+  "version": "2.4.0",
+  "tool_definitions": [
+    { "name": "run_tests", "description": "...", "input_schema": {}, "idempotent": true, "risk_level": "low" },
+    { "name": "shell_exec", "description": "...", "input_schema": {}, "idempotent": false, "risk_level": "high" }
+  ]
+}
+```
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9TC01",
+  "name": "coding-tools",
+  "version": "2.4.0",
+  "content_hash": "sha256:b91d…",
+  "created_at": "2026-04-30T12:00:00Z"
+}
+```
+
+Re-registering identical content returns the existing id (idempotent). Registering a `(name, version)` pair that already exists with different content rejects with `409 Conflict` — versions are immutable.
+
+## Reading a catalog
+
+```http
+GET /v1/ks/tool-catalogs/01J8X9Y2Z3K4M5N6P7Q8R9TC01
+Authorization: Bearer ks_...
+```
+
+Catalogs are queryable by id, by `(name, version_spec)`, or by `name` alone (returns the latest version under semantic-version resolution).
+
+## Invalidation
+
+A catalog is never mutated in place; "invalidating" a catalog means the runtime starts referencing a different `tool_catalog_id`. The old catalog row remains addressable for any Checkpoint, manifest, or Run that references it.
+
+When a runtime rolls forward, the gateway emits a `ks.context.tool_catalog.invalidated` event for the previous id — informational, recording that no new requests reference the old id within the project. The event is not a delete signal; the row persists.
+
+## Scope
+
+Catalogs are tenant- and project-scoped. `global`-scoped catalogs (admin-controlled) ship with deployments and are visible to every tenant — useful for KovaServe-managed reference tools.
+
+Cross-tenant references return `404 Not Found`.
+
+## Events
+
+| Event | Emitted on |
+|---|---|
+| `ks.context.tool_catalog.registered` | First registration of a `content_hash`. |
+| `ks.context.tool_catalog.invalidated` | A project's last reference to an id rolls forward. |
+
+## What ToolCatalogs are not
+
+- **Not the tool implementation.** Catalogs are tool *definitions* — what the model sees. Implementation lives in the runtime's tool gateway (Layer 3) or the customer's own tool surface.
+- **Not free-form bundles.** Every definition has a closed schema. New definition fields require ADR-driven extension.
+- **Not mutable.** Editing produces a new catalog. The old one persists.
+- **Not policy.** [Tool Context Governance](/docs/concepts/tools/tool-governance) decides per-call whether a definition or output may enter context. Catalog `cache_disposition` is a default; policy overrides.
+
+## See also
+
+- [Tool context disposition](/docs/concepts/tools/tool-context-disposition) — the per-call decision applied to definitions and outputs
+- [Tool governance](/docs/concepts/tools/tool-governance) — the policy enforcement model
+- [Context manifests](/docs/concepts/context/context-manifests) — the consumer of `tool_catalog_id` on the tools breakpoint
+- [Context segments](/docs/concepts/context/context-segments) — `tool_definitions` as a `context_type`
+- [Retries](/docs/concepts/recovery/retries) — how `idempotent` drives in-place retry eligibility
+- [`POST /v1/ks/tool-catalogs`](/docs/api/tools/catalogs/create) · [`GET /v1/ks/tool-catalogs/{id}`](/docs/api/tools/catalogs/get)
