@@ -55,7 +55,7 @@ The point of an OpsRun is *not* automation for its own sake. It is **governed au
 | Runtime | The KovaServe managed runtime — workers, sandboxes, tool gateway, runtime-native timeline. |
 | Workspace | Optional. Many OpsRuns operate against external observability surfaces and do not need a writable filesystem; runbook-execution OpsRuns may bind a workspace to a runbook repository. |
 | Sandbox profile | Container image with diagnostic toolchains (curl, jq, kubectl in read-only mode, log-fetcher clients). Network policy targets the customer's observability and asset surfaces only — no general internet egress. |
-| Tool catalog | Log query, metric query, alert/ticket lookup, asset inspector, runbook reader, structured diagnostics, and a separate **remediation** catalog whose tools require policy approval per invocation. |
+| Tools | Log query, metric query, alert/ticket lookup, asset inspector, runbook reader, structured diagnostics, and a separate **remediation** set whose tools require policy approval per invocation. |
 | Default budget | Bounded cost cap, bounded step cap, time cap appropriate for an investigation window — typically tighter than CodeRuns. |
 | Default context budget | Tuned for log-heavy contexts: aggressive offload of raw log payloads to artifact storage, summary-required disposition on bulky tool outputs, compact-required threshold to keep the working context lean across long investigations. |
 | Default policy scope | Tool policy that defaults remediation tools to *blocked* unless an explicit policy decision allows them. Data boundary set to the customer's observability region. Audit retention extended for compliance. |
@@ -121,6 +121,5 @@ OpsRuns is designed for environments where *every action must be explainable*. T
 - [Managed agents](/docs/concepts/managed-agents) — the SKU model
 - [CodeRuns](/docs/concepts/managed-agents/coderuns) · [DocRuns](/docs/concepts/managed-agents/docruns) — the other reference SKUs
 - [KovaServe runtime mode](/docs/concepts/deployment/managed-runtime) — the runtime OpsRuns runs on
-- [Tool governance](/docs/concepts/tools/tool-governance) · [Tool context disposition](/docs/concepts/tools/tool-context-disposition) — the governance the SKU enforces
 - [Cost per completed run](/docs/concepts/cost/cost-per-completed-run) — the unit of value
 - [Private deployment](/docs/concepts/deployment/private-deployment) — the topology most OpsRuns deployments choose

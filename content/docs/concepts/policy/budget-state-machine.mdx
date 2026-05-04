@@ -35,7 +35,7 @@ Consumption below the warning threshold. Every Step admission returns `ALLOW`. `
 
 ### `WARNING`
 
-Consumption is at or above the warning threshold (`warning_threshold_pct`, default `80`) on at least one dimension but no dimension is over its hard limit. Step admissions still return `ALLOW`; the runtime sees no behavior change.
+Consumption is at or above the warning threshold (`warning_threshold`, default `0.7`) on at least one dimension but no dimension is over its hard limit. Step admissions still return `ALLOW`; the runtime sees no behavior change.
 
 `WARNING` exists so dashboards, runtime callbacks, and operator alerts have a structured signal that a Run is approaching its limit. It emits `ks.budget.warning` events on entry. The state is reversible — if forecast updates lower projected consumption, the Budget can drop back to `ACTIVE` (e.g. after a successful compaction reduces the cost trajectory).
 
@@ -55,7 +55,7 @@ Consumption has crossed a soft limit on a non-strict dimension; the runtime is p
 
 Consumption has hit a strict limit on at least one dimension. Subsequent Step admissions return `ALLOW: false` with `error.code = "budget_exceeded"`. In-flight ModelCalls are not cancelled; only new Step admissions are rejected.
 
-`HARD_STOP` is enforced uniformly — retries do not exempt a Run from the gate. A Run that exhausts its `step_count` budget on retries cannot continue retrying.
+`HARD_STOP` is enforced uniformly — retries do not exempt a Run from the gate. A Run that exhausts its `step_limit` budget on retries cannot continue retrying.
 
 The Run typically transitions to `FAILED` shortly after the Budget enters `HARD_STOP`, but the two FSMs are independent. A Run that lands in `HARD_STOP` may still be `CANCELED` (operator action) or `COMPLETED` (the in-flight Step was the last one, finishing cleanly before the gate took effect).
 
@@ -79,9 +79,9 @@ Every Step admission updates consumed counters on every Budget dimension. The up
 
 | Update outcome | Possible state transition |
 |---|---|
-| Counters cross `warning_threshold_pct` on any dimension | `ACTIVE → WARNING` |
+| Counters cross `warning_threshold` on any dimension | `ACTIVE → WARNING` |
 | Counters cross any hard limit | `* → HARD_STOP` (skipping intermediate states if necessary) |
-| Counters recede below `warning_threshold_pct` (forecast revision) | `WARNING → ACTIVE` |
+| Counters recede below `warning_threshold` (forecast revision) | `WARNING → ACTIVE` |
 | Counters cross a soft-limit on a degrade-eligible dimension | `WARNING → DEGRADED_ALLOWED` (when policy permits) |
 
 ### Admission decisions
@@ -101,7 +101,7 @@ When the [Run state machine](/docs/concepts/run-hierarchy/run-state-machine) rea
 
 ## Forecast updates
 
-The Metering Layer maintains a forecast of remaining consumption for each dimension. Forecasts are recomputed after each Step admission and emitted as `ks.budget.forecast_updated` events. Forecasts can drive `WARNING` early — a Run whose projected `cost_cents_consumed` will exceed the limit before completion enters `WARNING` even when current counters are still below the threshold.
+The Metering Layer maintains a forecast of remaining consumption for each dimension. Forecasts are recomputed after each Step admission and emitted as `ks.budget.forecast_updated` events. Forecasts can drive `WARNING` early — a Run whose projected `cost_used_cents` will exceed the limit before completion enters `WARNING` even when current counters are still below the threshold.
 
 Forecasts never cause `HARD_STOP` directly; only realized consumption does. This is intentional — the gate enforces actual spend, not projected spend.
 

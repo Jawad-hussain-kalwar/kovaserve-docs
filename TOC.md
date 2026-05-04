@@ -119,7 +119,7 @@ Living roadmap for `docs.kovaserve.com`. Source of structure for `content/docs/`
 ### Tenancy — Blueprint §5.14
 
 - [x] `concepts/tenancy/index.mdx` — overview of the hierarchy
-- [x] `concepts/tenancy/organizations.mdx`
+- [x] `concepts/tenancy/tenants.mdx`
 - [x] `concepts/tenancy/projects.mdx`
 - [x] `concepts/tenancy/environments.mdx`
 - [x] `concepts/tenancy/keys.mdx` — keys and key scopes
@@ -309,7 +309,7 @@ Living roadmap for `docs.kovaserve.com`. Source of structure for `content/docs/`
 
 ### Tenancy
 
-- [ ] `api/organizations/get.mdx`
+- [ ] `api/tenants/get.mdx`
 - [ ] `api/projects/create.mdx`
 - [ ] `api/projects/get.mdx`
 - [ ] `api/projects/list.mdx`
@@ -555,7 +555,7 @@ Tracked for context — outside the product surface.
 
 1. **Wire format is canon.** Every API page reflects the canonical wire shape. Do not invent fields outside the blueprint.
 2. **IDs are bare 26-char Crockford ULIDs**, no prefixes, **except** Session IDs which are `ses_<24hex>`.
-3. **Tenant nouns** in user-facing copy: Organization → Project → Environment → Key. "Tenant" stays internal.
+3. **Tenant nouns** in reference/concept copy: Tenant → Project → Environment → Deployment.
 4. **"Run" wins** over thread / conversation / task / workflow / job in user-facing copy.
 5. **Code examples**: tabbed by language (curl + Python minimum). CI-test against a real cluster.
 6. **No vendor lock-in references** — no Stainless / Speakeasy / Fern / Mintlify / Algolia.

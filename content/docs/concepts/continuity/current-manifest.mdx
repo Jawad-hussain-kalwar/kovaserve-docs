@@ -45,7 +45,7 @@ Every Session also carries a bounded history of prior manifest pointers — the 
 | `manifest_history` | Ordered array of bare ULIDs, most recent first, length ≤ `k`. |
 | `k` | Project-level configuration. The default retains enough manifests to support resume planning across the most common Session lengths without unbounded growth. |
 
-The history is bounded by count, not by time. Manifests evicted from the Session-level history remain queryable in the [Context Manifest Registry](/docs/concepts/context/context-manifests) for as long as their tenant retention policy allows — eviction from the Session pointer is not a deletion.
+The history is bounded by count, not by time. Manifests evicted from the Session-level history remain queryable in the [Context Manifest Registry](/docs/concepts/context/context-manifests) for as long as their Tenant retention policy allows — eviction from the Session pointer is not a deletion.
 
 ## What survives across Run binds
 

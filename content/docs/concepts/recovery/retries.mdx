@@ -9,17 +9,15 @@ The contract: **only safe and idempotent Steps retry in place.** Anything else i
 
 ## Retryability by Step type
 
-The 19-value [StepType](/docs/concepts/run-hierarchy/step-types) enum partitions cleanly along the retry axis. The runtime is responsible for knowing which classes are safe; the control plane records the choice on the Step row for audit.
+The canonical [StepType](/docs/concepts/run-hierarchy/step-types) enum partitions cleanly along the retry axis. The runtime is responsible for knowing which classes are safe; the control plane records the choice on the Step row for audit.
 
 | Class | Step types | Default retryability |
 |---|---|---|
 | Pure model interaction | `MODEL_CALL`, `THINK`, `OBSERVE` | Retry in place. The substrate is idempotent at the request level; re-issuing a `MODEL_CALL` produces a fresh ModelCall with a fresh `request_id`. |
-| Read-only side effects | `FILE_READ`, `MEMORY_READ` | Retry in place. Multiple reads of the same target are safe. |
+| Read-only side effects | `FILE_READ` | Retry in place. Multiple reads of the same target are safe. |
 | Pure planning | `TOOL_PLAN` | Retry in place. Planning produces output; it does not commit. |
-| Write-side tool execution | `TOOL_EXECUTE`, `FILE_WRITE`, `PROCESS_START` | Retry only if the runtime has marked the tool as idempotent (via `tool_definition.idempotent: true` in the [ToolCatalog](/docs/concepts/tools/tool-catalogs)). Otherwise: escalate to resume from a prior Checkpoint, or fail. |
-| Memory write | `MEMORY_WRITE` | Retry in place. Memory writes are versioned and last-write-wins under the same `(scope, namespace, key)`. |
+| Write-side tool execution | `TOOL_EXECUTE`, `FILE_WRITE`, `PROCESS_START` | Retry only if the runtime has marked the tool as idempotent (via `tool_definition.idempotent: true`). Otherwise: escalate to resume from a prior Checkpoint, or fail. |
 | Compaction | `COMPACT` | Retry in place. Compaction is idempotent at the lineage level — re-running produces a fresh `CompactionRecord` and the runtime can choose which to keep. |
-| Sub-run lifecycle | `SUB_RUN_DISPATCH`, `SUB_RUN_JOIN` | Retry in place at the join (`SUB_RUN_JOIN` reads the child's already-attached summary). Dispatch is retryable only when the child Run was never created — the control plane returns `409 Conflict` on a duplicate dispatch with the same idempotency key. |
 | Lifecycle markers | `CHECKPOINT`, `PAUSE`, `RESUME`, `BRANCH`, `COMPLETE`, `FAIL` | Not retried. These are explicit lifecycle transitions; their failure path is to back out the lifecycle change, not to repeat it. |
 
 ## Step state during a retry
@@ -48,23 +46,47 @@ The Step's parent [Run](/docs/concepts/run-hierarchy/runs) does not change state
 
 ## Idempotency keys
 
-For Step types that interact with external systems (`TOOL_EXECUTE`, `FILE_WRITE`, `PROCESS_START`, `SUB_RUN_DISPATCH`, `MEMORY_WRITE`), the runtime supplies an `idempotency_key`. The control plane records it on the Step row and forwards it to the executing surface.
+For Step types that interact with external systems (`TOOL_EXECUTE`, `FILE_WRITE`, `PROCESS_START`), the runtime supplies an `idempotency_key`. The control plane records it on the Step row and forwards it to the executing surface.
 
 | Surface | Key behavior |
 |---|---|
 | Tool gateway | The same key returns the cached prior result if one exists; otherwise executes and caches. |
-| Memory Store | The same `(scope, namespace, key, idempotency_key)` is a no-op on a duplicate write. |
-| Sub-run dispatch | Duplicate dispatch returns the prior child Run's id with `409 Conflict` and `error.code = "duplicate_dispatch"`. |
 
 A retry that supplies the **same** idempotency key as the failed predecessor receives the same answer the predecessor would have if it had succeeded. A retry that supplies a **fresh** key re-executes from scratch. The runtime chooses based on whether it wants to re-attempt the original operation or replace it.
 
+## The retry tier ladder
+
+Failures escalate through three ordered tiers. The runtime walks them in order — each tier is tried only if the prior tier is not applicable or has been exhausted.
+
+| Tier | Mechanism | Applies when |
+|---|---|---|
+| 1. Retry in place | A new Step row with `attempt_number + 1` inside the same Run. | The failure is transient and the Step is safe / idempotent (or carries an idempotency key). |
+| 2. Resume from Checkpoint | A new Run with `restored_from` pointing at the most recent Checkpoint preceding the failure. See [resume flow](/docs/concepts/recovery/resume-flow). | Side effects landed partially, preconditions are no longer valid, or in-place retry has been exhausted. |
+| 3. Branch from Checkpoint | A new Run with `restored_from` and `branch_from` set, on an independent trajectory. See [branch flow](/docs/concepts/recovery/branch-flow). | Resume does not clear the failure — the runtime forks to try a different approach from a known-good anchor. |
+
+The ladder is the canonical failure-recovery contract for Layer 3 runtimes. Runtime [tool invocations](/docs/concepts/runtime/tool-invocations) reference this ladder when a non-idempotent tool fails; runtime [execution semantics](/docs/concepts/runtime/runtime-execution-semantics) defer to it for non-retryable failure classes.
+
+## Failure classes that bypass tier 1
+
+Some failure classes never retry in place — they jump straight to tier 2 (resume) or tier 3 (branch).
+
+| Failure class | Tier 1 outcome | Next tier |
+|---|---|---|
+| `MODEL_ERROR` (transient substrate failure) | Retry in place. | n/a — handled at tier 1. |
+| `CONTEXT_BUDGET_HARD_STOP` | Skip — preconditions are no longer valid. | Tier 2: resume after compaction or offload restores admission. |
+| `POLICY_DENIED` after a policy roll-forward | Skip — the ACL changed. | Terminal `FAILED` unless the policy is rolled back. |
+| `TOOL_BLOCKED` (a [ToolInvocation](/docs/concepts/runtime/tool-invocations) blocked by `tool_policy_ref` or a disposition rule) | Skip — re-issuing the same call will block again. | Terminal `FAILED`, or tier 3 branch if the runtime can re-plan with a different tool. |
+| `SANDBOX_LOST` (the [sandbox](/docs/concepts/runtime/sandboxes) was reaped between Steps) | Skip — the file system mutation log is anchored to a sandbox that no longer exists. | Tier 2: resume from the most recent Checkpoint in a fresh sandbox. |
+
+The runtime classifies each failure into one of these classes and the ladder picks the right entry tier automatically.
+
 ## When retry is not safe
 
-The runtime escalates to a [resume](/docs/concepts/recovery/resume-flow) from the most recent Checkpoint when:
+The runtime escalates to tier 2 ([resume](/docs/concepts/recovery/resume-flow) from the most recent Checkpoint) when:
 
 - The failed Step is non-idempotent and no idempotency key was supplied at the gateway.
 - The failed Step's side effects landed partially (e.g. a `FILE_WRITE` that completed half the bytes before crashing). The Checkpoint immediately preceding the failure is the safe re-entry point.
-- The failure cause indicates the Step's preconditions are no longer valid (a `MODEL_CALL` that failed with `ContextBudget HARD_STOP`, a `TOOL_EXECUTE` that failed with `policy_denied` after a policy roll-forward).
+- The failure cause indicates the Step's preconditions are no longer valid (a `MODEL_CALL` that failed with `ContextBudget HARD_STOP`, a `TOOL_EXECUTE` that failed with `TOOL_BLOCKED` after a policy roll-forward).
 
 Resume from a Checkpoint creates a new Run with `restored_from` pointing at the Checkpoint, not a new Step within the same Run. The decision boundary is sharp: if a fresh Step row in the same Run is not enough, the next escalation tier is a fresh Run with a Checkpoint anchor.
 
@@ -84,6 +106,6 @@ Retries count against the Run-level [Budget](/docs/concepts/policy/budgets) like
 
 - [Steps](/docs/concepts/run-hierarchy/steps) — the entity each retry attempt produces
 - [Step state machine](/docs/concepts/run-hierarchy/step-state-machine) — the FSM that retries operate on
-- [Step types](/docs/concepts/run-hierarchy/step-types) — the canonical 19-value enum and its retry classes
+- [Step types](/docs/concepts/run-hierarchy/step-types) — the canonical enum and its retry classes
 - [Resume flow](/docs/concepts/recovery/resume-flow) — the escalation tier above retry
 - [Budgets](/docs/concepts/policy/budgets) — Run-level limits that bound retry count

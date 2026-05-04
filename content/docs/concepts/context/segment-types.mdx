@@ -1,98 +1,66 @@
 ---
 title: Segment types
-description: The canonical `context_type` enum (ADR-003) — every value, its canonical position in a manifest, and how GCM v2 orders segments deterministically.
+description: The canonical `context_type` enum (ADR-003) — the six values, their canonical positions, and how they map onto the four storage tiers GCM v2 uses for prefix breakpoints.
 ---
 
-The `context_type` field on every [ContextSegment](/docs/concepts/context/context-segments) names the segment's **canonical position** in a [ContextManifest](/docs/concepts/context/context-manifests). The set is closed and defined by ADR-003. The order is deterministic and renderer-invariant: two assemblies that consume the same input set produce the same segment ordering, which is what makes the manifest's `stable_context_id` stable.
+The `context_type` field on every [ContextSegment](/docs/concepts/context/context-segments) names the segment's **canonical position** in a [ContextManifest](/docs/concepts/context/context-manifests). The set is closed and defined by ADR-003 — there are exactly six values, in a fixed canonical order. The order is deterministic and renderer-invariant: two assemblies that consume the same input set produce the same segment ordering, which is what makes the manifest's `stable_context_id` stable.
 
-Runtimes provide *content*; GCM owns *order*. Runtimes do not influence the canonical position assigned to a segment.
+Runtimes provide *content*; GCM owns *position*. Runtimes do not influence the canonical position assigned to a segment.
 
-## The canonical order
+## The six canonical types
 
 ```
-[ tools ][ system ][ history-prefix ][ summary ][ active ]
-
-  tool_definitions
-  ▼
-  system_prompt
-  ▼
-  system_memory
-  ▼
-  history
-  ▼
-  history_summary
-  ▼
-  tool_output
-  ▼
-  user_message
-  ▼
-  assistant_draft
-  ▼
-  generation_target
+Position 1: system_prompt        ▸ never changes (model instructions)
+Position 2: persistent_context   ▸ rarely changes (RAG docs, tool definitions, activation handles)
+Position 3: summary              ▸ changes on compaction (compacted older history)
+Position 4: session_history      ▸ grows each turn (recent conversation)
+Position 5: agent_state          ▸ changes each agent step (scratchpad, tool plan)
+Position 6: tool_result          ▸ changes every request (latest tool output)
 ```
 
-The five high-level breakpoints (tools / system / history-prefix / summary / active) are the cache-tier boundaries the [Cache-Aware Router](/docs/concepts/routing/manifest-aware-routing) and Anthropic-style prompt cache hints both consume. The fine-grained `context_type` values within each breakpoint sit in the order shown above and are listed in detail below.
+| `context_type` | Carries | Volatility | `memory_class` (typical) |
+|---|---|---|---|
+| `system_prompt` | The system prompt the runtime supplied. | Stable. | `tenant` or `project`. |
+| `persistent_context` | Runtime-supplied long-lived material — RAG documents, tool definitions, persistent instructions, [StateHandle](/docs/concepts/recovery/state-handles) references. | Stable. | `tenant`, `project`, or `global`. |
+| `summary` | Output of compaction. Replaces a span of older `session_history` or `tool_result` segments. Always carries a `compaction_record_id`. | Changes on compaction events. | `session`. |
+| `session_history` | Verbatim turn history from the bound [Session](/docs/concepts/continuity/sessions), back to the most recent compaction point. | Grows each turn. | `session`. |
+| `agent_state` | The runtime's per-step state — scratchpad, planner output, tool plan, current draft. | Changes each agent step. | `ephemeral` or `session`. |
+| `tool_result` | A tool result that arrived since the last summarization point and is still inline. Large results are offloaded to a [ContextArtifact](/docs/concepts/context/context-artifacts) and the segment carries a preview. | Changes every request. | `session`. |
 
-## The enum
+## Stable prefix versus volatile tail
 
-### Tools breakpoint
+```
+[ stable prefix ─────────────────── ][ volatile tail ──────────────────────────── ]
+  system_prompt  persistent_context    summary  session_history  agent_state  tool_result
+```
 
-| `context_type` | Carries | `memory_scope` (typical) |
+Positions 1–2 form the **stable prefix** — if those segments have not changed, the substrate's KV cache is reusable. The legacy `stable_prefix_id` is computed over exactly this range (SHA-256 of the rendered token sequence for `system_prompt + persistent_context`). Positions 3–6 are **volatile** — expected to change call-to-call and appended after the cached prefix.
+
+This is why `summary` sits at position 3, not folded into `persistent_context`: a compaction event changes the summary, and including it in the stable prefix would invalidate KV cache on every compression.
+
+## The four storage tiers
+
+GCM v2's manifest table groups the six `context_type` values into **four prefix-tier buckets** so the [Cache-Aware Router](/docs/concepts/routing/manifest-aware-routing) and Anthropic-style prompt cache hints can find their reuse boundary on the same data structure:
+
+| Tier ordinal | Tier name | `context_type` values it carries |
 |---|---|---|
-| `tool_definitions` | The serialized tool definitions from the bound [ToolCatalog](/docs/concepts/tools/tool-catalogs). | `tenant` |
-| `tool_use` | A model-emitted tool call from a prior turn that is being replayed for context. | `session` |
+| `0` | `tools` | `persistent_context` segments whose content carries tool definitions. |
+| `1` | `system` | `system_prompt`. |
+| `2` | `history_prefix` | `session_history`. |
+| `3` | `summary` | `summary`. |
 
-`tool_definitions` is a single segment per manifest when a `tool_catalog_id` is bound, with content equal to the catalog's definitions in catalog order. Hash-stable across calls that share the same `tool_catalog_id` — reuse at this breakpoint is high.
-
-### System breakpoint
-
-| `context_type` | Carries | `memory_scope` (typical) |
-|---|---|---|
-| `system_prompt` | The system prompt the runtime supplied. | `tenant` or `project` |
-| `system_memory` | [Memory Store](/docs/concepts/memory/memory-store) entries injected at system scope (e.g. tenant policies, persistent instructions). | `tenant`, `global` |
-
-`system_memory` is populated when the request carries `memory_class_hints` selecting tenant- or global-scope entries with `position: system`.
-
-### History-prefix breakpoint
-
-| `context_type` | Carries | `memory_scope` (typical) |
-|---|---|---|
-| `history` | Verbatim turn history from the bound [Session](/docs/concepts/continuity/sessions), back to the most recent compaction point. | `session` |
-
-`history` is one or more segments, each typically a single turn. A long Session's history is broken into segments at turn boundaries so compaction can target precise spans.
-
-### Summary breakpoint
-
-| `context_type` | Carries | `memory_scope` (typical) |
-|---|---|---|
-| `history_summary` | Output of `summarize_history` compaction. Replaces a span of `history` segments that have been compacted away. | `session` |
-| `tool_output_summary` | Output of `summarize_tool_output` compaction. References the summarized tool result via `compaction_record_id`. | `session` |
-| `subrun_summary` | The summary handed off from a child Run via `POST /v1/ks/runs/{child_id}/summary`. References the child's transcript artifact. | `session` |
-
-Summary segments **always** carry `compaction_record_id` (or, for `subrun_summary`, the equivalent lineage to the child's summary registration). The Compaction Lineage Service rejects any summary segment without lineage.
-
-### Active breakpoint
-
-| `context_type` | Carries | `memory_scope` (typical) |
-|---|---|---|
-| `tool_output` | A tool result that arrived since the last summarization point and is still inline. | `session` |
-| `user_message` | The current user input on this call. | `ephemeral` |
-| `assistant_draft` | A partial assistant message the runtime is asking the model to continue. | `ephemeral` |
-| `generation_target` | The output slot — empty on input, populated on response. | `ephemeral` |
-
-`tool_output` is typically several turns long (the most recent tool calls); older `tool_output` segments are compacted away into `tool_output_summary`. `user_message`, `assistant_draft`, and `generation_target` are always at the end of the manifest.
+The tier ordinal lives on the `context_manifest_segments` join row alongside the segment's `ordinal`. The volatile tail (`agent_state`, `tool_result`) is not bucketed into a stable tier — those segments are appended after the four-tier prefix and recomputed every call.
 
 ## Position is canonical, not chosen
 
 GCM v2 assigns `context_type` based on input shape:
 
 - A `messages` entry with `role: system` becomes `system_prompt`.
-- A `messages` entry with `role: tool` becomes `tool_output`.
-- A turn fetched from the Session Registry becomes `history`.
-- A Memory Store read at system position becomes `system_memory`.
-- A compaction output becomes `history_summary`, `tool_output_summary`, or `subrun_summary` depending on the source `method`.
-- The current request's last user message becomes `user_message`.
-- An empty assistant slot at the end becomes `generation_target`.
+- A runtime-supplied retrieval block, tool-definitions block, or [StateHandle](/docs/concepts/recovery/state-handles) reference becomes `persistent_context`.
+- A compaction output becomes `summary`.
+- A turn fetched from the [Session](/docs/concepts/continuity/sessions) Registry becomes `session_history`.
+- The runtime's per-step scratchpad, planner output, or current draft becomes `agent_state`.
+- A `messages` entry with `role: tool` becomes `tool_result`.
 
 Runtimes do not pass `context_type` directly; it is derived. This is what keeps the manifest's identity stable across runtimes that supply input in different shapes — every reasonable shape resolves to the same canonical typing.
 
@@ -100,15 +68,12 @@ Runtimes do not pass `context_type` directly; it is derived. This is what keeps 
 
 Within a `context_type` the order is also deterministic:
 
-- `tool_definitions` — single segment per manifest; tools listed in [ToolCatalog](/docs/concepts/tools/tool-catalogs) order.
-- `system_prompt` — single segment.
-- `system_memory` — multiple segments, ordered by `(memory_scope, namespace, key)` ascending.
-- `history` — turn order ascending.
-- `history_summary`, `tool_output_summary` — chronological, oldest first.
-- `subrun_summary` — `dispatched_at` of the child Run, oldest first.
-- `tool_output` — turn order ascending.
-- `user_message` — the call's own user message; single segment.
-- `assistant_draft`, `generation_target` — single segment each, in that order.
+- `system_prompt` — single segment per manifest.
+- `persistent_context` — multiple segments allowed; ordered by the runtime's supplied order, which GCM preserves as long as digests match across calls.
+- `summary` — chronological, oldest first. Each carries `compaction_record_id`.
+- `session_history` — turn order ascending. A long Session's history is broken into segments at turn boundaries so compaction can target precise spans.
+- `agent_state` — runtime-supplied order; typically a single segment per call.
+- `tool_result` — turn order ascending.
 
 The order is enforced by GCM v2's serialization step, not by clients. Clients that supply inputs out of order have them re-ordered on their behalf.
 
@@ -118,11 +83,8 @@ On the wire, segments serialize as `parts` (cross-vendor convergence — see [Co
 
 | `context_type` | `parts.type` |
 |---|---|
-| `system_prompt`, `system_memory`, `history`, `history_summary`, `tool_output_summary`, `subrun_summary`, `user_message`, `assistant_draft` | `text` |
-| `tool_definitions` | `tool_definitions` (one part containing the catalog definitions) |
-| `tool_use` | `tool_use` |
-| `tool_output` | `tool_result` |
-| `generation_target` | omitted on the wire — it is the response slot |
+| `system_prompt`, `persistent_context`, `summary`, `session_history`, `agent_state` | `text` |
+| `tool_result` | `tool_result` |
 
 A wire `parts` array can be re-ingested into segments by reading `context_type` (when carried explicitly) or by inferring from `parts.type` plus position.
 
@@ -133,15 +95,14 @@ A closed `context_type` enum is what makes manifest identity reproducible. If ru
 ## What `context_type` is not
 
 - **Not the wire type.** `parts.type` (`text`, `tool_use`, `tool_result`) is the wire shape; `context_type` is the canonical position. They are independent.
-- **Not memory scope.** `memory_scope` (`ephemeral` / `session` / `user` / `tenant` / `global`) is a separate axis. A `system_prompt` segment can be `tenant` scope; a `history` segment is `session` scope; the two fields move independently.
+- **Not memory class.** [`memory_class`](/docs/concepts/context/context-segments) (`ephemeral` / `session` / `user` / `tenant` / `global`) is a separate axis carrying retention intent. A `system_prompt` segment can be `tenant` class; a `session_history` segment is `session` class; the two fields move independently.
+- **Not the storage tier ordinal.** `context_type` is the typed position; the four-tier ordinal on `context_manifest_segments` is a bucketing of those types for prefix-cache reuse.
 - **Not a free-form tag.** The enum is closed.
 - **Not assigned by the runtime.** GCM v2 derives `context_type` from input shape; runtimes do not set it directly.
 
 ## See also
 
-- [Context segments](/docs/concepts/context/context-segments) — the entity carrying `context_type`
-- [Context manifests](/docs/concepts/context/context-manifests) — the parent that orders segments by canonical position
-- [Memory scopes](/docs/concepts/memory/memory-scopes) — the orthogonal classification carried alongside `context_type`
-- [Tool catalogs](/docs/concepts/tools/tool-catalogs) — the source of `tool_definitions` segments
-- [Compaction records](/docs/concepts/context/compaction-records) — the producer of summary `context_type`s
-- [Manifest-aware routing](/docs/concepts/routing/manifest-aware-routing) — the consumer of breakpoint digests
+- [Context segments](/docs/concepts/context/context-segments) — the entity carrying `context_type` and `memory_class`
+- [Context manifests](/docs/concepts/context/context-manifests) — the parent that orders segments by canonical position and tier
+- [Compaction records](/docs/concepts/context/compaction-records) — the producer of `summary` segments
+- [Manifest-aware routing](/docs/concepts/routing/manifest-aware-routing) — the consumer of tier digests

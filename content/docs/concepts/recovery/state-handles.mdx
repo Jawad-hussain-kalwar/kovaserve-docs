@@ -1,11 +1,11 @@
 ---
 title: State handles
-description: Typed references to reusable execution state — kv_prefix, context_manifest, checkpoint, artifact_bundle, memory_entry, runtime_state.
+description: Typed references to reusable execution state — kv_prefix, context_manifest, checkpoint, artifact_bundle, runtime_state.
 ---
 
-A **StateHandle** is a typed reference to reusable execution state. It generalizes the original "activation handle" concept so cross-Session reuse extends beyond raw KV cache prefixes to manifests, artifacts, memory entries, and runtime-local state.
+A **StateHandle** is a typed reference to reusable execution state. It generalizes the original "activation handle" concept so cross-Session reuse extends beyond raw KV cache prefixes to manifests, artifacts, and runtime-local state.
 
-StateHandles are the connective tissue between the entities that *produce* reusable state ([ContextManifest](/docs/concepts/context/context-manifests), [ContextArtifact](/docs/concepts/context/context-artifacts), KV cache exports, [MemoryEntry](/docs/concepts/memory/memory-entries), runtime workspace snapshots) and the entities that *consume* it ([Sessions](/docs/concepts/continuity/sessions), [ModelCalls](/docs/concepts/run-hierarchy/model-calls), [Checkpoints](/docs/concepts/recovery/checkpoints), parent Runs receiving sub-run summaries). The State Handle Registry is the system of record.
+StateHandles are the connective tissue between the entities that *produce* reusable state ([ContextManifest](/docs/concepts/context/context-manifests), [ContextArtifact](/docs/concepts/context/context-artifacts), KV cache exports, runtime workspace snapshots) and the entities that *consume* it ([Sessions](/docs/concepts/continuity/sessions), [ModelCalls](/docs/concepts/run-hierarchy/model-calls), [Checkpoints](/docs/concepts/recovery/checkpoints)). The State Handle Registry is the system of record.
 
 ## The discriminator
 
@@ -17,10 +17,9 @@ Every StateHandle carries a `type` discriminator that determines what the `ref` 
 | `context_manifest` | A frozen `ContextManifest` row. | Renderer version, model id, scope match. |
 | `checkpoint` | Another Checkpoint (composition or chained restore). | Target Checkpoint must be `VALIDATED` or `RESTORED`. |
 | `artifact_bundle` | A set of `ContextArtifact` rows. | Each artifact readable from object storage; hashes match. |
-| `memory_entry` | A row in the Memory Store at `user`, `tenant`, or `global` scope. | Scope match against current PolicyScope; not expired. |
 | `runtime_state` | Layer 3 runtime state (workspace snapshot, sandbox FS, process tree). | Sandbox image compatibility; workspace bind-mount layout. |
 
-The discriminator set is closed — these six types are the entire surface. New types are added by the State Handle Registry through an explicit migration; runtimes do not invent local subtypes.
+The discriminator set is closed — these five types are the entire surface. New types are added by the State Handle Registry through an explicit migration; runtimes do not invent local subtypes.
 
 ## Wire shape
 
@@ -82,9 +81,7 @@ The State Handle Registry returns the resolved target along with the validation 
 | Checkpoint capture | One `context_manifest`, plus zero or more `artifact_bundle`s, plus optional `runtime_state`. |
 | GCM v2 manifest assembly | One `context_manifest` per produced manifest. |
 | Context Artifact Store on artifact creation | One `artifact_bundle` for runs that retain artifacts at Session scope. |
-| Memory Store entry write | One `memory_entry` per durable scoped entry. |
 | Layer 3 workspace snapshot | One `runtime_state` per snapshot. |
-| Sub-run summary handoff | One `artifact_bundle` carrying the child's summary, attached to the parent's manifest. |
 
 ## Where handles are consumed
 
@@ -94,7 +91,6 @@ The State Handle Registry returns the resolved target along with the validation 
 | [Resume flow](/docs/concepts/recovery/resume-flow) | Validates each handle independently before restore; logical-context handles are required, KV is optional. |
 | [Cache-aware router](/docs/concepts/routing/manifest-aware-routing) | Reads `kv_prefix` and `context_manifest` handles when scoring candidate replicas. |
 | [Sessions](/docs/concepts/continuity/sessions) | Holds the active `kv_prefix` handle for the running ModelCall and references prior `context_manifest` handles via the [current manifest](/docs/concepts/continuity/current-manifest). |
-| Parent Run receiving a sub-run summary | Attaches the child's `artifact_bundle` summary handle to its next manifest. |
 
 ## Compatibility validation
 
@@ -103,9 +99,20 @@ Every consumer that resolves a handle revalidates compatibility against its own 
 - `kv_prefix` — model family, tokenizer fingerprint, residency tier, freshness; mismatches cause silent skip in favor of manifest replay.
 - `context_manifest` — renderer version, model id, scope; mismatches reject restore outright.
 - `artifact_bundle` — every contained artifact hash; mismatches reject the bundle.
-- `memory_entry` — `policy_scope.context_share_scope`; mismatches return `not_found` rather than `incompatible` to avoid leaking foreign-scope existence.
 
 The contract is uniform: a handle resolves cleanly, or it does not. There are no partial-success resolutions — partial or warmness signals are advisory metadata, not resolution states.
+
+## Sharing
+
+Each StateHandle carries a `sharing` flag that bounds which scopes may resolve it:
+
+| `sharing` | Resolution rule |
+|---|---|
+| `private` | Only the producing Run / Session / API key may resolve. Cross-session and cross-project requests return `404`. |
+| `shareable_within_project` | Any caller in the same `(tenant_id, project_id)` may resolve. Cross-project requests return `404`. |
+| `shareable_within_tenant` | Any caller in the same `tenant_id` may resolve, across projects. Cross-tenant requests return `404`. |
+
+Cross-tenant resolution is always `404` regardless of `sharing` — the tenant boundary is hard. A handle whose underlying state has been evicted resolves with `410 handle_expired`. Sharing is set at creation and may be promoted (narrower → broader) via `POST /v1/ks/handles/{id}?action=share`; demotion is not supported because consumers may already hold cached references.
 
 ## Lifetime
 

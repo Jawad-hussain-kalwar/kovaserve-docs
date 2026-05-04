@@ -54,15 +54,14 @@ The artifact pattern resolves the tension:
 
 ## How artifacts enter context
 
-Three pathways write artifacts:
+Several pathways write artifacts:
 
 | Producer | Pathway |
 |---|---|
-| Runtime tool execution | Runtime calls `POST /v1/ks/tools/results` after a tool runs; the result is registered as an artifact and a summary segment is added to the next manifest. |
+| Runtime upload | The runtime calls `POST /v1/ks/context/artifacts` directly (typically for tool outputs, retrieved documents, or large user-supplied material) and references the resulting `id` from a segment in its next request. |
 | Admission-driven offload | [ContextBudget admission](/docs/concepts/policy/admission) returns `OFFLOAD_REQUIRED` for an oversized inline segment; the segment is rewritten to reference a freshly written artifact. |
-| Layer 3 workspace snapshots | The runtime captures workspace state; snapshots become artifacts referenced from `runtime_state` [StateHandles](/docs/concepts/recovery/state-handles). |
-| Sub-run summary handoff | A child Run posts its summary via `POST /v1/ks/runs/{child_id}/summary`; the summary is registered as an artifact and attached to the parent's next manifest. |
-| Compaction | [CompactionRecord](/docs/concepts/context/compaction-records) writes pre- and post-compaction transcripts as artifacts so the lineage can be replayed. |
+| Layer 3 workspace snapshots | The runtime wedge captures workspace state; snapshots become artifacts referenced from `runtime_state` [StateHandles](/docs/concepts/recovery/state-handles). |
+| Compaction | A [CompactionRecord](/docs/concepts/context/compaction-records) optionally writes pre- and post-compaction transcripts as artifacts so the lineage can be replayed. |
 
 ## Versioning
 
@@ -133,7 +132,7 @@ The runtime then references `artifact_ref_id: "01J8X9Y2Z3K4M5N6P7Q8R9AR03"` from
 
 ## Scope and isolation
 
-Artifacts are owned by exactly one `(tenant_id, project_id)`. Cross-tenant access returns the same `404 Not Found` as a missing artifact — existence is not leaked across tenants. The `policy_scope.context_share_scope` further bounds reuse: an artifact written under a `project`-scoped policy cannot be referenced from a `tenant`-scoped manifest in another project, even within the same tenant.
+Artifacts are owned by exactly one `(tenant_id, project_id)`. Cross-tenant access returns the same `404 Not Found` as a missing artifact — existence is not leaked across Tenants. The `policy_scope.context_share_scope` further bounds reuse: an artifact written under a `project`-scoped policy cannot be referenced from a `tenant`-scoped manifest in another project, even within the same Tenant.
 
 ## Storage backends
 

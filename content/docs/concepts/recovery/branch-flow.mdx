@@ -61,7 +61,6 @@ The Canonical Execution Service writes a new Run row with:
 | `state` | `CREATED`, advancing to `READY` immediately. |
 | `branch_from` | Parent Run's `id`. |
 | `restored_from` | Source Checkpoint's `id`. |
-| `parent_run_id` | Inherited from parent **only if** the request explicitly opts in — by default a branch is its own root, not a sub-run. |
 | `session_id` | Parent's `session_id`, or the override session if provided. |
 | `policy_scope_ref` | Parent's `policy_scope_ref`, or a narrower scope if requested. |
 | `budget` | Parent's Budget shape (limits inherited, consumed-to-date reset to zero), or a narrower override. |
@@ -99,7 +98,6 @@ A terminal parent skips this step.
 | Budget shape | Yes (overridable downward). | Consumed counters: zero. |
 | ContextBudget shape | Yes (overridable downward). | Consumption: zero. |
 | PolicyScope | Yes (overridable narrower). | — |
-| ToolCatalog | Yes. | — |
 | Session binding | Default: parent's Session. Overridable. | — |
 | `current_manifest_id` on the bound Session | Set to the Checkpoint's manifest snapshot at branch time. | — |
 | Observability surface | New. The child has its own timeline; events are tagged to the child only. | All event counters reset. |

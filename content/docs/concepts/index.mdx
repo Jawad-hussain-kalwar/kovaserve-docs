@@ -1,16 +1,39 @@
 ---
 title: Concepts
-description: The canonical execution model — Run, Session, Step, ModelCall, Checkpoint, Budget, PolicyScope, StateHandle.
+description: The canonical execution model — Run, Session, Step, ModelCall, Checkpoint, Budget, PolicyScope, StateHandle, and the layer architecture they live in.
 ---
 
 KovaServe is a control plane for long-running AI execution. Its public surface — REST API, SDK, CLI, console — is a thin shell over a small set of canonical entities that mean the same thing in managed cloud and self-hosted deployments.
 
-This section defines those entities. Everything in the API and SDK references resolves back to terms introduced here.
+This section defines those entities, the three-layer architecture they live in, and the rules that govern how they compose.
+
+## The three-layer architecture
+
+```
+┌─ Layer 3 — KovaServe runtime (the wedge) ────────────────────────────┐
+│  Workers, sandboxes, tool invocations, workspaces, runtime artifacts │
+│  Coding / terminal / tool-heavy long-running agents.                 │
+└──────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼ canonical entities (Run, Step, ModelCall, ...)
+┌─ Layer 2 — KovaServe control plane (the licensed core) ──────────────┐
+│  Continuity, checkpoints, routing, policy, budgets, observability,   │
+│  tenancy, managed/private portability. The 20-subsystem control      │
+│  plane — see Layers reference for the full list.                     │
+└──────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼ execution mechanics, KV state lifecycle
+┌─ Layer 1 — Open inference substrate (vLLM-aligned) ──────────────────┐
+│  Model serving, KV cache lifecycle, restore hooks. Substrate-bound.  │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+Layer 1 is open. Layer 2 is the commercial core. Layer 3 is a focused runtime on top of Layer 2 for tool-heavy long-running agents. See [layers](/docs/concepts/layers) for the layered model in full.
 
 ## The execution model at a glance
 
 ```
-Organization                                    (billing root)
+Tenant                                          (billing root)
 └── Project                                     (logical app boundary)
     └── Environment                             (prod / staging / dev)
         └── Session            ─────────────┐   (continuity container)
@@ -25,21 +48,29 @@ Organization                                    (billing root)
                                   PolicyScope (governance binding)
 ```
 
+The tenancy hierarchy `Tenant → Project → Environment → Deployment` resolves through every API call. See [tenancy](/docs/concepts/tenancy).
+
 ## The canonical entities
+
+Fifteen entities form the canonical vocabulary. Every API and SDK reference resolves back to a name in this table.
 
 | Entity | What it is |
 |---|---|
-| **[Run](/docs/concepts/run-hierarchy/runs)** | The top-level durable execution objective. The unit of value. May have a `parent_run_id` (sub-run lineage). |
+| **[Run](/docs/concepts/run-hierarchy/runs)** | The top-level durable execution objective. The unit of value. May have a `branch_from` ([branch lineage](/docs/concepts/recovery/branches)). |
 | **[Session](/docs/concepts/continuity/sessions)** | A continuity container across turns or related runs. Tracks the current `ContextManifest`. |
 | **[Step](/docs/concepts/run-hierarchy/steps)** | A typed unit of progression inside a Run. See [step types](/docs/concepts/run-hierarchy/step-types). |
 | **[ModelCall](/docs/concepts/run-hierarchy/model-calls)** | One substrate-bound model invocation belonging to a Step. Carries a `context_manifest_id`. |
 | **[ContextManifest](/docs/concepts/context/context-manifests)** | A durable per-call record of the context shape — segments, token counts, stable identity. The audit anchor for budgets, routing, checkpoints, and resume. |
+| **[ContextSegment](/docs/concepts/context/context-segments)** | A typed fragment of context with `context_type`, `memory_class`, digest, token / byte counts, and optional `artifact_ref_id` for offloaded payloads. |
+| **[ContextArtifact](/docs/concepts/context/context-artifacts)** | Object-storage-backed externalized context — raw tool outputs, file diffs, large transcripts, retrieved documents — referenced from segments via `artifact_ref_id`. |
+| **[CompactionRecord](/docs/concepts/context/compaction-records)** | A lineage object describing how a set of source segments became one or more compacted segments. Records source manifest, source / output segment IDs, method, model, token deltas, and quality flags. |
 | **[Checkpoint](/docs/concepts/recovery/checkpoints)** | A resumable snapshot binding logical context first; KV cache export is an optimization layered on top. |
-| **[StateHandle](/docs/concepts/recovery/state-handles)** | A typed reference to reusable execution state: `kv_prefix`, `context_manifest`, `checkpoint`, `artifact_bundle`, `memory_entry`, or `runtime_state`. |
+| **[MemoryClass](/docs/concepts/context/segment-types)** | A classification label carried on each segment that signals retention intent to the context manager, the router, and the metering layer. Not a persistence backend. |
+| **[PolicyScope](/docs/concepts/policy/policy-scopes)** | Normalized governance binding across Tenant / Project / Environment / deployment / runtime. Carries `context_share_scope`, `data_boundary`, and `tool_policy_ref`. |
 | **[Budget](/docs/concepts/policy/budgets)** | A run-level execution budget controlling cost, tokens, steps, time, or tool count. |
 | **[ContextBudget](/docs/concepts/policy/context-budgets)** | A per-run admission control object for active context size, evaluated before GPU dispatch. |
-| **[PolicyScope](/docs/concepts/policy/policy-scopes)** | Normalized governance binding across tenant / project / environment / deployment / runtime. |
-| **[MemoryScope](/docs/concepts/memory/memory-scopes)** | The retention class for context and state: `ephemeral`, `session`, `user`, `tenant`, or `global`. |
+| **[PlacementHint](/docs/concepts/routing/placement-hints)** | An execution preference provided by the runtime or operator — informs but does not bind routing decisions. |
+| **[StateHandle](/docs/concepts/recovery/state-handles)** | A typed reference to reusable execution state. Closed five-value enum: `kv_prefix`, `context_manifest`, `checkpoint`, `artifact_bundle`, `runtime_state`. |
 
 ## Three rules that govern the model
 
@@ -47,13 +78,23 @@ Organization                                    (billing root)
 2. **Continuity is first-class.** Sessions, ContextManifests, Checkpoints, and StateHandles exist so that long-running work survives node restarts, failures, and movement across infrastructure without losing logical state.
 3. **Admission happens before execution.** PolicyScope, Budget, and ContextBudget evaluate against the assembled ContextManifest *before* GPU dispatch. Decisions are explicit (`ALLOW`, `WARN`, `OFFLOAD_REQUIRED`, `COMPACT_REQUIRED`, `DEGRADE`, `HARD_STOP`) and traceable.
 
+## What KovaServe is not
+
+KovaServe defines a precise product boundary. The control plane sits between the inference substrate and the agent runtime — it does not absorb either neighbor.
+
+- **Not a context engineering platform.** ContextManifests, segments, artifacts, and compaction records are the audit shape, not a managed memory store. Continuity primitives describe what exists; they do not impose a particular curation strategy.
+- **Not an agent framework.** KovaServe orchestrates Runs and Steps; it does not author agent loops, tool catalogs, or prompt scaffolds. Authoring lives in the runtime (Layer 3 for the wedge, BYO frameworks for everything else).
+- **Not an inference layer.** Layer 1 is open and substrate-aligned. KovaServe routes to substrates; it does not run the models itself.
+
 ## Where to go next
 
 <Cards>
+  <Card title="Layers" href="/docs/concepts/layers" description="The three-layer architecture in depth." />
   <Card title="Runs" href="/docs/concepts/run-hierarchy/runs" description="The unit of value — durable execution objectives." />
   <Card title="Sessions" href="/docs/concepts/continuity/sessions" description="Continuity containers across turns and related runs." />
   <Card title="Checkpoints" href="/docs/concepts/recovery/checkpoints" description="Logical-context-first resume; typed StateHandles." />
   <Card title="Context manifests" href="/docs/concepts/context/context-manifests" description="The durable per-call audit anchor." />
   <Card title="Budgets" href="/docs/concepts/policy/budgets" description="Run-level cost, token, step, and time control." />
   <Card title="Context budgets" href="/docs/concepts/policy/context-budgets" description="Admission control over context size." />
+  <Card title="Tenancy" href="/docs/concepts/tenancy" description="Tenant, Project, Environment, Deployment." />
 </Cards>

@@ -38,7 +38,7 @@ The Workspace / Artifact Manager is the [Layer 3 subsystem](/docs/concepts/runti
 | `diff` | `FILE_WRITE` | The unified diff of the mutation. |
 | `patch` | Runtime-produced | A unified patch across multiple files (e.g. a coding agent's final delta). |
 | `test_report` | `TOOL_EXECUTE` of a `test_build` tool | Structured report — pass/fail count, failing tests, durations. |
-| `tool_result` | `TOOL_EXECUTE` | Full tool output when [disposition](/docs/concepts/tools/tool-context-disposition) requires offload. |
+| `tool_result` | `TOOL_EXECUTE` | Full tool output when admission requires offload. |
 | `model_output` | `MODEL_CALL` (when retained) | The model's full response, kept on the timeline regardless of whether it stayed in context. |
 | `workspace_snapshot` | `CHECKPOINT`, manual capture, branch | The byte-level snapshot of the workspace's writable scope. |
 | `checkpoint_note` | `CHECKPOINT` | Optional human-readable note attached to a Checkpoint. |

@@ -37,18 +37,17 @@ Every model call enters through `POST /v1/chat/completions`. The standard OpenAI
 | `external_runtime` | The orchestrator name (e.g. `langgraph`, `temporal`, `custom`). Used for adapter dispatch and analytics. |
 | `run_id` | The KovaServe Run ULID. Created by the runtime or returned by `POST /v1/ks/runs`. |
 | `external_run_id` | The runtime's own run identifier. Stored alongside `run_id` for cross-system lookup. |
-| `parent_run_id` | Set when the call is part of a [sub-run](/docs/concepts/run-hierarchy/sub-runs) dispatched by another Run. |
 | `session_id` | The [Session](/docs/concepts/continuity/sessions) the Run belongs to. Drives `current_manifest_id` continuity. |
 | `step_id` | The current Step ULID. Bound to one ContextManifest and zero-or-more ModelCalls. |
 | `checkpoint_id` | Set on a resume, points at the [Checkpoint](/docs/concepts/recovery/checkpoints) the Run is restoring from. |
 | `resume_marker` | Runtime-defined marker indicating where in its own logic to pick back up. |
-| `memory_class_hints` | Typed [MemoryScope](/docs/concepts/memory/memory-scopes) annotations on inbound segments — `{selector, memory_scope, retention, checkpoint_relevant}`. |
+| `memory_class_hints` | Typed retention-class annotations on inbound segments — `{selector, memory_class, retention, checkpoint_relevant}`. |
 | `budget_context` | Reference to the active run-level [Budget](/docs/concepts/policy/budgets). |
+| `context_manifest_id` | Reference to a previously assembled [ContextManifest](/docs/concepts/context/context-manifests) — pinned reuse instead of re-assembly. |
 | `context_budget_ref` | Reference to the active [ContextBudget](/docs/concepts/policy/context-budgets). |
 | `policy_scope_ref` | Reference to the resolved [PolicyScope](/docs/concepts/policy/policy-scopes). |
 | `context_scope_ref` | Reference to the `context_share_scope` overlay applied to cache reuse. |
 | `placement_hint` | Optional [PlacementHint](/docs/concepts/routing/placement-hints) — affinity, region, residency. |
-| `tool_catalog_id` | The hashed [ToolCatalog](/docs/concepts/tools/tool-catalogs) id under which this call's tools are registered. |
 | `artifact_refs` | List of [ContextArtifact](/docs/concepts/context/context-artifacts) ids referenced by the prompt. |
 | `compaction_policy` | Optional runtime-supplied compaction strategy hint. |
 
@@ -74,9 +73,8 @@ Content-Type: application/json
     "session_id":          "ses_a7f3c2b8d4e1f0925a1b6c3d",
     "step_id":             "01J8X9Y2Z3K4M5N6P7Q8R9STP1",
     "memory_class_hints": [
-      { "selector": "messages[0]", "memory_scope": "session", "retention": "session", "checkpoint_relevant": true }
+      { "selector": "messages[0]", "memory_class": "session", "retention": "session", "checkpoint_relevant": true }
     ],
-    "tool_catalog_id":     "01J8X9Y2Z3K4M5N6P7Q8R9TLC1",
     "budget_context":      { "budget_id": "01J8X9Y2Z3K4M5N6P7Q8R9BDG1" },
     "context_budget_ref":  { "context_budget_id": "01J8X9Y2Z3K4M5N6P7Q8R9CBG1" },
     "policy_scope_ref":    { "policy_scope_id": "01J8X9Y2Z3K4M5N6P7Q8R9PSC1" },
@@ -94,7 +92,7 @@ The control plane normalizes inbound metadata through **Runtime Integration Adap
 - read the `external_runtime` discriminator and dispatch the right field interpretation
 - resolve or create the `Run`, `Session`, and `Step` rows under the canonical model
 - attach the runtime's own `external_run_id` for cross-system lookup
-- preserve `placement_hint`, `memory_class_hints`, `budget_context`, `context_budget_ref`, `policy_scope_ref`, `tool_catalog_id`, `artifact_refs`, and `compaction_policy` so the rest of the control plane sees the same envelope regardless of which runtime produced it
+- preserve `placement_hint`, `memory_class_hints`, `budget_context`, `context_budget_ref`, `policy_scope_ref`, `artifact_refs`, and `compaction_policy` so the rest of the control plane sees the same envelope regardless of which runtime produced it
 - never take over orchestration logic — the runtime keeps its retry policy, planner, and tool loop
 
 Adapters ship for LangGraph and Temporal; the same contract is what a custom runtime targets when it wants the BYO surface.
@@ -112,11 +110,9 @@ The runtime keeps its agent code. KovaServe adds:
 | Run-level budget control | [Budget](/docs/concepts/policy/budgets) evaluates against admitted manifest counts and cost estimate. |
 | Cache-aware routing | The [Cache-Aware Router](/docs/concepts/routing/manifest-aware-routing) considers manifest reuse, restore cost, and budget pressure. |
 | Checkpoint + resume | [Checkpoint Manager](/docs/concepts/recovery/checkpoints) with logical-context-first restore. |
-| Tool governance | [ToolCatalog](/docs/concepts/tools/tool-catalogs) versioning + [ToolContextDisposition](/docs/concepts/tools/tool-context-disposition). |
-| Memory store | [MemoryScope](/docs/concepts/memory/memory-scopes)-typed entries; LangGraph `Store`-compatible. |
 | Cost per completed run | Roll-up across every ModelCall and tool action, with frozen [pricing snapshots](/docs/concepts/cost/pricing-snapshots). |
 | Real event stream | Ten [event streams](/docs/concepts/events) under `ks.>` and `kv_events`. |
-| Tenancy | [Organization → Project → Environment → Key](/docs/concepts/tenancy) on every record. |
+| Tenancy | [Tenant → Project → Environment → Deployment](/docs/concepts/tenancy) on every record. |
 
 Workspace, sandbox, and file primitives are *not* part of BYO mode. A coding agent that needs them adopts the [managed runtime](/docs/concepts/deployment/managed-runtime) instead.
 

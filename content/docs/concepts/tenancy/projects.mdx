@@ -1,9 +1,9 @@
 ---
 title: Projects
-description: The Project entity — the logical application boundary that owns Sessions, Runs, ContextArtifacts, MemoryEntries, ToolCatalogs, and the cache-reuse namespace.
+description: The Project entity — the logical application boundary that owns Sessions, Runs, ContextArtifacts, and the cache-reuse namespace.
 ---
 
-A **Project** is the logical application boundary inside an [Organization](/docs/concepts/tenancy/organizations). It is the level at which workloads are organized, cache reuse is scoped (by default), and policy overlays land for a coherent product line. Every [Session](/docs/concepts/continuity/sessions), [Run](/docs/concepts/run-hierarchy/runs), [ContextArtifact](/docs/concepts/context/context-artifacts), [MemoryEntry](/docs/concepts/memory/memory-entries), and [ToolCatalog](/docs/concepts/tools/tool-catalogs) belongs to exactly one Project.
+A **Project** is the logical application boundary inside a [Tenant](/docs/concepts/tenancy/tenants). It is the level at which workloads are organized, cache reuse is scoped (by default), and policy overlays land for a coherent product line. Every [Session](/docs/concepts/continuity/sessions), [Run](/docs/concepts/run-hierarchy/runs), and [ContextArtifact](/docs/concepts/context/context-artifacts) belongs to exactly one Project.
 
 A typical mapping is one Project per application or product surface — `chatbot-prod`, `coding-agent`, `contract-review`. The intent is that workloads inside a Project share a runtime model — the same agent code, the same tool catalog version, the same compaction policy — even when they run across multiple [Environments](/docs/concepts/tenancy/environments).
 
@@ -12,13 +12,12 @@ A typical mapping is one Project per application or product surface — `chatbot
 | Field | Purpose |
 |---|---|
 | `id` | Bare 26-char Crockford ULID. |
-| `organization_id` | Parent Organization. |
-| `name` | Human-readable identifier, unique within the Organization. |
+| `tenant_id` | Parent Tenant. |
+| `name` | Human-readable identifier, unique within the Tenant. |
 | `status` | `ACTIVE` or `ARCHIVED`. Archived Projects reject new admission but remain queryable. |
-| `policy_scope_id` | Project-level [PolicyScope](/docs/concepts/policy/policy-scopes) override. Narrows against the Organization default. |
+| `policy_scope_id` | Project-level [PolicyScope](/docs/concepts/policy/policy-scopes) override. Narrows against the Tenant default. |
 | `default_context_share_scope` | Cache and manifest reuse boundary applied to Runs in this Project: `none` / `project` / `tenant`. Default `project`. |
 | `default_compaction_policy` | Compaction strategy hint for Runs that do not declare their own — see [compaction records](/docs/concepts/context/compaction-records). |
-| `default_tool_catalog_id` | Default [ToolCatalog](/docs/concepts/tools/tool-catalogs) reference; Runs may override. |
 | `created_at` | Timestamp. |
 
 ## Wire shape
@@ -31,26 +30,24 @@ Content-Type: application/json
 {
   "name": "coding-agent",
   "policy_scope_id": "01J8X9Y2Z3K4M5N6P7Q8R9P0K1",
-  "default_context_share_scope": "project",
-  "default_tool_catalog_id": "01J8X9Y2Z3K4M5N6P7Q8R9TC01"
+  "default_context_share_scope": "project"
 }
 ```
 
 ```json
 {
   "id": "01J8X9Y2Z3K4M5N6P7Q8R9PRJ1",
-  "organization_id": "01J8X9Y2Z3K4M5N6P7Q8R9ORG1",
+  "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9ORG1",
   "name": "coding-agent",
   "status": "ACTIVE",
   "policy_scope_id": "01J8X9Y2Z3K4M5N6P7Q8R9P0K1",
   "default_context_share_scope": "project",
   "default_compaction_policy": null,
-  "default_tool_catalog_id": "01J8X9Y2Z3K4M5N6P7Q8R9TC01",
   "created_at": "2026-04-30T12:00:00Z"
 }
 ```
 
-A Project name is unique within its Organization. Creating a Project with a name already in use returns `409 Conflict` with `error.code = "project_name_conflict"`.
+A Project name is unique within its Tenant. Creating a Project with a name already in use returns `409 Conflict` with `error.code = "project_name_conflict"`.
 
 ## What sits under a Project
 
@@ -59,7 +56,7 @@ Every workload-bearing entity is Project-scoped:
 ```
 Project
 ├── Environment    (prod, staging, dev — at least one)
-│   └── Key        (Bearer credentials bound to this Project + Environment)
+│   └── Deployment (substrate placement bound to this Project + Environment)
 ├── Session        (continuity containers; project-scoped reuse)
 │   └── Run
 │       ├── Step
@@ -68,28 +65,23 @@ Project
 │       ├── Checkpoint
 │       ├── Budget
 │       └── ContextBudget
-├── ContextArtifact
-├── MemoryEntry    (scope_type ∈ {ephemeral, session, user, tenant, global};
-│                   tenant-scope spans Projects within the Organization)
-└── ToolCatalog    (hashed, immutable; referenced by tool_catalog_id)
+└── ContextArtifact
 ```
-
-The MemoryEntry exception — entries with `scope_type = "tenant"` span Projects within the Organization, and `scope_type = "global"` spans Organizations within the deployment under admin control. See [memory scopes](/docs/concepts/memory/memory-scopes) for the full retention model.
 
 ## Cache and manifest reuse
 
-The Project is the **default cache namespace**. The [Cache-Aware Router](/docs/concepts/routing/manifest-aware-routing) only considers replicas warmed by the same Project unless the resolved [PolicyScope's](/docs/concepts/policy/policy-scopes#context_share_scope) `context_share_scope` widens to `tenant` (Organization-wide) or narrows to `none` (per-Run private namespace).
+The Project is the **default cache namespace**. The [Cache-Aware Router](/docs/concepts/routing/manifest-aware-routing) only considers replicas warmed by the same Project unless the resolved [PolicyScope's](/docs/concepts/policy/policy-scopes#context_share_scope) `context_share_scope` widens to `tenant` (Tenant-wide) or narrows to `none` (per-Run private namespace).
 
-Practical effect: two Runs in the same Project that share a system prompt, tool catalog, and history-prefix tier hit the same cache. Two Runs in different Projects within the same Organization do not, by default — even if their content matches byte-for-byte.
+Practical effect: two Runs in the same Project that share a system prompt, tool catalog, and history-prefix tier hit the same cache. Two Runs in different Projects within the same Tenant do not, by default — even if their content matches byte-for-byte.
 
 ## Inheritance and overlay
 
 | Resolved value | Resolution rule |
 |---|---|
-| PolicyScope | Project's `policy_scope_id` overlays the Organization default. Narrowing only. |
-| Model ACL | Intersection of Organization ACL and Project ACL. A Project cannot reach a model the Organization is not contracted for. |
-| Rate limits | Project limits cap traffic from this Project. The Organization limit caps the sum of all Projects underneath. |
-| Data boundary | Most-restrictive of Organization default and Project setting. |
+| PolicyScope | Project's `policy_scope_id` overlays the Tenant default. Narrowing only. |
+| Model ACL | Intersection of Tenant ACL and Project ACL. A Project cannot reach a model the Tenant is not contracted for. |
+| Rate limits | Project limits cap traffic from this Project. The Tenant limit caps the sum of all Projects underneath. |
+| Data boundary | Most-restrictive of Tenant default and Project setting. |
 | Compaction policy | Project default; Run-level policy hints override per-Run. |
 
 Resolution is performed once at admission time and frozen on the Run row. See [PolicyScope](/docs/concepts/policy/policy-scopes#resolution).
@@ -119,21 +111,20 @@ A Project can be moved to `ARCHIVED`. The effect is structural:
 | New Keys | Cannot be issued against an Archived Project. |
 | Existing Keys | Continue to authenticate but every admission attempt rejects. |
 
-Archival is reversible: an ARCHIVED Project can be moved back to ACTIVE. Existing data — Sessions, Runs, ContextArtifacts, MemoryEntries — is not touched.
+Archival is reversible: an ARCHIVED Project can be moved back to ACTIVE. Existing data — Sessions, Runs, ContextArtifacts — is not touched.
 
 ## What a Project is not
 
-- **Not a tenant.** The Organization is the tenancy root; the Project is one level beneath.
+- **Not the tenancy root.** The Tenant is the tenancy root; the Project is one level beneath.
 - **Not a deployment.** A Project's Runs may execute against multiple deployments (per Environment) — see [environments](/docs/concepts/tenancy/environments).
-- **Not a cache key.** The cache namespace is computed from `(organization_id, project_id, context_share_scope)` plus the manifest's `stable_context_id`. The Project ID alone does not key cache lookups; it scopes them.
-- **Not deletable in-place.** Projects are archived, not deleted. Hard deletion of historical data follows the data-retention contract on the Organization, not a Project-level operation.
+- **Not a cache key.** The cache namespace is computed from `(tenant_id, project_id, context_share_scope)` plus the manifest's `stable_context_id`. The Project ID alone does not key cache lookups; it scopes them.
+- **Not deletable in-place.** Projects are archived, not deleted. Hard deletion of historical data follows the data-retention contract on the Tenant, not a Project-level operation.
 
 ## See also
 
 - [Tenancy](/docs/concepts/tenancy) — the four-level hierarchy
-- [Organizations](/docs/concepts/tenancy/organizations) — the parent
+- [Tenants](/docs/concepts/tenancy/tenants) — the parent
 - [Environments](/docs/concepts/tenancy/environments) — the next level down
 - [PolicyScope](/docs/concepts/policy/policy-scopes) — the governance binding overlay
 - [Manifest-aware routing](/docs/concepts/routing/manifest-aware-routing) — the consumer of `context_share_scope`
-- [Memory scopes](/docs/concepts/memory/memory-scopes) — Project-scope retention
 - [`POST /v1/ks/projects`](/docs/api/projects/create) · [`GET /v1/ks/projects/{id}`](/docs/api/projects/get)

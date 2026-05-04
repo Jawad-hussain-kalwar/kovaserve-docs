@@ -89,7 +89,7 @@ The idle threshold is a Project-level configuration with a default. Sessions wit
 
 `bind_run` (called via the `kovaserve.session_id` extension on inference, or via `POST /v1/ks/runs` with `session_id`) advances `last_accessed_at` even when no turn is appended. A `bind_run` against an `IDLE` Session reactivates it to `OPEN` atomically; a bind against `RESUMABLE` (the resume case) transitions to `OPEN`; a bind against `ARCHIVED` or `EXPIRED` is rejected.
 
-Six invariants on bind — tenant scoping, ULID shape, non-terminal Run only, no cross-Session re-binding, idempotent same-pair binds, `last_accessed_at` bump — are detailed on [Sessions](/docs/concepts/continuity/sessions).
+Six invariants on bind — Tenant scoping, ULID shape, non-terminal Run only, no cross-Session re-binding, idempotent same-pair binds, `last_accessed_at` bump — are detailed on [Sessions](/docs/concepts/continuity/sessions).
 
 ### Checkpoint-driven hold
 

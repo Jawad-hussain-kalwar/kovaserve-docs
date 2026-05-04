@@ -61,12 +61,12 @@ A CodeRun is a configured managed agent on the Agentic Execution Cloud. The conf
 | Runtime | The KovaServe managed runtime — workers, sandboxes, tool gateway, workspaces, runtime-native timeline. |
 | Workspace source | Customer-supplied Git repository, ref-pinned at the start of the run; resolved commit hash recorded for reproducibility. |
 | Sandbox profile | Container image with common build toolchains, mid-size resource limits, persistence within the run, snapshot on every checkpoint. Network access defaults to an allowlist (the customer's package registries, the customer's git host). |
-| Tool catalog | Shell, file, repo/git, test/build, structured-external. Push and merge are governed actions that require explicit policy. |
+| Tools | Shell, file, repo/git, test/build, structured-external. Push and merge are governed actions that require explicit policy. |
 | Default budget | Cost cap, step cap, time cap, tool-call cap — set per deployment, overridable per run. |
 | Default context budget | Active context, stable context, volatile context, and tool-result limits — sized for repository-bound work, with offload-required and compact-required thresholds tuned to keep prefill cost stable. |
 | Default policy scope | Tool policy that blocks unbounded shell, requires checkpoint advisories before destructive actions, redacts secrets in tool arguments. Data boundary set by the deployment. |
 | Checkpoint trigger rules | Before every file write, before every shell command not on the safe-list, after every stable analysis phase, on every budget warning, periodic by configured interval, manual on operator request. |
-| Observability | Runtime-native timeline with full diff inspection, branch lineage, sub-run lineage, budget burn pane, policy decision inspection, full WorkspaceArtifact catalog. |
+| Observability | Runtime-native timeline with full diff inspection, branch lineage, budget burn pane, policy decision inspection, full WorkspaceArtifact catalog. |
 
 ## How a customer uses a CodeRun
 
@@ -95,7 +95,7 @@ Content-Type: application/json
 }
 ```
 
-The CodeRun progresses through the canonical Run state machine. The operator's UI streams the runtime-native timeline, surfacing the diffs, the test reports, the checkpoints, and the budget burn as they happen.
+The CodeRun progresses as a durable run on the Agentic Execution Cloud. The operator's UI streams the runtime-native timeline, surfacing the diffs, the test reports, the checkpoints, and the budget burn as they happen.
 
 ## What a customer gets back
 

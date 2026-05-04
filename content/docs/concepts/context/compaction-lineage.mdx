@@ -18,7 +18,7 @@ Raw segments (T_0):           SG10  SG11  SG12  SG13  SG14
 CompactionRecord CR_a (T_1):  ┌───────────────────────────┐
                               │ sources: SG10..SG14       │
                               │ outputs: SG20             │
-                              │ method: summarize_history │
+                              │ method:  runtime_reported │
                               └─────────────┬─────────────┘
                                             ▼
 Compacted (T_1):                          SG20  SG21  SG22
@@ -27,7 +27,7 @@ Compacted (T_1):                          SG20  SG21  SG22
 CompactionRecord CR_b (T_2):  ┌───────────────────────────┐
                               │ sources: SG20..SG22       │
                               │ outputs: SG30             │
-                              │ method: summarize_history │
+                              │ method:  kovaserve_managed│
                               └─────────────┬─────────────┘
                                             ▼
 Compacted (T_2):                          SG30
@@ -67,7 +67,7 @@ Authorization: Bearer ks_...
     "ancestors": [
       {
         "id": "01J8X9Y2Z3K4M5N6P7Q8R9CR03",
-        "method": "summarize_history",
+        "method": "runtime_reported",
         "source_segment_ids": ["..."],
         "output_segment_ids": ["..."]
       }

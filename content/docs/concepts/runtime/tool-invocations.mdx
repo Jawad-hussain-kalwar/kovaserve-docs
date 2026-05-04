@@ -1,18 +1,18 @@
 ---
 title: Tool invocations
-description: A ToolInvocation is the runtime's record of a single tool execution — class, arguments, result, sandbox dispatch, governance decision, artifact offload, and the runtime events that flow from it.
+description: A ToolInvocation is the runtime's record of a single tool execution — class, arguments, result, sandbox dispatch, artifact offload, and the runtime events that flow from it.
 ---
 
-A **ToolInvocation** is the runtime's first-class record of a single tool execution. It is the wedge-specific runtime entity that pairs a `TOOL_EXECUTE` Step with the concrete details of what tool was called, with what arguments, against which [sandbox](/docs/concepts/runtime/sandboxes), under which [governance decision](/docs/concepts/tools/tool-context-disposition), and what came back.
+A **ToolInvocation** is the runtime's first-class record of a single tool execution. It is the wedge-specific runtime entity that pairs a `TOOL_EXECUTE` Step with the concrete details of what tool was called, with what arguments, against which [sandbox](/docs/concepts/runtime/sandboxes), and what came back.
 
-Tool definitions are owned globally by the Layer 2 [ToolCatalog](/docs/concepts/tools/tool-catalogs) (immutable, hashed, versioned, referenced by `tool_catalog_id`). Tool *governance* — whether the tool's definition or output may enter context, and how — is owned by Layer 2 [Tool Context Governance](/docs/concepts/tools/tool-context-disposition). Tool *invocation* — the actual call-and-result loop, sandbox dispatch, the wedge-specific tool classes — is owned by the Layer 3 runtime. ToolInvocation is the entity that records each of those calls.
+Tool *invocation* — the actual call-and-result loop, sandbox dispatch, the wedge-specific tool classes — is owned by the Layer 3 runtime. The Layer 2 control plane owns the global governance and accounting around invocation: a [PolicyScope](/docs/concepts/policy/policy-scopes)'s `tool_policy_ref` decides which tools the resolved scope may invoke, and a [Budget](/docs/concepts/policy/budgets)'s `tool_limit` caps how many invocations a Run may make. The runtime calls into both before dispatch; ToolInvocation is the entity that records each call once admission is granted.
 
 ```
 TOOL_EXECUTE Step                            Tool Gateway                       Sandbox
        │                                          │                                │
-       │── invoke(catalog, name, args) ──────────▶│                                │
-       │                                          │── governance check ───────────▶│
-       │                                          │      (disposition policy)      │
+       │── invoke(name, args) ────────────────────▶│                                │
+       │                                          │── PolicyScope.tool_policy_ref ─▶ admission
+       │                                          │── Budget.tool_limit  ──────────▶ admission
        │                                          │                                │
        │                                          │── dispatch ───────────────────▶│ exec
        │                                          │                                │  │
@@ -29,15 +29,13 @@ TOOL_EXECUTE Step                            Tool Gateway                       
 |---|---|
 | `id` | ULID. |
 | `run_id`, `step_id` | The Run and the `TOOL_EXECUTE` Step the invocation belongs to. |
-| `tool_catalog_id` | The hashed [ToolCatalog](/docs/concepts/tools/tool-catalogs) bundle the tool definition came from. |
-| `tool_name` | The tool's name within that catalog. |
+| `tool_name` | The tool's name. |
 | `tool_class` | The runtime tool class — see [Tool classes](#tool-classes). |
-| `arguments` | The tool's input arguments (subject to redaction policy from the governance decision). |
-| `disposition` | The [ToolContextDisposition](/docs/concepts/tools/tool-context-disposition) decision — `inline_full | inline_preview | summary_required | artifact_ref | drop | blocked`. |
+| `arguments` | The tool's input arguments (subject to redaction policy). |
 | `sandbox_id` | The [sandbox](/docs/concepts/runtime/sandboxes) the invocation dispatched into (null for non-sandbox-bound tools). |
-| `result` | The structured tool result — present inline only when the disposition allows it. |
-| `result_artifact_id` | The [ContextArtifact](/docs/concepts/context/context-artifacts) that holds the full result when the disposition required offload. |
-| `result_summary` | A bounded summary segment when the disposition required summarization. |
+| `result` | The structured tool result — present inline when admission allows it. |
+| `result_artifact_id` | The [ContextArtifact](/docs/concepts/context/context-artifacts) that holds the full result when admission required offload. |
+| `result_summary` | A bounded summary segment when admission required summarization. |
 | `cost` | Per-invocation cost (when the tool class is priced — e.g. `http_api` calls to billed endpoints). |
 | `started_at`, `completed_at`, `duration_ms` | Timing. |
 | `outcome` | `SUCCEEDED | FAILED | DENIED | TIMED_OUT`. |
@@ -48,23 +46,43 @@ Layer 3 defines the standard tool classes. The class drives sandbox dispatch pol
 
 | Class | Used for |
 |---|---|
-| `shell` | Arbitrary shell commands inside the sandbox. Subject to file/network policy and shell-specific governance. |
+| `shell` | Arbitrary shell commands inside the sandbox. Subject to file/network policy. |
 | `file` | File read, write, list, stat, hash. The runtime translates to `FILE_READ` / `FILE_WRITE` Steps when the operation is mutating. |
 | `repo_git` | Git operations against the workspace's source binding — `clone`, `checkout`, `diff`, `commit`, `push`. Push is a checkpoint trigger. |
 | `test_build` | Test runners and build commands — `pytest`, `npm test`, `cargo build`, custom runners. Output captured as a test report [WorkspaceArtifact](/docs/concepts/runtime/workspace-artifacts). |
-| `http_api` | Outbound HTTP calls. Egress allowlist enforced by the sandbox network policy and the tool catalog's per-tool host policy. |
+| `http_api` | Outbound HTTP calls. Egress allowlist enforced by the sandbox network policy. |
 | `structured_external` | Schema-typed external tools — anything from search APIs to internal company services with a registered JSON schema. |
 
-A tool catalog binds each tool to one of these classes; the runtime dispatches accordingly.
+The runtime dispatches each tool according to its class.
 
-## Where governance lives
+## Built-in tools
 
-Tool governance is *not* a runtime concern — it is a Layer 2 concern, evaluated through [Tool Context Governance](/docs/concepts/tools/tool-context-disposition). The runtime calls into governance at two points:
+The runtime ships with a curated set of built-in tools that cover the wedge — coding, terminal, and tool-heavy long-running agents — out of the box. Custom tools register through the same registry and follow the same dispatch and governance contract.
 
-1. **Before invocation** — `POST /v1/ks/tools/check-policy` returns the disposition for the tool definition itself (may the model see the tool's definition? in what shape?).
-2. **After result** — `POST /v1/ks/tools/results` registers the tool result, returns the disposition for the *output* (inline full, inline preview, summary required, artifact ref, drop, blocked), and produces a `result_artifact_id` and/or `result_summary` accordingly.
+| Tool | Class | Purpose |
+|---|---|---|
+| `file_read` | `file` | Read a file from the [Workspace](/docs/concepts/runtime/workspaces). Materializes a `FILE_READ` Step. |
+| `file_write` | `file` | Write or patch a file in the Workspace. Materializes a `FILE_WRITE` Step and emits a `diff` [WorkspaceArtifact](/docs/concepts/runtime/workspace-artifacts). |
+| `shell` | `shell` | Run a shell command inside the [sandbox](/docs/concepts/runtime/sandboxes). Materializes a `PROCESS_START` Step and captures stdout/stderr artifacts. |
+| `search` | `structured_external` | Code or document search across the Workspace and registered indexes. |
+| `git` | `repo_git` | Git operations against the Workspace's source binding — `clone`, `checkout`, `diff`, `commit`, `push`. `push` is a Checkpoint trigger. |
+| `test_runner` | `test_build` | Run the Workspace's tests under the configured runner. Output is captured as a `test_report` WorkspaceArtifact. |
 
-The result the model sees on the next ModelCall is the disposition's output, not the raw payload.
+Custom tools register through `POST /v1/ks/runtime/tools` with a name, class, JSON schema for arguments, idempotency flag, and an optional cost rule. The runtime then dispatches them through the same Tool Gateway path as the built-ins.
+
+## Layer boundary — Layer 3 invocation, Layer 2 governance
+
+The split is deliberate and load-bearing.
+
+| Concern | Owner | Surface |
+|---|---|---|
+| Tool registration, classes, dispatch semantics, sandbox bind | Layer 3 runtime | This page; Tool Registry; Tool Gateway. |
+| Per-tool execution, output capture, artifact offload | Layer 3 runtime | [Sandboxes](/docs/concepts/runtime/sandboxes); [WorkspaceArtifacts](/docs/concepts/runtime/workspace-artifacts). |
+| Which tools the resolved scope may invoke (allow/deny) | Layer 2 control plane | [PolicyScope](/docs/concepts/policy/policy-scopes) `tool_policy_ref`. |
+| Cap on invocation count for a Run | Layer 2 control plane | [Budget](/docs/concepts/policy/budgets) `tool_limit`. |
+| Audit trail across tenants and projects | Layer 2 control plane | [Events](/docs/concepts/events) — `ks.tool.invocation.started`, `ks.tool.invocation.completed`. |
+
+A blocked invocation (policy or budget) never reaches dispatch — the Tool Gateway records the denial as the ToolInvocation's outcome (`DENIED` for policy, `FAILED` with `cause: tool_limit_exceeded` for budget) and the producing Step ends with the appropriate failure class.
 
 ## Wire shape
 
@@ -78,7 +96,6 @@ Content-Type: application/json
 {
   "run_id":          "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
   "step_id":         "01J8X9Y2Z3K4M5N6P7Q8R9STP1",
-  "tool_catalog_id": "01J8X9Y2Z3K4M5N6P7Q8R9TLC1",
   "tool_name":       "run_tests",
   "tool_class":      "test_build",
   "sandbox_id":      "01J8X9Y2Z3K4M5N6P7Q8R9SBX1",
@@ -90,12 +107,11 @@ Content-Type: application/json
 }
 ```
 
-Response (with the disposition applied to the result):
+Response:
 
 ```json
 {
   "id":                  "01J8X9Y2Z3K4M5N6P7Q8R9TIV1",
-  "disposition":         "summary_required",
   "result_artifact_id":  "01J8X9Y2Z3K4M5N6P7Q8R9ART1",
   "result_summary":      "1 of 47 tests failed: test_refund_partial — assertion error on `tax_cents`.",
   "cost": { "cost_cents": "0.0000" }
@@ -106,12 +122,12 @@ The next `MODEL_CALL` Step in the Run includes the `result_summary` as a typed [
 
 ## Idempotency
 
-Tools are marked idempotent or not at registration in the [ToolCatalog](/docs/concepts/tools/tool-catalogs). The runtime uses this for [retry](/docs/concepts/recovery/retries) decisions:
+Tools are marked idempotent or not at registration. The runtime uses this for [retry](/docs/concepts/recovery/retries) decisions:
 
 | Idempotent | Retry behavior |
 |---|---|
 | Yes | Retried in place on transient failures. The same `(run_id, step_id, tool_name, arguments_hash)` is the idempotency key. |
-| No | Not retried in place. The runtime escalates to a [resume](/docs/concepts/recovery/resume-flow) from the previous Checkpoint. |
+| No | Not retried in place. The failure escalates through the [retry tier ladder](/docs/concepts/recovery/retries) — the runtime resumes from the previous Checkpoint, and if that does not clear the failure the tier escalates to a new Run lineage from the Checkpoint via [branch flow](/docs/concepts/recovery/branch-flow). The runtime does not define a parallel retry loop here; the contract lives in [retries](/docs/concepts/recovery/retries). |
 
 `file` reads, `http_api` GETs, `repo_git` reads, `test_build` runs are typically idempotent. `shell` (without explicit override), `repo_git` writes (commit/push), and non-GET `http_api` are typically not.
 
@@ -131,8 +147,7 @@ Authorization: Bearer ks_...
       "tool_name":    "run_tests",
       "tool_class":   "test_build",
       "outcome":      "FAILED",
-      "duration_ms":  42180,
-      "disposition":  "summary_required"
+      "duration_ms":  42180
     }
   ],
   "next_cursor": null
@@ -146,9 +161,9 @@ Each invocation emits two [runtime events](/docs/concepts/events/runtime):
 | Event | When |
 |---|---|
 | `ks.tool.invocation.started` | Dispatched into the sandbox (or into the Worker's outbound HTTP path for non-sandbox tools). |
-| `ks.tool.invocation.completed` | Result captured and disposition applied. |
+| `ks.tool.invocation.completed` | Result captured. |
 
-The events carry `tool_catalog_id`, `tool_name`, `tool_class`, `disposition`, and `outcome` so dashboards and event consumers can build a per-Run tool action timeline without joining Postgres.
+The events carry `tool_name`, `tool_class`, and `outcome` so dashboards and event consumers can build a per-Run tool action timeline without joining Postgres.
 
 ## Wedge-specific vs. general tools
 
@@ -156,10 +171,10 @@ Layer 3 owns the wedge-specific tool classes — shell, file, repo/git, test/bui
 
 ## See also
 
-- [Tool catalogs](/docs/concepts/tools/tool-catalogs) — the immutable, hashed, versioned bundle a tool's definition lives in
-- [Tool context disposition](/docs/concepts/tools/tool-context-disposition) — the governance decision applied to definitions and outputs
-- [Tool governance](/docs/concepts/tools/tool-governance) — the policy enforcement model
 - [Sandboxes](/docs/concepts/runtime/sandboxes) — the execution surface for sandbox-bound tools
 - [Step types](/docs/concepts/run-hierarchy/step-types) — `TOOL_PLAN` and `TOOL_EXECUTE`
+- [PolicyScope](/docs/concepts/policy/policy-scopes) — `tool_policy_ref`, the Layer 2 governance surface for tool allow/deny
+- [Budgets](/docs/concepts/policy/budgets) — `tool_limit`, the Layer 2 cap on invocation count
+- [Retries](/docs/concepts/recovery/retries) · [Branch flow](/docs/concepts/recovery/branch-flow) — escalation path for non-idempotent failures
 - [Runtime events](/docs/concepts/events/runtime) — the stream invocations feed
 - [Workspace artifacts](/docs/concepts/runtime/workspace-artifacts) — where stdout, stderr, diffs, and test reports are captured

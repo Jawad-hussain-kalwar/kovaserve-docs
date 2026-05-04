@@ -18,11 +18,11 @@ NATS subjects: `ks.run.*`, `ks.step.*`, `ks.model_call.*`. Persisted in the `exe
 | `ks.run.resumed` | Run transitions from `RESUMING` back to `RUNNING`. | `RUNNING` |
 | `ks.run.completed` | Run transitions to `COMPLETED`. | `COMPLETED` |
 | `ks.run.failed` | Run transitions to `FAILED`. | `FAILED` |
-| `ks.step.created` | Step row inserted (post-admission). | (parent Run) |
-| `ks.step.started` | Step transitions to `STARTED`. | (parent Run) |
-| `ks.step.completed` | Step transitions to `SUCCEEDED`, `FAILED`, `SKIPPED`, or `CANCELED`. | (parent Run) |
-| `ks.model_call.started` | ModelCall row inserted; substrate dispatch begins. | (parent Run) |
-| `ks.model_call.completed` | ModelCall finishes — success, failure, or cancellation. | (parent Run) |
+| `ks.step.created` | Step row inserted (post-admission). | (owning Run) |
+| `ks.step.started` | Step transitions to `STARTED`. | (owning Run) |
+| `ks.step.completed` | Step transitions to `SUCCEEDED`, `FAILED`, `SKIPPED`, or `CANCELED`. | (owning Run) |
+| `ks.model_call.started` | ModelCall row inserted; substrate dispatch begins. | (owning Run) |
+| `ks.model_call.completed` | ModelCall finishes — success, failure, or cancellation. | (owning Run) |
 
 The Run state listed is the *resulting* state — the event marks the transition into it. Events are emitted in the same database transaction that updates the row, so the event existence implies the row state.
 
@@ -80,8 +80,7 @@ The Run state listed is the *resulting* state — the event marks the transition
 ```json
 {
   "step_type": "MODEL_CALL",
-  "context_manifest_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T7",
-  "tool_catalog_id": "01J8X9Y2Z3K4M5N6P7Q8R9TC01"
+  "context_manifest_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T7"
 }
 ```
 

@@ -13,9 +13,9 @@ PolicyScopes are owned by the **Policy / Governance Layer**. Every request resol
 |---|---|
 | `model_acl[]` | Allowed model ids and families. Requests for non-listed models reject. |
 | `rate_limits` | Per-tenant / project / environment rate limits in requests per second and tokens per second. |
-| `context_share_scope` | Cache and manifest reuse boundary: `none` / `project` / `tenant`. Controls cross-Run KV cache and manifest-tier reuse. |
-| `data_boundary` | Artifact and context residency constraint: `tenant_local` / `region_local` / `unrestricted`. |
-| `tool_policy_ref` | Reference to a tool policy that produces [ToolContextDispositions](/docs/concepts/tools/tool-context-disposition). |
+| `context_share_scope` | Cache and manifest reuse boundary: `none` / `project` / `tenant`. Controls cross-Run KV cache and manifest-tier reuse. The `tenant` enum value is the wire token for tenant-wide reuse. |
+| `data_boundary` | Artifact and context residency constraint: `tenant_local` / `region_local` / `unrestricted`. The `tenant_local` enum value pins residency to tenant-allocated storage. |
+| `tool_policy_ref` | Reference to a tool policy applied at admission. The tool policy is a closed Layer-2 enrichment field — it gates which tools the resolved scope may invoke and is evaluated alongside `model_acl`. |
 | `deployment_restrictions[]` | Deployment ids the scope may execute against; empty = all deployments in scope. |
 | `environment_restrictions[]` | Environment ids — typically `prod` / `staging` / `dev`. |
 | `degraded_mode_policy` | Whether `DEGRADE` admission decisions are accepted, rejected, or warn-only. |
@@ -120,16 +120,11 @@ Content-Type: application/json
 }
 ```
 
-## Tool policy integration
-
-PolicyScope binds a `tool_policy_ref` that the Tool Context Governance subsystem consults to produce [ToolContextDispositions](/docs/concepts/tools/tool-context-disposition). The tool policy decides, per tool definition and per tool output, whether the data may enter context (`inline_full` / `inline_preview` / `summary_required` / `artifact_ref` / `drop` / `blocked`). Risk levels and checkpoint advisories also flow from the tool policy.
-
-## Inheritance on branches and sub-runs
+## Inheritance on branches
 
 | Operation | PolicyScope behavior |
 |---|---|
 | [Branch](/docs/concepts/recovery/branches) | Inherited; overridable narrower (never wider). |
-| [Sub-run](/docs/concepts/run-hierarchy/sub-runs) | Inherited; cannot escape parent's scope. |
 | [Resume](/docs/concepts/recovery/resume-flow) | The resumed Run must satisfy the Checkpoint's recorded scope. |
 
 A scope is monotonically narrowing across lineage. There is no path that widens scope without an out-of-band administrative grant.
@@ -143,8 +138,7 @@ A scope is monotonically narrowing across lineage. There is no path that widens 
 
 ## See also
 
-- [Tenancy](/docs/concepts/tenancy) — Organization → Project → Environment → Key
+- [Tenancy](/docs/concepts/tenancy) — Tenant → Project → Environment → Deployment
 - [Budgets](/docs/concepts/policy/budgets) · [Context budgets](/docs/concepts/policy/context-budgets) — the resource-consumption controls
-- [Tool context disposition](/docs/concepts/tools/tool-context-disposition) — the per-tool decision the policy produces
 - [Manifest-aware routing](/docs/concepts/routing/manifest-aware-routing) — the consumer of `context_share_scope`
 - [`POST /v1/ks/policies`](/docs/api/policy-scopes/create)

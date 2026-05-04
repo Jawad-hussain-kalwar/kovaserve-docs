@@ -50,7 +50,7 @@ Subjects: `ks.policy.*`. Persisted in the `execution_events` JetStream stream. C
 }
 ```
 
-`denial_reason` ∈ `model_not_in_acl`, `rate_limit_exceeded`, `tokens_per_second_exceeded`, `deployment_not_allowed`, `environment_restricted`, `data_boundary_violation`, `key_revoked`, `key_expired`, `organization_suspended`, `project_archived`, `environment_archived`, `key_mode_environment_mismatch`.
+`denial_reason` ∈ `model_not_in_acl`, `rate_limit_exceeded`, `tokens_per_second_exceeded`, `deployment_not_allowed`, `environment_restricted`, `data_boundary_violation`, `key_revoked`, `key_expired`, `tenant_suspended`, `project_archived`, `environment_archived`, `key_mode_environment_mismatch`.
 
 The `matched_rule` field identifies which overlay layer produced the denial — `tenant.<field>`, `project.<field>`, `environment.<field>`, or `key.<field>`. This is the audit anchor for policy disputes: it identifies which policy edit would change the outcome.
 

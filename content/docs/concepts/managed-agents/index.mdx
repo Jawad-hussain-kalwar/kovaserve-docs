@@ -50,7 +50,7 @@ Every managed-agent SKU — KovaServe's first-party SKUs and the ones a partner 
 | Tool governance | Agents are allowed, restricted, blocked, or forced through policy checks before taking actions. Sensitive tools require explicit policy. |
 | Budget enforcement | Runs are constrained by cost, runtime, steps, token usage, tool calls, or policy-defined limits. Out-of-bounds runs are warned, degraded, or hard-stopped before they overrun. |
 | Execution audit | Every model call, tool call, policy decision, checkpoint, cost, failure, resume, and output is recorded. The history is queryable and exportable. |
-| Cost per completed run | The economic unit is what it costs to finish useful work — not what a token costs in isolation. Aggregable per agent, per SKU, per deployment, per organization. |
+| Cost per completed run | The economic unit is what it costs to finish useful work — not what a token costs in isolation. Aggregable per agent, per SKU, per deployment, per tenant. |
 | Private infrastructure support | Every managed agent runs on managed cloud, on partner infrastructure, on private deployments, on sovereign clouds, or air-gapped. Same SKU, different topology. |
 
 A SKU is the bundle of *what kind of task* the agent does plus *which tools, sandboxes, defaults, and guardrails are appropriate* for that task. The Agentic Execution Cloud is what makes the bundle a product instead of a demo.
@@ -74,7 +74,7 @@ A SKU is the combination of:
 | Layer | Configured by |
 |---|---|
 | Agent definition | The model, the system prompt, the planner discipline, the tool list. |
-| Tool catalog | The set of tools the agent may call, hashed into a versioned bundle. |
+| Tools | The set of tools the agent may call, hashed into a versioned bundle. |
 | Sandbox profile | Container image, mounted workspace shape, file and network policy, resource limits, persistence behavior. |
 | Default budget | Cost, time, steps, and tool-call limits appropriate for the workload. |
 | Default context budget | Active context, stable context, volatile context, and tool-result limits. |

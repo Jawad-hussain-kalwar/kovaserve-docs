@@ -30,7 +30,7 @@ description: KovaServe's self-hosted, sovereign, and neocloud deployment topolog
 └─────────────────────────────────────────────────────────┘
 ```
 
-The deployment is single-organization by topology — there is no shared multi-tenant control plane. The same APIs, the same wire shapes, the same event taxonomy, and the same dashboard are served from the customer's network. A workload that originated on managed cloud and migrates here keeps its IDs, its manifests, its checkpoints, and its [cost-per-completed-run](/docs/concepts/cost/cost-per-completed-run) accounting.
+The deployment is single-tenant by topology — there is no shared multi-tenant control plane. The same APIs, the same wire shapes, the same event taxonomy, and the same dashboard are served from the customer's network. A workload that originated on managed cloud and migrates here keeps its IDs, its manifests, its checkpoints, and its [cost-per-completed-run](/docs/concepts/cost/cost-per-completed-run) accounting.
 
 ## Topology
 
@@ -50,7 +50,7 @@ The contract is that the customer supplies them. The chart accepts connection st
 
 | Store | Purpose |
 |---|---|
-| PostgreSQL | Canonical entity persistence — Runs, Sessions, Steps, ModelCalls, ContextManifests, Budgets, Checkpoints, PolicyScopes, MemoryEntries, ToolCatalogs, usage records. Migrations are managed by Alembic and apply on startup. |
+| PostgreSQL | Canonical entity persistence — Runs, Sessions, Steps, ModelCalls, ContextManifests, Budgets, Checkpoints, PolicyScopes, usage records. Migrations are managed by Alembic and apply on startup. |
 | Redis | Rate-limit counters, idempotency cache, hot-path lookups. |
 | NATS JetStream | `ks.>` event subjects with configurable retention; `kv_events` substrate stream; durable consumers for the dashboard, metering, and customer event consumers. |
 | S3-compatible object storage | [Context Artifact Store](/docs/concepts/context/context-artifacts), [Checkpoint](/docs/concepts/recovery/checkpoints) blobs, KV export bundles, [WorkspaceArtifact](/docs/concepts/runtime/workspace-artifacts) bytes. MinIO, AWS S3, or any compatible service. |
@@ -71,18 +71,18 @@ These are the same components that run on managed cloud. The boundary between La
 
 ## Identity, isolation, and tenancy
 
-Private deployment is single-organization by topology, but it still uses the four-level [tenancy](/docs/concepts/tenancy) hierarchy — Organization → Project → Environment → Key — to scope resources, policies, budgets, and cache reuse internally:
+Private deployment is single-tenant by topology, but it still uses the four-level [tenancy](/docs/concepts/tenancy) hierarchy — Tenant → Project → Environment → Deployment — to scope resources, policies, budgets, and cache reuse internally:
 
 | Surface | Behavior in private mode |
 |---|---|
-| Organization | Typically one — the deploying entity. Multi-organization deployments are supported when an enterprise wants strong logical separation between business units. |
+| Tenant | Typically one — the deploying entity. Multi-tenant deployments are supported when an enterprise wants strong logical separation between business units. |
 | Project | Per application, product line, or customer-of-customer. Same semantics as managed cloud. |
 | Environment | `production` / `staging` / `development` — independent traffic, deployments, and cache namespaces. |
 | Key | Bearer credentials issued from the in-cluster Tenant Management surface. |
 | `context_share_scope` | Defaults to `project`. Adjustable per [PolicyScope](/docs/concepts/policy/policy-scopes) — sovereign deployments often pin it to `project` or `environment` to forbid cross-application reuse. |
 | `data_boundary` | Configurable per Project to constrain artifact and KV storage to specific buckets, regions, or volumes. |
 
-There is no cross-organization concern *outside* the deployment because the deployment is the entire surface.
+There is no cross-tenant concern *outside* the deployment because the deployment is the entire surface.
 
 ## Endpoints
 
@@ -126,7 +126,6 @@ Three categories of bytes leave the GPU and enter durable storage:
 | ContextArtifact bytes | Customer object storage, under the bucket configured at the [PolicyScope](/docs/concepts/policy/policy-scopes) `data_boundary`. |
 | Checkpoint blobs (logical context + optional KV exports) | Customer object storage. |
 | WorkspaceArtifact bytes (managed runtime) | Customer object storage. |
-| MemoryEntry rows | Customer Postgres, namespaced by tenancy hierarchy. |
 | Events | Customer NATS JetStream. |
 | Usage records | Customer Postgres. |
 

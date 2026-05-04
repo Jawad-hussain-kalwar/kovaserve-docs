@@ -94,7 +94,7 @@ A new Run lineage is being created from the current Run's stable point or Checkp
 
 The Run finished its work successfully. `completed_at` is set, the cost ledger is closed, the bound Budget is released, and `ks.run.completed` is published. The Run row is durable and read-only.
 
-A `COMPLETED` Run cannot be re-opened. If more work is needed, a new Run is created — typically dispatched as a sub-run from the same parent, or chained in the same Session as a follow-up turn.
+A `COMPLETED` Run cannot be re-opened. If more work is needed, a new Run is created — typically chained in the same Session as a follow-up turn, or branched from a Checkpoint of this Run.
 
 ### `FAILED` (terminal)
 
@@ -104,7 +104,7 @@ The Run failed in a way the system classifies as terminal — an unrecoverable s
 
 ### `CANCELED` (terminal)
 
-The Run was canceled — by `POST /v1/ks/runs/{id}/cancel`, by a budget hard-stop with a cancel policy, or by an operator action. In-flight ModelCalls are allowed to settle so cost attribution stays accurate; further admission stops immediately. `completed_at` is set, the Budget is closed, and `ks.run.canceled` is published.
+The Run was canceled — by `POST /v1/ks/runs/{id}/cancel`, by a budget hard-stop with a cancel policy, or by an operator action. In-flight ModelCalls are allowed to settle so cost attribution stays accurate; further admission stops immediately. `completed_at` is set, the Budget is closed, and `ks.run.failed` is published with a `cancellation` classification in the payload.
 
 ## Terminal-state guarantees
 
@@ -145,7 +145,7 @@ Every transition emits an event on the execution stream so dashboards, audit con
 | → `RUNNING` from `RESUMING` | `ks.run.resumed` |
 | → `COMPLETED` | `ks.run.completed` |
 | → `FAILED` | `ks.run.failed` |
-| → `CANCELED` | `ks.run.canceled` |
+| → `CANCELED` | `ks.run.failed` (with `cancellation` classification in payload) |
 
 Intermediate transitions (`WAITING`, `CHECKPOINTING`, `BRANCHING`) emit corresponding events on the relevant subsystem stream — `ks.checkpoint.*` for the checkpoint flow, `ks.branch.created` for branching, runtime-level events for waits.
 

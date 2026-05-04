@@ -19,8 +19,8 @@ A completed run rolls up every model call and every tool action it took:
 
 ```
 cost_per_completed_run = SUM(
-    model_call_cost              over all ModelCalls in the run
-  + tool_invocation_cost         over all tool actions in the run
+    model_call_cost              over every model call in the run
+  + tool_invocation_cost         over every tool action in the run
   + workspace_cost               for runtime-managed workspaces
 )
                        − SUM(
@@ -78,7 +78,7 @@ The number surfaces at three layers:
 | Per-managed-agent SKU | What does a typical CodeRuns / OpsRuns / DocRuns task cost? |
 | Per-deployment | What do completed runs cost across all my managed agents this month? |
 
-A neocloud, sovereign AI platform, or enterprise running KovaServe sees the same metric across every one of these layers because every layer rolls up the same underlying `usage_records` cost values. The aggregation is exact — KovaServe's rounding contract preserves the identity `gross = net + savings` across rows and across scopes, so a run total, a project total, and a tenant total never disagree by a cent.
+A neocloud, sovereign AI platform, or enterprise running KovaServe sees the same metric across every one of these layers because every layer rolls up the same underlying cost values. The aggregation is exact — KovaServe's rounding contract preserves the identity `gross = net + savings` across rows and across scopes, so a run total, an SKU total, and a deployment total never disagree by a cent.
 
 ## How it relates to the other economic metrics
 

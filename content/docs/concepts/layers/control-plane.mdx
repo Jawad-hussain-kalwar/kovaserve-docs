@@ -3,7 +3,7 @@ title: Control plane
 description: Layer 2 — the licensed KovaServe control plane. The semantic and commercial center that converts substrate signals into continuity, checkpoints, routing, policy, budgets, observability, tenancy, and managed/private portability.
 ---
 
-The **control plane** is Layer 2 of the KovaServe layered model and the commercial center of the system. It sits above the open [execution substrate](/docs/concepts/layers/execution-substrate) and below application and runtime layers, and its job is to convert substrate signals into the semantics that make long-running AI execution productizable: continuity, checkpoint-aware resumability, budget-aware execution control, governance, observability, and managed/private deployment portability. It is the system of record for every entity in the canonical execution model — `Run`, `Session`, `Step`, `ModelCall`, `ContextManifest`, `ContextSegment`, `ContextArtifact`, `CompactionRecord`, `Checkpoint`, `MemoryScope`, `MemoryEntry`, `ToolCatalog`, `ToolContextDisposition`, `PolicyScope`, `Budget`, `ContextBudget`, `PlacementHint`, `StateHandle`.
+The **control plane** is Layer 2 of the KovaServe layered model and the commercial center of the system. It sits above the open [execution substrate](/docs/concepts/layers/execution-substrate) and below application and runtime layers, and its job is to convert substrate signals into the semantics that make long-running AI execution productizable: continuity, checkpoint-aware resumability, budget-aware execution control, governance, observability, and managed/private deployment portability. It is the system of record for every entity in the canonical execution model — `Run`, `Session`, `Step`, `ModelCall`, `ContextManifest`, `ContextSegment`, `ContextArtifact`, `CompactionRecord`, `Checkpoint`, `PolicyScope`, `Budget`, `ContextBudget`, `PlacementHint`, `StateHandle`.
 
 ```
 ┌─ Layer 2 — KovaServe control plane ───────────────────────────────────────────┐
@@ -20,10 +20,7 @@ The **control plane** is Layer 2 of the KovaServe layered model and the commerci
 │    ├── Context Manifest Registry                                              │
 │    ├── Context Artifact Store                                                 │
 │    ├── Context Admission Service                                              │
-│    ├── Compaction Lineage Service                                             │
-│    ├── Memory Store Service                                                   │
-│    ├── Tool Catalog Registry                                                  │
-│    └── Tool Context Governance                                                │
+│    └── Compaction Lineage Service                                             │
 │       │                                                                       │
 │       ▼                                                                       │
 │   Routing & state                                                             │
@@ -62,7 +59,7 @@ The Gateway is the canonical entry point into the control plane. It hosts both t
 | Responsibility | Detail |
 |---|---|
 | Authentication | Bearer keys against the [Tenant Management](#tenant-management) hierarchy. |
-| Tenancy resolution | Resolves `(organization_id, project_id, environment_id)` from the key on every call. |
+| Tenancy resolution | Resolves `(tenant_id, project_id, environment_id)` from the key on every call. |
 | Request normalization | Strips the [`kovaserve` extension envelope](/docs/api/index#extension-envelope) before forwarding to the substrate; surfaces it as canonical metadata. |
 | Runtime metadata ingestion | Accepts the 16-field runtime metadata set used by [BYO runtime](/docs/concepts/deployment/byo-runtime) integrations. |
 | Idempotency handling | Honors the [idempotency contract](/docs/api/idempotency) per `(tenant_id, idempotency_key)`. |
@@ -80,7 +77,7 @@ Owns authoritative records for [`Run`](/docs/concepts/run-hierarchy/runs), [`Ses
 |---|---|
 | Entity creation | Run on explicit `POST /v1/ks/runs` or implicit creation from the first inference call carrying `kovaserve.run_id`. |
 | State transitions | The 12-state [Run FSM](/docs/concepts/run-hierarchy/run-state-machine), the [Step FSM](/docs/concepts/run-hierarchy/step-state-machine), and the lifecycle timestamps. |
-| Lineage | `parent_run_id` for [sub-runs](/docs/concepts/run-hierarchy/sub-runs); `summary_artifact_id` for compact handoff back to parent. |
+| Lineage | `branch_from` for [branch lineage](/docs/concepts/recovery/branches); `restored_from` pointing at the source [Checkpoint](/docs/concepts/recovery/checkpoints) on resume. |
 | External references | `external_run_id` and `external_runtime` for runtimes integrated via [Runtime Integration Adapters](#runtime-integration-adapters). |
 | Timeline reconstruction | Embedded Steps and ModelCalls on `GET /v1/ks/runs/{id}` so clients reconstruct without N+1 calls. |
 | Deferred Step admission | Step rows are created only after admission succeeds — a rejected admission inserts no Step. |
@@ -93,19 +90,19 @@ GCM is the producer of [`ContextManifest`](/docs/concepts/context/context-manife
 
 | Responsibility | Detail |
 |---|---|
-| Validate | Inbound context blocks against the canonical `ContextType × MemoryScope` matrix. |
+| Validate | Inbound context blocks against the canonical `ContextType` matrix. |
 | Normalize | Segment metadata — digest, token count, byte count, checkpoint relevance, scope, retention. |
 | Identify | Assign segment IDs and content digests. |
 | Order | Deterministically order segments per ADR-003. |
 | Identify (legacy) | Compute `stable_prefix_id` for Pass 4 router compatibility. |
-| Identify (compatibility-aware) | Compute `stable_context_id` from the digest cascade plus renderer version, model family, tokenizer fingerprint, and tenant/project/context scope. |
+| Identify (compatibility-aware) | Compute `stable_context_id` from the digest cascade plus renderer version, model family, tokenizer fingerprint, and Tenant/Project/context scope. |
 | Account | Stable, volatile, active, and offloaded token counts. |
 | Materialize | Artifact-backed segments by reference (preview text, never full payload). |
 | Produce | The durable [`ContextManifest`](/docs/concepts/context/context-manifests) consumed by Admission, Router, Checkpoint Manager, and the runtime. |
 | Expose | Checkpoint-relevant segment refs to the Checkpoint Manager. |
 | Render | Deterministic model-dispatch output with multi-tier prefix breakpoints (tools / system / history-prefix / summary) so Pass 4-aligned routing and Anthropic-style prompt cache hints work from the same data structure. |
 
-GCM is **not** a broad retrieval framework, **not** a domain-specific prompt assembler, **not** an agent memory authoring UX, **not** a planner, and **not** an in-process summarizer. Frameworks own retrieval; runtimes own prompt logic; the Memory Store is a typed KV backend; the [Compaction Lineage Service](#compaction-lineage-service) owns the lineage contract.
+GCM is **not** a broad retrieval framework, **not** a domain-specific prompt assembler, **not** an agent memory authoring UX, **not** a planner, and **not** an in-process summarizer. Frameworks own retrieval; runtimes own prompt logic and memory; the [Compaction Lineage Service](#compaction-lineage-service) owns the lineage contract.
 
 ### Context Manifest Registry
 
@@ -133,37 +130,6 @@ The decision hits the wire as a [`ContextBudgetDecision`](/docs/concepts/policy/
 ### Compaction Lineage Service
 
 [`CompactionRecord`](/docs/concepts/context/compaction-records) storage. Records source manifest, source segment IDs, output segment IDs, method, model used, token counts before and after, quality flags. The runtime may produce summaries and report records, or KovaServe may run a managed compactor — the lineage contract is the same in both cases. The contract is what makes resume reconstructible: a Checkpoint can rebuild logical context from manifest + artifacts + compaction lineage even when KV restore is unavailable.
-
-### Memory Store Service
-
-A typed namespace + key store with [`MemoryScope`](/docs/concepts/memory/memory-scopes) retention. [`MemoryEntry`](/docs/concepts/memory/memory-entries) row shape: `(tenant_id, project_id, scope_type, scope_id, namespace, key, value, retention, ttl, embedding?)`. LangGraph `Store`-compatible; backs Anthropic memory tool's caller-provided persistence contract. Scopes:
-
-| Scope | Lifetime |
-|---|---|
-| `ephemeral` | Invocation-scoped, dropped after the call. |
-| `session` | Session lifetime. |
-| `user` | Cross-session per user. |
-| `tenant` | Cross-user per tenant. |
-| `global` | Cross-tenant within deployment, admin-controlled. |
-
-### Tool Catalog Registry
-
-[`ToolCatalog`](/docs/concepts/tools/tool-catalogs) is a hash-identified, immutable, versioned bundle of tool definitions. Referenced by `tool_catalog_id` so prompts that share a catalog stay on the same cache breakpoint tier. Registration computes the hash and returns the id; the bundle is never mutated in place — a new version is always a new id.
-
-### Tool Context Governance
-
-Evaluates whether tool definitions and tool outputs may enter context, and how. Output is a [`ToolContextDisposition`](/docs/concepts/tools/tool-context-disposition):
-
-| Disposition | Meaning |
-|---|---|
-| `inline_full` | Full payload enters context inline. |
-| `inline_preview` | A bounded preview enters context; the full payload is artifact-backed. |
-| `summary_required` | A required summary is the inline form; full payload is artifact-only. |
-| `artifact_ref` | Only an artifact reference enters context; no inline form. |
-| `drop` | The output is recorded but never enters context. |
-| `blocked` | The tool call itself is denied. |
-
-Decisions carry `risk_level`, `checkpoint_recommended`, `max_inline_tokens`, `artifact_required`, and `redaction_policy`. They are deterministic and auditable.
 
 ### KV Event System
 
@@ -198,7 +164,7 @@ Outputs: selected route, fallback route(s), explanation rationale (`route.ration
 
 ### Session Registry
 
-Persists continuity over time. Manages [`Session`](/docs/concepts/continuity/sessions)s and their active state handles, tracks the Session's `current_manifest_id` and bounded manifest history, tracks `CompactionRecord`s associated with the Session, tracks `ContextArtifact` references retained at Session scope, treats summaries as first-class typed segments, binds Sessions to Runs and Checkpoints (and parent Runs for sub-run lineage), and supports Session survival across node restarts.
+Persists continuity over time. Manages [`Session`](/docs/concepts/continuity/sessions)s and their active state handles, tracks the Session's `current_manifest_id` and bounded manifest history, tracks `CompactionRecord`s associated with the Session, tracks `ContextArtifact` references retained at Session scope, treats summaries as first-class typed segments, binds Sessions to Runs and Checkpoints, and supports Session survival across node restarts.
 
 ### Checkpoint Manager
 
@@ -211,13 +177,13 @@ Makes resumability first-class. **Logical context is the primary capability; KV 
 | Validate compatibility | Model family, tokenizer fingerprint, renderer version, scope. |
 | Plan restore | Logical context manifest first, KV state if available. |
 | Track outcomes | Restore attempts, latencies, failure reasons. |
-| Expose StateHandles | Typed `kv_prefix | context_manifest | checkpoint | artifact_bundle | memory_entry | runtime_state` references. |
+| Expose StateHandles | Typed `kv_prefix | context_manifest | checkpoint | artifact_bundle | runtime_state` references. |
 
 Resume order is logical-first: load manifest → validate manifest and artifacts → validate model/tokenizer compatibility → plan KV restore if available → reconstruct active context from manifest+artifacts if KV restore is unavailable → route based on feasibility → transition through `RECOVERING → RESUMING → RUNNING`. See [resume flow](/docs/concepts/recovery/resume-flow).
 
 ### State Handle Registry
 
-Resolves typed [`StateHandle`](/docs/concepts/recovery/state-handles)s. Discriminator values: `kv_prefix`, `context_manifest`, `checkpoint`, `artifact_bundle`, `memory_entry`, `runtime_state`. Generalizes the original "activation handle" concept so cross-session reuse extends beyond raw KV prefixes to manifests, artifacts, memory entries, and runtime state.
+Resolves typed [`StateHandle`](/docs/concepts/recovery/state-handles)s. Discriminator values: `kv_prefix`, `context_manifest`, `checkpoint`, `artifact_bundle`, `runtime_state`. Generalizes the original "activation handle" concept so cross-session reuse extends beyond raw KV prefixes to manifests, artifacts, and runtime state.
 
 ### Tiering / State Manager
 
@@ -228,9 +194,9 @@ Preserves continuity under pressure. Observes tier occupancy and pressure, plans
 | Responsibility | Detail |
 |---|---|
 | Model ACLs | Which models a [`PolicyScope`](/docs/concepts/policy/policy-scopes) may dispatch against. |
-| Rate limits | Per Organization / Project / Environment. Most-specific applicable limit wins. |
-| Share scope | `policy_scope.context_share_scope` — controls cache and manifest reuse boundaries (`tenant`, `project`, `environment`, `key`). |
-| Tool policy | Integrated with `ToolContextDisposition` outputs. |
+| Rate limits | Per Tenant / Project / Environment. Most-specific applicable limit wins. |
+| Share scope | `policy_scope.context_share_scope` — controls cache and manifest reuse boundaries (`tenant`, `project`, `environment`, `none`). |
+| Tool policy | `tool_policy_ref` on the resolved PolicyScope. |
 | Data boundary | Artifact and context residency constraints. |
 | Environment / deployment restrictions | Region pinning, sovereign overlays. |
 | Decisions | Explainable allow / deny / degrade — fast, deterministic, auditable. |
@@ -242,13 +208,13 @@ The economic system of record. Active control objects, not just billing records.
 | Responsibility | Detail |
 |---|---|
 | Ingest raw usage | With OpenAI-convergent `cached_tokens`. |
-| Aggregate | By tenant / project / model / day. |
+| Aggregate | By Tenant / Project / model / day. |
 | Attach | To [`Budget`](/docs/concepts/policy/budgets)s and [`ContextBudget`](/docs/concepts/policy/context-budgets)s. |
 | Forecast | Exhaustion windows. |
 | Emit | Warnings and hard stops as runtime-visible decisions. |
 | Track savings | Cache reuse value, manifest reuse value, compaction savings. |
 | Track context economics | Active tokens, stable tokens, volatile tokens, offloaded tokens, artifact storage bytes. |
-| Roll up | `cost_per_completed_run` per Run, per Project, per Organization. |
+| Roll up | `cost_per_completed_run` per Run, per Project, per Tenant. |
 | Snapshot pricing | `input_price_snapshot`, `output_price_snapshot`, `discount_snapshot` per usage row, so audit is row-self-contained. |
 | Preserve identity | `gross = net + savings` exactly across rows and scopes. |
 
@@ -256,7 +222,7 @@ The economic system of record. Active control objects, not just billing records.
 
 ### Tenant Management
 
-Owns the [tenancy](/docs/concepts/tenancy) hierarchy: [`Organization`](/docs/concepts/tenancy/organizations) → [`Project`](/docs/concepts/tenancy/projects) → [`Environment`](/docs/concepts/tenancy/environments) → [`Key`](/docs/concepts/tenancy/keys). Resolves scope on every request; manages role bindings; partitions partner-safe deployments; supports both managed multitenancy and private single-organization topologies.
+Owns the [tenancy](/docs/concepts/tenancy) hierarchy: [`Tenant`](/docs/concepts/tenancy/tenants) → [`Project`](/docs/concepts/tenancy/projects) → [`Environment`](/docs/concepts/tenancy/environments) → `Deployment`. Bearer [`Keys`](/docs/concepts/tenancy/keys) authenticate against the resolved triple. Resolves scope on every request; manages role bindings; partitions partner-safe deployments; supports both managed multi-tenancy and private single-tenant topologies.
 
 ### Runtime Integration Adapters
 
@@ -268,23 +234,22 @@ Surfaces every control-plane truth that operators and developers need:
 
 | View | Purpose |
 |---|---|
-| Run explorer | Per-Run timeline, Step list, ModelCalls, Checkpoints, branches, sub-runs. |
+| Run explorer | Per-Run timeline, Step list, ModelCalls, Checkpoints, branches. |
 | Session explorer | Manifest history, current_manifest_id, retained artifacts. |
 | Checkpoint browser | Tree view, restore feasibility, attached StateHandles. |
 | State / routing view | Where reusable state lives, routing decisions, fallbacks. |
-| Usage and budget dashboards | Per-Run, Project, Organization roll-up. |
+| Usage and budget dashboards | Per-Run, Project, Tenant roll-up. |
 | Context manifest timeline | Per Run — segments, sizes, tier classification. |
 | Compaction lineage visualization | Source-to-output relationships. |
 | Artifact offload visibility | Bytes, types, retention. |
 | Context budget burn | Per Run — admission decisions over time. |
-| Tool catalog inventory | Versions, invalidation events. |
 | Policy decision inspection | Per call — what was allowed, denied, degraded, why. |
 | Fleet / node health | From substrate telemetry. |
 | Tenant / Project admin | Hierarchy management, key issuance. |
 
 ### SDK / CLI support APIs
 
-The control-plane endpoints that back the [Python SDK](/docs/sdk) and the [`kova` CLI](/docs/cli). Wire shapes for Run, Session, Checkpoint, Budget, Context, Memory, Tool catalog, Events.
+The control-plane endpoints that back the [Python SDK](/docs/sdk) and the [`kova` CLI](/docs/cli). Wire shapes for Run, Session, Checkpoint, Budget, Context, Artifact, Compaction, StateHandle, and Events.
 
 ## Public API surface
 
@@ -294,16 +259,16 @@ The Gateway exposes three families of endpoints. All wire shapes are stable acro
 |---|---|---|
 | **OpenAI-compatible** | `POST /v1/chat/completions`, `GET /v1/models` | Drop-in for BYO runtime adoption. Carries the optional `kovaserve` extension envelope. |
 | **Native control plane** | `POST /v1/ks/runs`, `GET /v1/ks/runs/{id}`, `POST /v1/ks/sessions`, `POST /v1/ks/budgets`, `POST /v1/ks/policies` | First-class control over canonical entities. |
-| **Context engineering** | `POST /v1/ks/context/manifests`, `POST /v1/ks/context/admit`, `POST /v1/ks/context/compact`, `POST /v1/ks/tool-catalogs`, `POST /v1/ks/tools/check-policy`, `PUT /v1/ks/memory/entries`, `GET /v1/ks/handles/{id}` | Manifest, artifact, admission, compaction, memory, tool catalog, state handle. |
+| **Context engineering** | `POST /v1/ks/context/manifests`, `POST /v1/ks/context/admit`, `POST /v1/ks/context/compact`, `GET /v1/ks/handles/{id}` | Manifest, artifact, admission, compaction, state handle. |
 | **Runtime APIs** | `POST /v1/ks/runtime/runs`, `POST /v1/ks/runtime/runs/{id}/pause`, `/resume`, `/branch`, `/timeline`, `/artifacts` | The Layer 3 runtime surface, hosted on the same gateway. |
-| **Events (pulled)** | `GET /v1/ks/events/...` | The 10 event streams as a polled API. |
+| **Events (pulled)** | `GET /v1/ks/events/...` | The event streams as a polled API. |
 | **Health** | `GET /health`, `GET /metrics` | Liveness, readiness, Prometheus metrics. |
 
 The native APIs share the [error envelope](/docs/api/errors), [pagination](/docs/api/pagination), [idempotency](/docs/api/idempotency), [cost headers](/docs/api/cost-headers), and [SSE streaming](/docs/api/streaming) conventions.
 
 ## Event taxonomy
 
-Layer 2 emits ten event streams under the `ks.>` subject namespace, plus the `kv_events` substrate stream it ingests from Layer 1. Subjects share the [event envelope](/docs/concepts/events/event-envelope) — `event_id`, `event_type`, timestamp, tenancy fields, canonical-entity refs, `trace_id`, payload.
+Layer 2 emits multiple event streams under the `ks.>` subject namespace, plus the `kv_events` substrate stream it ingests from Layer 1. Subjects share the [event envelope](/docs/concepts/events/event-envelope) — `event_id`, `event_type`, timestamp, tenancy fields, canonical-entity refs, `trace_id`, payload.
 
 | Stream | Examples | Concept |
 |---|---|---|
@@ -315,25 +280,22 @@ Layer 2 emits ten event streams under the `ks.>` subject namespace, plus the `kv
 | Checkpoint | `ks.checkpoint.created`, `ks.checkpoint.restore_completed` | [Checkpoint events](/docs/concepts/events/checkpoint) |
 | Runtime | `ks.tool.invocation.started`, `ks.process.waiting`, `ks.file.write.applied`, `ks.branch.created` | [Runtime events](/docs/concepts/events/runtime) |
 | Context engineering | `ks.context.manifest.created`, `ks.context.budget.compact_required` | [Context engineering events](/docs/concepts/events/context-engineering) |
-| Memory | `ks.memory.entry.written`, `ks.memory.entry.expired` | [Memory events](/docs/concepts/events/memory) |
-| Sub-run | `ks.subrun.dispatched`, `ks.subrun.summary_attached` | [Sub-run events](/docs/concepts/events/sub-run) |
 
 ## The hot path
 
 The control plane orders the standard model call so context-dependent decisions run after context is assembled — never against rough message estimates.
 
 ```
-1.  Authn / scope resolution           ── Gateway: resolve tenant / project / PolicyScope
+1.  Authn / scope resolution           ── Gateway: resolve Tenant / Project / PolicyScope
 2.  Run / Session resolution            ── Canonical Execution Service (no Step yet)
-3.  Context inputs gathering            ── Session history + Memory Store + ContextArtifact previews
+3.  Context inputs gathering            ── Session history + ContextArtifact previews
 4.  Manifest assembly (GCM v2)          ── ContextSegments, stable_prefix_id, stable_context_id, token counts
-5.  Tool context disposition            ── ToolContextPolicy → ToolContextDisposition
-6.  Context admission                   ── ContextBudget decision; transformations applied; manifest updated
-7.  Run-budget precheck                 ── Budget evaluates against admitted manifest
-8.  Step creation                       ── Step row created and bound to manifest
-9.  Routing                             ── Cache-Aware Router with KV Index + scope filters + budget pressure
-10. Substrate execution                 ── Layer 1 executes; emits real lifecycle / state events
-11. Recording                           ── ModelCall stored with context_manifest_id FK; metering, ContextBudget
+5.  Context admission                   ── ContextBudget decision; transformations applied; manifest updated
+6.  Run-budget precheck                 ── Budget evaluates against admitted manifest
+7.  Step creation                       ── Step row created and bound to manifest
+8.  Routing                             ── Cache-Aware Router with KV Index + scope filters + budget pressure
+9.  Substrate execution                 ── Layer 1 executes; emits real lifecycle / state events
+10. Recording                           ── ModelCall stored with context_manifest_id FK; metering, ContextBudget
                                             consumption, ExecutionEvents, Session updates, dashboards update
 ```
 
@@ -345,9 +307,9 @@ The boundary is precise.
 - **Not the runtime.** Worker lease ownership, sandbox lifecycle, workspace and `WorkspaceArtifact` model, runtime-local state, retry/resume/branch UX — all [Layer 3](/docs/concepts/layers/runtime-wedge).
 - **Not prompt composition.** Frameworks own retrieval; runtimes own prompt logic.
 - **Not a planner.** Runtimes own planning.
-- **Not an agent memory authoring UX.** The Memory Store is a typed KV backend.
-- **Not a context engineering platform.** The control plane ships execution-boundary primitives — manifests, segments, artifacts, budgets, compaction lineage, memory scope, tool catalog versioning, sub-run summary handoff, tool context disposition — and not a prompt-composition studio.
-- **Not bespoke per customer.** The same semantic model serves every Organization on managed cloud, every customer on private deployment, and every partner on a partner fleet.
+- **Not an agent memory authoring UX.** Memory belongs in the agent framework.
+- **Not a context engineering platform.** The control plane ships execution-boundary primitives — manifests, segments, artifacts, budgets, compaction lineage — and not a prompt-composition studio.
+- **Not bespoke per customer.** The same semantic model serves every Tenant on managed cloud, every customer on private deployment, and every partner on a partner fleet.
 
 ## Deployment
 
@@ -364,4 +326,4 @@ Subsystem boundaries map cleanly to deployment: every Layer 2 subsystem is a mod
 - [Runs](/docs/concepts/run-hierarchy/runs) · [Sessions](/docs/concepts/continuity/sessions) · [Steps](/docs/concepts/run-hierarchy/steps) · [ModelCalls](/docs/concepts/run-hierarchy/model-calls) — the canonical execution entities the control plane persists
 - [ContextManifests](/docs/concepts/context/context-manifests) · [Checkpoints](/docs/concepts/recovery/checkpoints) · [Budgets](/docs/concepts/policy/budgets) · [PolicyScopes](/docs/concepts/policy/policy-scopes) — the load-bearing control objects
 - [Managed cloud](/docs/concepts/deployment/managed-cloud) · [Private deployment](/docs/concepts/deployment/private-deployment) — the deployment topologies
-- [Events overview](/docs/concepts/events) — the ten event streams the control plane emits
+- [Events overview](/docs/concepts/events) — the event streams the control plane emits

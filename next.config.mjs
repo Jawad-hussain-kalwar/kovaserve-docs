@@ -63,7 +63,7 @@ const conceptRedirects = [
   ['pricing-snapshots', 'cost/pricing-snapshots'],
   ['cost-per-completed-run', 'cost/cost-per-completed-run'],
   // tenancy (tenancy.mdx -> tenancy/index.mdx; URL unchanged, no redirect needed)
-  ['organizations', 'tenancy/organizations'],
+  ['tenants', 'tenancy/tenants'],
   ['projects', 'tenancy/projects'],
   ['environments', 'tenancy/environments'],
   ['keys', 'tenancy/keys'],

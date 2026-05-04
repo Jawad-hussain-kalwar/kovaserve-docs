@@ -49,7 +49,7 @@ The [runtime architecture](/docs/concepts/runtime/runtime-architecture) breaks t
 
 ## Step progression
 
-The runtime uses **typed step progression** drawn from the canonical 19-value `StepType` enum — richer than a generic orchestrator's opaque internal loop because it matches the wedge:
+The runtime uses **typed step progression** drawn from the canonical `StepType` enum — richer than a generic orchestrator's opaque internal loop because it matches the wedge:
 
 | Group | Step types |
 |---|---|
@@ -58,8 +58,7 @@ The runtime uses **typed step progression** drawn from the canonical 19-value `S
 | Reflection markers | `OBSERVE`, `THINK` |
 | Durability and lineage | `CHECKPOINT`, `PAUSE`, `RESUME`, `BRANCH` |
 | Terminal | `COMPLETE`, `FAIL` |
-| Context engineering | `COMPACT`, `MEMORY_READ`, `MEMORY_WRITE` |
-| Sub-run lineage | `SUB_RUN_DISPATCH`, `SUB_RUN_JOIN` |
+| Context engineering | `COMPACT` |
 
 See [step types](/docs/concepts/run-hierarchy/step-types) for the full reference. Validation is application-level, so new types extend the canonical list without DDL changes.
 
@@ -67,9 +66,9 @@ See [step types](/docs/concepts/run-hierarchy/step-types) for the full reference
 
 The end-to-end loop a developer follows:
 
-1. **Create a Project** — under an [Organization](/docs/concepts/tenancy/organizations) and an [Environment](/docs/concepts/tenancy/environments).
+1. **Create a Project** — under a [Tenant](/docs/concepts/tenancy/tenants) and an [Environment](/docs/concepts/tenancy/environments).
 2. **Define an agent spec** — model, system prompt, tool list, sandbox profile, default [Budget](/docs/concepts/policy/budgets), default [ContextBudget](/docs/concepts/policy/context-budgets), [PolicyScope](/docs/concepts/policy/policy-scopes).
-3. **Register tools** — through the runtime tool gateway. Tool definitions hash into a [ToolCatalog](/docs/concepts/tools/tool-catalogs) so cache breakpoints stay stable.
+3. **Register tools** — through the runtime tool gateway.
 4. **Choose a sandbox profile** — container image, mounted [workspace](/docs/concepts/runtime/workspaces), file and network policy, resource limits.
 5. **Configure checkpoint and budget defaults** — when to checkpoint, when to warn, when to hard-stop.
 6. **Trigger a Run** — `POST /v1/ks/runtime/runs` with the agent spec id, the workspace source binding, and the inputs.

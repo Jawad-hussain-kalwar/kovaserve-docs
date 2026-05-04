@@ -1,13 +1,13 @@
 ---
 title: Step types
-description: The canonical 19-value StepType enum — what each type represents, when runtimes emit it, and how the substrate, sandbox, and control plane interpret it.
+description: The canonical StepType enum — what each type represents, when runtimes emit it, and how the substrate, sandbox, and control plane interpret it.
 ---
 
-KovaServe defines a canonical, open enum of **Step types** that classifies every [Step](/docs/concepts/run-hierarchy/steps) by what it is doing inside a [Run](/docs/concepts/run-hierarchy/runs). The catalog is large enough to cover the standard agent loop, workspace and process orchestration, reflection, durability, lineage, context engineering, and sub-run composition. New types extend the enum without a DDL change — Step type validation is application-level, not a database `CHECK` constraint.
+KovaServe defines a canonical, open enum of **Step types** that classifies every [Step](/docs/concepts/run-hierarchy/steps) by what it is doing inside a [Run](/docs/concepts/run-hierarchy/runs). The catalog covers the standard agent loop, workspace and process orchestration, reflection, durability, lineage, and context engineering. New types extend the enum without a DDL change — Step type validation is application-level, not a database `CHECK` constraint.
 
-A runtime emits Step types that match its semantics and ignores the rest. A LangGraph BYO runtime may stick to `MODEL_CALL`, `TOOL_PLAN`, and `TOOL_EXECUTE`; the KovaServe runtime in coding-agent mode emits the full sandbox set; a document-review agent may also emit `OBSERVE` and `THINK` markers; any runtime that participates in compaction or memory reads emits the corresponding context-engineering types. The control plane interprets the types it owns — `CHECKPOINT`, `PAUSE`, `RESUME`, `BRANCH`, `COMPACT`, `MEMORY_READ`, `MEMORY_WRITE`, `SUB_RUN_DISPATCH`, `SUB_RUN_JOIN` — and stores the rest as runtime-emitted progression markers.
+A runtime emits Step types that match its semantics and ignores the rest. A LangGraph BYO runtime may stick to `MODEL_CALL`, `TOOL_PLAN`, and `TOOL_EXECUTE`; the KovaServe runtime in coding-agent mode emits the full sandbox set; a document-review agent may also emit `OBSERVE` and `THINK` markers; any runtime that participates in compaction emits the corresponding context-engineering type. The control plane interprets the types it owns — `CHECKPOINT`, `PAUSE`, `RESUME`, `BRANCH`, `COMPACT` — and stores the rest as runtime-emitted progression markers.
 
-## The canonical 19 values
+## The canonical values
 
 | Group | Step type |
 |---|---|
@@ -16,8 +16,9 @@ A runtime emits Step types that match its semantics and ignores the rest. A Lang
 | Reflection and reasoning | `OBSERVE`, `THINK` |
 | Durability and lineage | `CHECKPOINT`, `PAUSE`, `RESUME`, `BRANCH` |
 | Terminal markers | `COMPLETE`, `FAIL` |
-| Context engineering | `COMPACT`, `MEMORY_READ`, `MEMORY_WRITE` |
-| Sub-run | `SUB_RUN_DISPATCH`, `SUB_RUN_JOIN` |
+| Context engineering | `COMPACT` |
+
+The canonical enum has 15 values. The control plane reads the type as a `TEXT` column with application-level validation; widening the catalog is a Pydantic schema change, never a DDL change.
 
 ## Standard agent loop
 
@@ -33,7 +34,7 @@ A reasoning Step in which the model selects which tool to call and with what arg
 
 ### `TOOL_EXECUTE`
 
-The execution of a tool the runtime selected. May be a child of a `TOOL_PLAN` Step (`parent_step_id` set) or a top-level Step when the runtime decides which tool to call without an explicit planning phase. Owns zero ModelCalls — the substrate is not invoked here. The result is recorded as a tool result and, when material, offloaded to a [ContextArtifact](/docs/concepts/context/context-artifacts) under the [ToolContextDisposition](/docs/concepts/tools/tool-context-disposition) chosen by Tool Context Governance.
+The execution of a tool the runtime selected. May be a child of a `TOOL_PLAN` Step (`parent_step_id` set) or a top-level Step when the runtime decides which tool to call without an explicit planning phase. Owns zero ModelCalls — the substrate is not invoked here. The result is recorded as a tool result and, when material, offloaded to a [ContextArtifact](/docs/concepts/context/context-artifacts).
 
 ## Workspace and process
 
@@ -83,7 +84,7 @@ The Run was resumed — either continuing from `PAUSED` or returning through `RE
 
 ### `BRANCH`
 
-The runtime created a new Run lineage from a Checkpoint or stable point. The new Run inherits the parent's PolicyScope and a bounded copy of its Budget. Branching is distinct from sub-run dispatch: a branch is an alternate continuation of the same Run's intent; a sub-run is a delegated child. See the `BRANCHING` state on the [Run state machine](/docs/concepts/run-hierarchy/run-state-machine).
+The runtime created a new Run lineage from a Checkpoint or stable point. The new Run inherits the parent's PolicyScope and a bounded copy of its Budget. See the `BRANCHING` state on the [Run state machine](/docs/concepts/run-hierarchy/run-state-machine) and the [Branches](/docs/concepts/recovery/branches) page for the full lineage and budget-allocation contract.
 
 ## Terminal markers
 
@@ -107,29 +108,9 @@ Step types that record interactions with the **Context Engineering Subsystem**.
 
 A compaction operation occurred — either runtime-produced or run by a KovaServe-managed compactor. The Step's effect is a [CompactionRecord](/docs/concepts/context/compaction-records) that captures the source manifest, source segment IDs, output segment IDs, method, model used, and token counts before and after. The lineage contract is the same regardless of which side produced the summary.
 
-### `MEMORY_READ`
-
-The runtime read one or more entries from the [Memory Store](/docs/concepts/memory/memory-store). The Step's metadata records the queried `(namespace, key)` pairs and the [MemoryScope](/docs/concepts/memory/memory-scopes) under which they were resolved. The retrieved entries enter the next ModelCall's manifest as segments with `memory_scope` set accordingly.
-
-### `MEMORY_WRITE`
-
-The runtime wrote, updated, or deleted one or more Memory Store entries. The Step records the affected `(namespace, key)` pairs and the scope; the corresponding `ks.memory.entry.written`, `ks.memory.entry.deleted`, or `ks.memory.entry.expired` events are emitted on the memory event stream.
-
-## Sub-run
-
-Step types the **Canonical Execution Service** uses to record [sub-run](/docs/concepts/run-hierarchy/sub-runs) lineage.
-
-### `SUB_RUN_DISPATCH`
-
-The Run dispatched a child Run via `POST /v1/ks/runs/{id}/subruns`. The Step's metadata pins the child's `run_id`; the child carries `parent_run_id` back at the dispatching Run. PolicyScope inheritance and Budget allocation happen at this Step.
-
-### `SUB_RUN_JOIN`
-
-The parent folded a completed child's `summary_artifact_id` into its next ContextManifest as a single bounded segment. The Step is emitted before the next `MODEL_CALL` Step that consumes the summary; ContextBudget admission re-evaluates the parent's manifest with the summary segment included.
-
 ## Validation and extension
 
-Step type validation is performed at the application layer. The Step row stores the type as a `TEXT` column with an enum check enforced by the Pydantic schema and the Canonical Execution Service. New canonical types extend the enum without DDL changes — adding `MEMORY_READ` and `MEMORY_WRITE`, adding `COMPACT`, adding the sub-run pair — never requires a migration to widen a database constraint.
+Step type validation is performed at the application layer. The Step row stores the type as a `TEXT` column with an enum check enforced by the Pydantic schema and the Canonical Execution Service. New canonical types extend the enum without DDL changes — adding `COMPACT` to the catalog never required a migration to widen a database constraint.
 
 Runtimes that need a Step type beyond the canonical set should propose it. KovaServe extends the canonical enum rather than letting the surface fragment, so timelines, dashboards, and audit consumers always interpret the same names the same way.
 
@@ -143,7 +124,6 @@ Step types and runtime events are **separate enumerations**. A Step type is a ro
 - [Step state machine](/docs/concepts/run-hierarchy/step-state-machine) — the lifecycle each Step type travels
 - [ModelCalls](/docs/concepts/run-hierarchy/model-calls) — what `MODEL_CALL`, `TOOL_PLAN`, and similar Steps own
 - [Checkpoints](/docs/concepts/recovery/checkpoints) — what `CHECKPOINT`, `PAUSE`, `RESUME`, `BRANCH` interact with
-- [Sub-runs](/docs/concepts/run-hierarchy/sub-runs) — the dispatch and join semantics of `SUB_RUN_DISPATCH` and `SUB_RUN_JOIN`
+- [Branches](/docs/concepts/recovery/branches) — the `BRANCH` Step's lineage contract
 - [Compaction records](/docs/concepts/context/compaction-records) — the lineage `COMPACT` produces
-- [Memory entries](/docs/concepts/memory/memory-entries) — what `MEMORY_READ` and `MEMORY_WRITE` operate on
 - [Sandboxes](/docs/concepts/runtime/sandboxes) · [Workspaces](/docs/concepts/runtime/workspaces) — where `FILE_READ`, `FILE_WRITE`, and `PROCESS_START` execute

@@ -38,7 +38,7 @@ Run                                  (1..N checkpoints)
     │                                 renderer version, scope)
     ├── storage_refs[]               (S3 / MinIO URIs for artifacts and
     │                                 KV exports)
-    └── run_ref / step_ref / session_ref / parent_run_ref
+    └── run_ref / step_ref / session_ref / branch_from_ref
 ```
 
 A Checkpoint is bound to exactly one Run and, transitively, one Session. Checkpoints are not shared across Runs; a resumed Run is a new Run that *references* the Checkpoint of the prior Run as its restore source.
@@ -47,8 +47,7 @@ A Checkpoint is bound to exactly one Run and, transitively, one Session. Checkpo
 
 | Field | Purpose |
 |---|---|
-| `run_id` / `step_id` / `session_id` | Canonical execution references. |
-| `parent_run_id` | The originating Run when the Checkpoint was created; preserved across resume. |
+| `run_id` / `step_id` / `session_id` | Canonical execution references — the originating Run, the Step the Checkpoint was anchored to, and the Session at the time of capture. |
 | `context_manifest_id` | The frozen manifest snapshot. The audit anchor for restore. |
 | `state_handles[]` | Typed references to reusable execution state. See [StateHandles](/docs/concepts/recovery/state-handles). |
 | `compatibility_vector` | Model family, tokenizer fingerprint, renderer version, policy scope. Validated before restore. |
@@ -167,7 +166,6 @@ The gateway resolves the Checkpoint, runs the restore plan, and binds the new Ru
 ## What Checkpoints are not
 
 - **Not a substitute for [Sessions](/docs/concepts/continuity/sessions).** Sessions provide multi-run continuity at the conversational level; Checkpoints provide point-in-time durability within or across Runs. A Session may host many Checkpoints; a Checkpoint is always anchored to a Run.
-- **Not a memory store.** Cross-Run, cross-Session reuse of *information* belongs to the [Memory Store](/docs/concepts/memory/memory-store) via `memory_entry` StateHandles, not raw checkpoint replay.
 - **Not a transaction log.** Checkpoints are explicit safe-points, not a continuous record of every Step.
 - **Not coupled to a node.** A Checkpoint is portable across replicas in the same deployment by design. KV restore is opportunistic; manifest replay is universal.
 

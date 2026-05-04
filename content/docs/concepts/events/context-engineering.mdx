@@ -1,9 +1,9 @@
 ---
 title: Context engineering events
-description: The context engineering stream — manifest, segment, artifact, compaction, ContextBudget, and tool-catalog lifecycle events covering the full execution-boundary context engineering surface.
+description: The context engineering stream — manifest, segment, artifact, compaction, and ContextBudget lifecycle events covering the full execution-boundary context engineering surface.
 ---
 
-The **context engineering events** stream covers the lifecycle of every context-engineering primitive: [manifests](/docs/concepts/context/context-manifests), [segments](/docs/concepts/context/context-segments), [artifacts](/docs/concepts/context/context-artifacts), [compaction records](/docs/concepts/context/compaction-records), [ContextBudget](/docs/concepts/policy/context-budgets) admission decisions, and [tool catalog](/docs/concepts/tools/tool-catalogs) registration.
+The **context engineering events** stream covers the lifecycle of every context-engineering primitive: [manifests](/docs/concepts/context/context-manifests), [segments](/docs/concepts/context/context-segments), [artifacts](/docs/concepts/context/context-artifacts), [compaction records](/docs/concepts/context/compaction-records), and [ContextBudget](/docs/concepts/policy/context-budgets) admission decisions.
 
 Subjects: `ks.context.*`. Persisted in the `execution_events` JetStream stream. Consumed via [`GET /v1/ks/events/context-engineering`](/docs/api/events/context-engineering).
 
@@ -46,13 +46,6 @@ Subjects: `ks.context.*`. Persisted in the `execution_events` JetStream stream. 
 | `ks.context.budget.compact_required` | Admission produced `COMPACT_REQUIRED`. |
 | `ks.context.budget.degraded` | Admission produced `DEGRADE`. |
 | `ks.context.budget.hard_stop` | Admission produced `HARD_STOP`. |
-
-### Tool catalog events
-
-| Event | Trigger |
-|---|---|
-| `ks.context.tool_catalog.registered` | A new ToolCatalog version is registered. |
-| `ks.context.tool_catalog.invalidated` | A ToolCatalog is marked invalid (e.g., a referenced tool was removed). |
 
 ## Key payload shapes
 
@@ -126,18 +119,6 @@ All ContextBudget events share a payload shape:
 
 `decision` matches the event type's suffix. `transformation_planned` is the action the [admission](/docs/concepts/policy/admission) service is about to apply.
 
-### `ks.context.tool_catalog.registered`
-
-```json
-{
-  "tool_catalog_id": "01J8X9Y2Z3K4M5N6P7Q8R9TC02",
-  "content_hash": "sha256:9c2e...",
-  "version": "2.1.0",
-  "tool_count": 14,
-  "supersedes_id": "01J8X9Y2Z3K4M5N6P7Q8R9TC01"
-}
-```
-
 ## Sequence around a single ModelCall
 
 ```
@@ -155,7 +136,7 @@ The sequence may include zero, one, or multiple admission round-trips depending 
 
 ## Identity fields
 
-The envelope's `context_manifest_id` is populated on every event tied to a specific manifest. `run_id`, `step_id`, and `model_call_id` are populated for events fired in the per-call hot path (manifest assembly, admission, compaction triggered during the call). Tool-catalog and standalone artifact events may have `run_id` and `model_call_id` null when the registration is not call-bound (e.g., a tool catalog registered via `POST /v1/ks/tool-catalogs` outside a Run).
+The envelope's `context_manifest_id` is populated on every event tied to a specific manifest. `run_id`, `step_id`, and `model_call_id` are populated for events fired in the per-call hot path (manifest assembly, admission, compaction triggered during the call). Standalone artifact events may have `run_id` and `model_call_id` null when the write is not call-bound.
 
 ## Common consumers
 
@@ -169,5 +150,4 @@ The envelope's `context_manifest_id` is populated on every event tied to a speci
 - [Context manifests](/docs/concepts/context/context-manifests) · [Context segments](/docs/concepts/context/context-segments) · [Context artifacts](/docs/concepts/context/context-artifacts)
 - [Compaction records](/docs/concepts/context/compaction-records) · [Compaction lineage](/docs/concepts/context/compaction-lineage)
 - [Context budgets](/docs/concepts/policy/context-budgets) · [Admission](/docs/concepts/policy/admission)
-- [Tool catalogs](/docs/concepts/tools/tool-catalogs)
 - [`GET /v1/ks/events/context-engineering`](/docs/api/events/context-engineering)

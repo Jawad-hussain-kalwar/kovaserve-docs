@@ -63,7 +63,7 @@ Manages the [sandbox](/docs/concepts/runtime/sandboxes) lifecycle. The runtime i
 
 ### Tool Registry and Tool Gateway
 
-The wedge-specific [tool invocation](/docs/concepts/runtime/tool-invocations) layer. Built-in tool classes — shell/command, file, repo/git, test/build, HTTP/API, structured external. Tool definitions hash into a [ToolCatalog](/docs/concepts/tools/tool-catalogs) so cache breakpoints stay stable. The Tool Gateway dispatches each invocation, enforces sandbox boundaries, and emits `ks.tool.invocation.*` events. Layer 3 owns wedge-specific invocation semantics; Layer 2 owns global policy and budget enforcement.
+The wedge-specific [tool invocation](/docs/concepts/runtime/tool-invocations) layer. Built-in tool classes — shell/command, file, repo/git, test/build, HTTP/API, structured external — covering the curated set of `file_read`, `file_write`, `shell`, `search`, `git`, and `test_runner` tools the runtime ships with, alongside any custom tools registered for an agent spec. The Tool Gateway dispatches each invocation, enforces sandbox boundaries, and emits `ks.tool.invocation.*` events. Layer 3 owns wedge-specific invocation semantics; Layer 2 owns global policy enforcement (`tool_policy_ref` on the resolved [PolicyScope](/docs/concepts/policy/policy-scopes)) and budget enforcement (`tool_limit` on the resolved [Budget](/docs/concepts/policy/budgets)).
 
 ### Workspace / Artifact Manager
 
@@ -98,14 +98,14 @@ The boundary is precise — and is enforced by what the runtime persists vs. wha
 | Agent definition model | Canonical Run / Session / Step / ModelCall persistence and FSMs |
 | Worker lease and assignment | [PolicyScope](/docs/concepts/policy/policy-scopes), tenant resolution, [Budget](/docs/concepts/policy/budgets) and [ContextBudget](/docs/concepts/policy/context-budgets) admission |
 | [Sandbox](/docs/concepts/runtime/sandboxes) lifecycle | Routing across the substrate fleet |
-| [Tool registration and invocation](/docs/concepts/runtime/tool-invocations) semantics | [Tool catalog](/docs/concepts/tools/tool-catalogs) versioning + [tool context governance](/docs/concepts/tools/tool-context-disposition) |
+| [Tool registration and invocation](/docs/concepts/runtime/tool-invocations) semantics | Global policy and budget enforcement |
 | [Workspace](/docs/concepts/runtime/workspaces) and [WorkspaceArtifact](/docs/concepts/runtime/workspace-artifacts) model | [ContextManifest](/docs/concepts/context/context-manifests), [ContextSegment](/docs/concepts/context/context-segments), [ContextArtifact](/docs/concepts/context/context-artifacts), [CompactionRecord](/docs/concepts/context/compaction-records) |
-| [Runtime-local state](/docs/concepts/runtime/runtime-local-state) | [Memory store](/docs/concepts/memory/memory-store) and [MemoryScope](/docs/concepts/memory/memory-scopes) |
+| [Runtime-local state](/docs/concepts/runtime/runtime-local-state) | Canonical entity persistence |
 | Checkpoint trigger rules at runtime boundaries | [Checkpoint Manager](/docs/concepts/recovery/checkpoints) capture, validation, restore |
 | [Retry / resume / branch](/docs/concepts/recovery/branches) UX for the wedge | Run [state machine](/docs/concepts/run-hierarchy/run-state-machine) transitions |
 | Runtime-native [timeline](/docs/concepts/runtime/runtime-observability) UX | Event taxonomy and [event envelope](/docs/concepts/events/event-envelope) |
 
-The runtime never invents parallel context-engineering primitives. When it needs to compact context, it produces a [CompactionRecord](/docs/concepts/context/compaction-records) through the canonical API. When it needs to offload a tool result, it writes a [ContextArtifact](/docs/concepts/context/context-artifacts). When it needs to remember something across runs, it writes a [MemoryEntry](/docs/concepts/memory/memory-entries) under the right [MemoryScope](/docs/concepts/memory/memory-scopes). The Layer 2 surface is what makes the runtime *thin*.
+The runtime never invents parallel context-engineering primitives. When it needs to compact context, it produces a [CompactionRecord](/docs/concepts/context/compaction-records) through the canonical API. When it needs to offload a tool result, it writes a [ContextArtifact](/docs/concepts/context/context-artifacts). The Layer 2 surface is what makes the runtime *thin*.
 
 ## Wire shape — runtime API
 

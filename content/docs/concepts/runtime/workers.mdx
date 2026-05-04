@@ -30,7 +30,7 @@ A **Worker** is the unit of execution in the KovaServe runtime. It claims a [Run
 | Claim runnable work | Pull from the runnable queue exposed by the [Runtime Orchestrator](/docs/concepts/runtime/runtime-architecture#runtime-orchestrator); take a lease bounded by a renewal interval. |
 | Materialize runtime state | Read [runtime-local state](/docs/concepts/runtime/runtime-local-state) for the Run — last safe checkpoint, planner scratchpad, active process handles, tool loop position, branch pointer. |
 | Execute Step transitions | For each Step, dispatch the action: model call through `POST /v1/chat/completions`, tool invocation through the Tool Gateway, file or process operation in the [sandbox](/docs/concepts/runtime/sandboxes). |
-| Interact with Layer 2 | Issue [ModelCalls](/docs/concepts/run-hierarchy/model-calls), request [Checkpoints](/docs/concepts/recovery/checkpoints), report [CompactionRecords](/docs/concepts/context/compaction-records), read and write [memory](/docs/concepts/memory/memory-entries). |
+| Interact with Layer 2 | Issue [ModelCalls](/docs/concepts/run-hierarchy/model-calls), request [Checkpoints](/docs/concepts/recovery/checkpoints), report [CompactionRecords](/docs/concepts/context/compaction-records). |
 | Interact with sandboxes and tools | Mount workspaces, dispatch tool invocations, capture stdout/stderr into [WorkspaceArtifacts](/docs/concepts/runtime/workspace-artifacts). |
 | Renew or release the lease | Renewal while making progress; release on Run pause, completion, or escalation. |
 | Emit runtime events | Emit `ks.tool.invocation.*`, `ks.process.*`, `ks.file.write.applied`, `ks.branch.created` and the rest of the [runtime event stream](/docs/concepts/events/runtime). |

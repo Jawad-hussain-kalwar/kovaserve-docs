@@ -2,7 +2,6 @@
   "title": "Run hierarchy",
   "pages": [
     "runs",
-    "sub-runs",
     "steps",
     "step-types",
     "model-calls",

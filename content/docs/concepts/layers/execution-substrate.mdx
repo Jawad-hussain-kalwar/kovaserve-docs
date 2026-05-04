@@ -51,7 +51,7 @@ The substrate accepts and carries an execution metadata envelope from the gatewa
 | `policy_scope_ref` | Resolved [PolicyScope](/docs/concepts/policy/policy-scopes). |
 | `budget_context` | Run-level [Budget](/docs/concepts/policy/budgets) reference. |
 | `placement_hint` | Optional [PlacementHint](/docs/concepts/routing/placement-hints) from the runtime or operator. |
-| `memory_class_hints` | Typed [MemoryScope](/docs/concepts/memory/memory-scopes) annotations. |
+| `memory_class_hints` | Typed retention-class annotations. |
 | `trace_id` | OpenTelemetry trace correlation. |
 
 The substrate does not interpret these fields. It preserves them through every stage so emitted events can be joined back to canonical entities upstream.
@@ -159,7 +159,7 @@ The substrate carries identifiers; it does not own their semantics.
 - **No route scoring.** The substrate accepts hints and reports back. The [Cache-Aware Router](/docs/concepts/routing/manifest-aware-routing) chooses placement.
 - **No restore strategy.** The substrate provides primitives (export, import, validate). The [Checkpoint Manager](/docs/concepts/recovery/checkpoints) plans logical-context-first restore.
 - **No context engineering.** The substrate may consume `stable_context_id` or `memory_class_hints` for placement and validation, but it never assembles a manifest. [GCM v2](/docs/concepts/layers/control-plane#global-context-manager-gcm-v2) is the manifest producer.
-- **No tenancy.** The substrate is unaware of `Organization`, `Project`, `Environment`, or `Key`. It receives a resolved `policy_scope_ref` and respects it; it does not resolve it.
+- **No tenancy.** The substrate is unaware of `Tenant`, `Project`, `Environment`, or `Deployment`. It receives a resolved `policy_scope_ref` and respects it; it does not resolve it.
 - **No budget enforcement.** The substrate carries `budget_context` through the request path; the [Metering / Cost / Budget Layer](/docs/concepts/layers/control-plane#metering--cost--budget) does the accounting and the [run-budget precheck](/docs/concepts/policy/budgets) admits or rejects.
 
 ## How the substrate fits in deployment

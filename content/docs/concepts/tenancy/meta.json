@@ -2,7 +2,7 @@
   "title": "Tenancy",
   "pages": [
     "index",
-    "organizations",
+    "tenants",
     "projects",
     "environments",
     "keys"

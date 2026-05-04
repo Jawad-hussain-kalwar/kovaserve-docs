@@ -21,7 +21,6 @@ KovaServe is a three-layer system. **Layer 1** is the open inference substrate t
 │   API Gateway · Canonical Execution Service                           │
 │   Global Context Manager · Context Manifest Registry                  │
 │   Context Artifact Store · Context Admission · Compaction Lineage     │
-│   Memory Store · Tool Catalog Registry · Tool Context Governance      │
 │   Cache-Aware Router · KV Index · KV Event System                     │
 │   Session Registry · Checkpoint Manager · State Handle Registry       │
 │   Tiering / State Manager · Policy / Governance                       │
@@ -91,9 +90,9 @@ Layer 3 is a focused runtime product built on the Layer 2 control plane. It exis
 | Agent definition model | Canonical execution truth |
 | Worker model and lease ownership | `PolicyScope` / `Budget` / `ContextBudget` |
 | Sandbox lifecycle (container-based, persistent, branchable) | Cluster-wide routing |
-| Tool registration and invocation semantics | `ToolCatalog` versioning + tool context governance |
+| Tool registration and invocation semantics | Global policy and budget enforcement |
 | Workspace and `WorkspaceArtifact` model | `ContextManifest` / `ContextArtifact` / `CompactionRecord` |
-| Runtime-local state (planner scratchpad, tool loop position) | Memory store |
+| Runtime-local state (planner scratchpad, tool loop position) | Canonical entity persistence |
 | Checkpoint trigger rules at runtime boundaries | Checkpoint capture, validation, restore |
 | Retry / resume / branch UX for the wedge | `Run` state machine transitions |
 | Runtime-native timeline UX | Event taxonomy and event envelope |
@@ -119,11 +118,11 @@ The layers communicate through a small, fixed set of interfaces.
 
 | Direction | Surface | Carries |
 |---|---|---|
-| Up | Canonical entity reads | `Run`, `Session`, `Step`, `ModelCall`, `ContextManifest`, `Checkpoint`, `Budget`, `PolicyScope`, `MemoryEntry`, `ToolCatalog` |
+| Up | Canonical entity reads | `Run`, `Session`, `Step`, `ModelCall`, `ContextManifest`, `Checkpoint`, `Budget`, `PolicyScope` |
 | Up | Admission decisions | `ContextBudget` decision (`ALLOW` / `WARN` / `OFFLOAD_REQUIRED` / `COMPACT_REQUIRED` / `DEGRADE` / `HARD_STOP`), policy decisions, run-level budget pressure |
-| Down | Step transitions | `MODEL_CALL`, `TOOL_PLAN`, `TOOL_EXECUTE`, `FILE_READ`, `FILE_WRITE`, `PROCESS_START`, `OBSERVE`, `THINK`, `CHECKPOINT`, `PAUSE`, `RESUME`, `BRANCH`, `COMPLETE`, `FAIL`, `COMPACT`, `MEMORY_READ`, `MEMORY_WRITE`, `SUB_RUN_DISPATCH`, `SUB_RUN_JOIN` |
+| Down | Step transitions | `MODEL_CALL`, `TOOL_PLAN`, `TOOL_EXECUTE`, `FILE_READ`, `FILE_WRITE`, `PROCESS_START`, `OBSERVE`, `THINK`, `CHECKPOINT`, `PAUSE`, `RESUME`, `BRANCH`, `COMPLETE`, `FAIL`, `COMPACT` |
 | Down | Checkpoint requests | Trigger reason, attached `runtime_state` `StateHandle` |
-| Down | Tool invocations and `ContextArtifact` writes | Tool catalog id, sandbox refs, artifact bytes |
+| Down | Tool invocations and `ContextArtifact` writes | Sandbox refs, artifact bytes |
 | Down | Runtime events | `ks.tool.invocation.*`, `ks.process.*`, `ks.file.write.applied`, `ks.branch.created` |
 
 ## The shared execution vocabulary
@@ -135,8 +134,6 @@ The layers do not invent overlapping object models. The canonical vocabulary, de
 | Execution | [Run](/docs/concepts/run-hierarchy/runs), [Session](/docs/concepts/continuity/sessions), [Step](/docs/concepts/run-hierarchy/steps), [ModelCall](/docs/concepts/run-hierarchy/model-calls) |
 | Context | [ContextManifest](/docs/concepts/context/context-manifests), [ContextSegment](/docs/concepts/context/context-segments), [ContextArtifact](/docs/concepts/context/context-artifacts), [CompactionRecord](/docs/concepts/context/compaction-records) |
 | Continuity | [Checkpoint](/docs/concepts/recovery/checkpoints), [StateHandle](/docs/concepts/recovery/state-handles) |
-| Memory | [MemoryScope](/docs/concepts/memory/memory-scopes), [MemoryEntry](/docs/concepts/memory/memory-entries) |
-| Tools | [ToolCatalog](/docs/concepts/tools/tool-catalogs), [ToolContextDisposition](/docs/concepts/tools/tool-context-disposition) |
 | Governance | [PolicyScope](/docs/concepts/policy/policy-scopes), [Budget](/docs/concepts/policy/budgets), [ContextBudget](/docs/concepts/policy/context-budgets) |
 | Routing | [PlacementHint](/docs/concepts/routing/placement-hints) |
 

@@ -12,17 +12,16 @@ Admission is the single point at which "can this run, and how" is decided. After
 ```
 1. Auth / scope resolution
 2. Run / Session resolution
-3. Context inputs gathered (history, memory, artifact previews)
+3. Context inputs gathered (history, artifact previews)
 4. GCM v2 assembles the ContextManifest
-5. Tool Context Governance assigns ToolContextDispositions
-6. ▶▶ ContextBudget admission ◀◀          (this page)
-7. Run-level Budget pre-check on admitted manifest
+5. ▶▶ ContextBudget admission ◀◀          (this page)
+6. Run-level Budget pre-check on admitted manifest
 8. Step row created, bound to the manifest
 9. Cache-aware routing
 10. Substrate execution
 ```
 
-Admission runs *after* manifest assembly so it can score real token counts, real artifact byte counts, and real tool-disposition decisions. It runs *before* the run-level [Budget](/docs/concepts/policy/budgets) pre-check so cost is computed against the admitted shape, not the raw assembly.
+Admission runs *after* manifest assembly so it can score real token counts and real artifact byte counts. It runs *before* the run-level [Budget](/docs/concepts/policy/budgets) pre-check so cost is computed against the admitted shape, not the raw assembly.
 
 ## Decisions
 
@@ -96,8 +95,7 @@ Content-Type: application/json
 {
   "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
   "context_manifest": {
-    "segments": [...],
-    "tool_catalog_id": "01J8X9Y2Z3K4M5N6P7Q8R9TC01"
+    "segments": [...]
   }
 }
 ```
@@ -134,11 +132,11 @@ Preflight is useful for runtimes that want to plan transformations in advance (e
 
 | Failure | Outcome |
 |---|---|
-| Re-admission cap exceeded | Last decision falls through to `HARD_STOP`. |
-| Transformation fails (artifact write failure, compactor unreachable) | `HARD_STOP` with `error.code = "admission_transformation_failed"`. |
-| Manifest assembly produced an invalid shape | `HARD_STOP` with `error.code = "manifest_invalid"`. ModelCall is not created. |
+| Re-admission cap exceeded | Last decision falls through to `HARD_STOP` with `error.code = "context_budget_exceeded"`, HTTP `429`. |
+| Transformation fails (artifact write failure, compactor unreachable) | `HARD_STOP` with `error.code = "admission_transformation_failed"`, HTTP `429`. |
+| Manifest assembly produced an invalid shape | Rejected with `error.code = "manifest_invalid"`, HTTP `400 Bad Request`. ModelCall is not created. |
 
-`HARD_STOP` rejects the request before dispatch with HTTP `400 Bad Request` and an explanatory body — it is not a server error.
+The canonical `HARD_STOP` rejection is HTTP `429 Too Many Requests` with `error.code = "context_budget_exceeded"` and an explanatory body — it is not a server error. Every v2 response also carries an `X-KS-Context-Budget-State` header so runtimes can observe the post-evaluation state without re-reading the budget.
 
 ## What admission is not
 

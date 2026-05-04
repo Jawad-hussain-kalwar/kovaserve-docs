@@ -36,8 +36,7 @@ The Timeline / Event Projection Service is the [Layer 3 subsystem](/docs/concept
 | File actions | Every `FILE_READ` and `FILE_WRITE` Step — paths, [diffs](/docs/concepts/runtime/workspace-artifacts), policy decisions. |
 | Artifacts | The [WorkspaceArtifact](/docs/concepts/runtime/workspace-artifacts) catalog inline with the producing Step — clickable, downloadable, streamable for stdout/stderr. |
 | Checkpoint tree | Every [Checkpoint](/docs/concepts/recovery/checkpoints) the Run produced, with the [trigger reason](/docs/concepts/runtime/runtime-architecture#checkpoint-integration-module) and the snapshot artifact attached. |
-| Branch lineage | The full [branch graph](/docs/concepts/recovery/branch-flow) rooted at this Run — parent Run, branch points, child Runs spawned, summary handoffs. |
-| Sub-run lineage | [Sub-run](/docs/concepts/run-hierarchy/sub-runs) dispatches and joins, with summary segments inline. |
+| Branch lineage | The full [branch graph](/docs/concepts/recovery/branch-flow) rooted at this Run — parent Run, branch points, child Runs spawned. |
 | Budget burn | Run-level [Budget](/docs/concepts/policy/budgets) and [ContextBudget](/docs/concepts/policy/context-budgets) consumption over time, with admission decisions marked. |
 | Policy decisions | [PolicyScope](/docs/concepts/policy/policy-scopes) evaluations — allows, degrades, denies — surfaced inline at the Step that triggered them. |
 | Failure classification | The terminal Step's [failure class](/docs/concepts/runtime/runtime-execution-semantics#failure-classification), surfaced prominently. |
@@ -111,7 +110,6 @@ Authorization: Bearer ks_...
   ],
   "checkpoints":  [ ... ],
   "branches":     [ ],
-  "sub_runs":     [ ],
   "budget_burn":  { "cost_cents_used": "1.4280", "cost_cents_limit": "5000.0000" }
 }
 ```
@@ -136,14 +134,12 @@ When a Run terminates in `FAILED`, the timeline foregrounds the failure class on
 | `SANDBOX_FAILURE` | The sandbox id and the resource that breached are linked. |
 | `RUNTIME_ERROR` | The Worker id, the offending Step, and the runtime-local state at crash time are linked (operator-only). |
 
-## Branch and sub-run lineage
+## Branch lineage
 
-When a Run has child Runs (via [branch](/docs/concepts/recovery/branches) or [sub-run dispatch](/docs/concepts/run-hierarchy/sub-runs)), the timeline shows the lineage inline:
+When a Run has child Runs via [branch](/docs/concepts/recovery/branches), the timeline shows the lineage inline:
 
 - A `BRANCH` Step links to the child Run and the snapshot artifact the child was seeded from.
-- A `SUB_RUN_DISPATCH` Step links to the child Run; the matching `SUB_RUN_JOIN` Step shows the child's `summary_artifact_id` segment with a click-through to the full child transcript.
-
-Branches and sub-runs are presented as foldable subtrees so the parent Run's timeline stays readable.
+- The branch tree is rendered as a foldable subtree so the parent Run's timeline stays readable.
 
 ## Operator vs. developer views
 
@@ -151,14 +147,14 @@ The timeline is the same data, surfaced two ways:
 
 | View | Role | Adds |
 |---|---|---|
-| Developer | Default view | Step list, model and tool actions, artifacts, checkpoints, budget burn, branch and sub-run lineage. |
+| Developer | Default view | Step list, model and tool actions, artifacts, checkpoints, budget burn, branch lineage. |
 | Operator | Privileged view | Worker id, lease history, sandbox resource consumption, full runtime-local state at any Step boundary, raw `kv_events` for substrate-side state lifecycle, and route rationale per ModelCall. |
 
 Operator surfaces depend on the resolved [PolicyScope](/docs/concepts/policy/policy-scopes) and the deployment's role bindings.
 
 ## Relationship to [events](/docs/concepts/events)
 
-The timeline is *projected* from the canonical event streams — `ks.run.*`, `ks.step.*`, `ks.model_call.*`, `ks.tool.invocation.*`, `ks.process.*`, `ks.file.write.applied`, `ks.checkpoint.*`, `ks.branch.created`, `ks.subrun.*`, `ks.budget.*`, `ks.context.budget.*`, `ks.policy.*` — not from a separate timeline log. A consumer that wants the same data outside the runtime UI subscribes to the events directly and rebuilds whatever shape it wants.
+The timeline is *projected* from the canonical event streams — `ks.run.*`, `ks.step.*`, `ks.model_call.*`, `ks.tool.invocation.*`, `ks.process.*`, `ks.file.write.applied`, `ks.checkpoint.*`, `ks.branch.created`, `ks.budget.*`, `ks.context.budget.*`, `ks.policy.*` — not from a separate timeline log. A consumer that wants the same data outside the runtime UI subscribes to the events directly and rebuilds whatever shape it wants.
 
 ## What runtime observability is not
 

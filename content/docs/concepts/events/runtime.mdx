@@ -25,15 +25,13 @@ Subjects: `ks.tool.*`, `ks.process.*`, `ks.file.*`, `ks.branch.*`. Persisted in 
 ```json
 {
   "tool_name": "shell",
-  "tool_catalog_id": "01J8X9Y2Z3K4M5N6P7Q8R9TC01",
   "invocation_id": "01J8X9Y2Z3K4M5N6P7Q8R9TI01",
   "arguments_summary": "git diff --stat HEAD~1",
-  "tool_context_disposition": "summary_required",
   "checkpoint_recommended": false
 }
 ```
 
-`tool_context_disposition` is the result of [Tool Context Governance](/docs/concepts/tools/tool-context-disposition). `arguments_summary` is a redacted summary; full arguments are persisted on the [tool catalog](/docs/concepts/tools/tool-catalogs) row addressable by `invocation_id`.
+`arguments_summary` is a redacted summary; full arguments are persisted on the runtime row addressable by `invocation_id`.
 
 ### `ks.tool.invocation.completed`
 
@@ -42,14 +40,13 @@ Subjects: `ks.tool.*`, `ks.process.*`, `ks.file.*`, `ks.branch.*`. Persisted in 
   "invocation_id": "01J8X9Y2Z3K4M5N6P7Q8R9TI01",
   "outcome": "succeeded",
   "duration_ms": 1240,
-  "result_disposition": "artifact_ref",
   "artifact_id": "01J8X9Y2Z3K4M5N6P7Q8R9AR01",
   "result_summary_tokens": 124,
   "exit_code": 0
 }
 ```
 
-`outcome` ∈ `succeeded`, `failed`, `canceled`, `blocked` (policy-blocked at execution time). `result_disposition` is the disposition applied to the result — see [tool context disposition](/docs/concepts/tools/tool-context-disposition).
+`outcome` ∈ `succeeded`, `failed`, `canceled`, `blocked` (policy-blocked at execution time).
 
 ### `ks.process.started`
 
@@ -129,8 +126,6 @@ Tools that produce no process or file activity emit only the two `ks.tool.invoca
 ## See also
 
 - [Step types](/docs/concepts/run-hierarchy/step-types) — including `TOOL_EXECUTE`, `FILE_READ`, `FILE_WRITE`, `PROCESS_START`
-- [Tool context disposition](/docs/concepts/tools/tool-context-disposition) — the disposition values in payload
-- [Tool catalogs](/docs/concepts/tools/tool-catalogs) — the immutable tool-definition source
 - [Branches](/docs/concepts/recovery/branches) — the Run lineage primitive
 - [Context artifacts](/docs/concepts/context/context-artifacts) — the offload target for diffs and tool outputs
 - [`GET /v1/ks/events/runtime`](/docs/api/events/runtime)

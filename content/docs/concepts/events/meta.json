@@ -10,8 +10,6 @@
     "budget",
     "checkpoint",
     "runtime",
-    "context-engineering",
-    "memory",
-    "sub-run"
+    "context-engineering"
   ]
 }

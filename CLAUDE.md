@@ -74,7 +74,7 @@ Never write a page that hedges, defers, or discloses implementation status.
 
 Set on the SURFACE-OUTLINE.md voice rule (binding):
 
-- **Reference / concept / API / SDK / CLI pages** → blueprint vocabulary. Say `Run`, `Step`, `ModelCall`, `ContextManifest`, `PolicyScope`, `StateHandle`, `Organization → Project → Environment → Key`.
+- **Reference / concept / API / SDK / CLI pages** → blueprint vocabulary. Say `Run`, `Step`, `ModelCall`, `ContextManifest`, `PolicyScope`, `StateHandle`, `Tenant → Project → Environment → Deployment`.
 - **Customer-facing pages** (Quickstart, migration guides, Pricing, homepage) → positioning vocabulary. Say "managed agents", "completed agent runs", "Agentic Execution Cloud", "durable runs", "cost per completed run".
 - **Never mix the two on a single page.**
 

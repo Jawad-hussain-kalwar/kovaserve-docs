@@ -1,6 +1,6 @@
 ---
 title: Runs
-description: The top-level durable execution objective — the unit of value, what a Run owns, and how sub-run lineage works.
+description: The top-level durable execution objective — the unit of value, what a Run owns, and how branch lineage works.
 ---
 
 A **Run** is one durable execution objective. It is the top-level entity in KovaServe's canonical execution model and the unit of value the entire control plane is organized around: not a token, not a request, but a Run that completes useful work over time. A coding task, a document review, a multi-step tool loop, a long-running ops investigation — each is one Run.
@@ -17,8 +17,7 @@ A Run is the binding point for the control objects that govern its execution. Ea
 | `budget_id` | zero or one | Run-level [Budget](/docs/concepts/policy/budgets) — controls cost, tokens, steps, time, and tool count as an active enforcement object. |
 | `context_budget_id` | zero or one | Per-run [ContextBudget](/docs/concepts/policy/context-budgets) — admission control over active context size, evaluated before GPU dispatch. |
 | `session_id` | zero or one | Bound [Session](/docs/concepts/continuity/sessions) — established when continuity across turns or related Runs is needed. Immutable once set. |
-| `parent_run_id` | zero or one | Originating Run when this Run was dispatched as a sub-run. Pins lineage for the Sub-Run primitive. |
-| `summary_artifact_id` | zero or one | The compact handoff this Run produced for its parent on completion. Set on sub-runs that have finished and posted their summary. |
+| `branch_from` | zero or one | Originating Run when this Run was created as a [branch](/docs/concepts/recovery/branches) from a Checkpoint. Pins branch lineage. |
 
 A Run also tracks creation, lifecycle, and operational metadata:
 
@@ -33,7 +32,7 @@ A Run also tracks creation, lifecycle, and operational metadata:
 | `step_count` | Monotonic counter of admitted Steps. Incremented only after admission succeeds. |
 | `created_at` / `started_at` / `completed_at` | Lifecycle timestamps. `completed_at` is set when the Run reaches a terminal state. |
 
-What a Run **does not** carry on the row itself: prompts, messages, tool definitions, or memory contents. Those are recorded on the [ContextManifest](/docs/concepts/context/context-manifests) per [ModelCall](/docs/concepts/run-hierarchy/model-calls), in the [Memory Store](/docs/concepts/memory/memory-store), and on the bound [ToolCatalog](/docs/concepts/tools/tool-catalogs) — never inlined onto the Run.
+What a Run **does not** carry on the row itself: prompts, messages, or tool definitions. Those are recorded on the [ContextManifest](/docs/concepts/context/context-manifests) per [ModelCall](/docs/concepts/run-hierarchy/model-calls) — never inlined onto the Run.
 
 ## How a Run is created
 
@@ -51,36 +50,30 @@ KovaServe is run-centric, not request-centric. This is the load-bearing decision
 
 - **Cost and budget are run-scoped.** A Run carries a single Budget; a single completed Run is the metering unit reported through `cost_per_completed_run`. Tokens, ModelCalls, and tool invocations roll up into the Run's cost accounting and are not the unit billed against.
 - **Continuity is run-scoped.** Checkpoints bind to a Run and a Step within it. Resume always produces a new Run that references the prior Run's Checkpoint, never an in-place restart of the original.
-- **Audit is run-scoped.** The execution event stream, the timeline endpoint, and the `summary_artifact_id` handoff are all keyed on `run_id`. A Run is the smallest unit you can fully reconstruct after the fact.
+- **Audit is run-scoped.** The execution event stream and the timeline endpoint are keyed on `run_id`. A Run is the smallest unit you can fully reconstruct after the fact.
 - **Governance is run-scoped.** The PolicyScope a Run resolved at creation governs every Step inside it; tool admissions, share-scope decisions, and data-boundary checks all evaluate against the Run's scope.
 
 A Run completes when the work it represents is done — possibly after many Steps, ModelCalls, pauses, resumes, checkpoints, and branches.
 
-## Sub-run lineage
+## Branch lineage
 
-A Run may dispatch another Run as a **sub-run**. The child Run carries `parent_run_id` pointing back at its parent and inherits the parent's PolicyScope and ContextScope by default. Budgets and ContextBudgets are allocated separately per child so a runaway sub-run cannot consume the parent's remaining budget.
+A Run may produce a new Run lineage from a Checkpoint or stable point via the [Branch](/docs/concepts/recovery/branches) primitive. The child Run carries `branch_from` pointing back at its parent and inherits the parent's PolicyScope along with a bounded copy of its Budget. Branching is the only sanctioned way to compose Runs in v1 — speculative exploration, what-if comparisons, recovery forks all flow through this single primitive.
 
 ```
-Run (parent)
-├── Step  SUB_RUN_DISPATCH ──────────────▶ Run (child, parent_run_id = parent.id)
-│                                          │
-│                                          └── Step ... (child runs to completion)
-│                                                │
-│                                                ▼
-│                                          summary_artifact_id  (compact handoff)
-│
-└── Step  SUB_RUN_JOIN  ◀──── child summary segment included in next manifest
+Run (parent) ─▶ Checkpoint C
+                    │
+                    └─▶ Run (child, branch_from = parent.id, restored_from = C.id)
 ```
 
-The child Run executes its own Steps under its own ContextManifests, fully isolated from the parent's manifest. On completion, the child posts a summary via `POST /v1/ks/runs/{child_id}/summary`, producing a `summary_artifact_id` that the parent's next ModelCall can include as a single segment — without inflating the parent's context with the child's full transcript. This is the **Sub-Run primitive**: the only sanctioned way to compose Runs.
+The child Run executes its own Steps under its own ContextManifests with a fresh budget allocation. A branch is an alternate continuation, not a delegated sub-task: the parent does not wait for the child, and the child does not return a value to the parent. Audit, cost rollup, and lineage navigation all walk `branch_from` pointers through the [recovery branch](/docs/concepts/recovery/branches) surface.
 
-A Run has at most one parent. Sub-runs themselves may dispatch sub-runs; lineage is a tree, not a graph.
+A Run has at most one direct parent through `branch_from`; branches are themselves branchable, so lineage is a tree.
 
 ## Tenant scoping
 
-Every Run is owned by exactly one `(tenant_id, project_id)` pair, inherited from the API key that created it. The owning pair is immutable. Reads, transitions, and references from any other tenant return `404 Not Found` — the same response as a genuinely missing Run — so cross-tenant probing yields no information.
+Every Run is owned by exactly one `(tenant_id, project_id)` pair, inherited from the API key that created it. The owning pair is immutable. Reads, transitions, and references from any other Tenant return `404 Not Found` — the same response as a genuinely missing Run — so cross-tenant probing yields no information.
 
-This applies to sub-run dispatch as well: a parent Run cannot dispatch a child into another tenant's project. The child's `tenant_id` and `project_id` are copied from the parent at dispatch time and are not negotiable on the request.
+This applies to branches as well: a Run cannot branch into another Tenant's project. The child's `tenant_id` and `project_id` are copied from the parent and are not negotiable on the request.
 
 ## ID format
 
@@ -120,8 +113,7 @@ Content-Type: application/json
   "policy_scope_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T3",
   "budget_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T4",
   "context_budget_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T5",
-  "parent_run_id": null,
-  "summary_artifact_id": null,
+  "branch_from": null,
   "status": "CREATED",
   "model": "qwen3-coder-30b",
   "external_run_id": "lg-task-9821",
@@ -142,21 +134,6 @@ Authorization: Bearer ks_...
 
 The response is the Run row with its [Steps](/docs/concepts/run-hierarchy/steps) and each Step's [ModelCalls](/docs/concepts/run-hierarchy/model-calls) embedded — the canonical timeline payload. Clients do not need to issue N+1 calls to reconstruct the Run's shape.
 
-### Dispatch a sub-run
-
-```http
-POST /v1/ks/runs/01J8X9Y2Z3K4M5N6P7Q8R9S0T1/subruns
-Authorization: Bearer ks_...
-Content-Type: application/json
-
-{
-  "model": "qwen3-coder-30b",
-  "budget": { "max_cost_cents": "0.5000", "max_steps": 12 }
-}
-```
-
-The child Run is created with `parent_run_id` set to the parent and a fresh Budget and ContextBudget allocated to it. The parent's PolicyScope and ContextScope are inherited.
-
 ### Cancel a Run
 
 ```http
@@ -171,15 +148,14 @@ Cancellation transitions the Run to `CANCELED` (terminal), stops further admissi
 - **Not a request.** A request is a transient unit of substrate work; a Run is a durable execution objective that may consume many requests across many ModelCalls.
 - **Not a Session.** A [Session](/docs/concepts/continuity/sessions) is a continuity container that may host many Runs sequentially. A Run binds to at most one Session, and the binding is immutable.
 - **Not the orchestration logic.** The Run records what executed; the runtime (LangGraph, Temporal, KovaServe runtime, custom) decides what to execute next. KovaServe is not an orchestration engine.
-- **Not a memory store.** Cross-Run, cross-Session reuse of information belongs to the [Memory Store](/docs/concepts/memory/memory-store) under explicit [MemoryScope](/docs/concepts/memory/memory-scopes), not to Run state.
 - **Not a transaction log.** The execution event stream is the continuous record; the Run row is the durable summary, and Checkpoints are the resumable safe-points within it.
 
 ## See also
 
 - [Run state machine](/docs/concepts/run-hierarchy/run-state-machine) — the 12-state Run FSM and its transitions
 - [Sessions](/docs/concepts/continuity/sessions) — the continuity container above Run
-- [Sub-runs](/docs/concepts/run-hierarchy/sub-runs) — `parent_run_id`, `summary_artifact_id`, and the dispatch / join lifecycle
+- [Branches](/docs/concepts/recovery/branches) — `branch_from` lineage and the fork-from-Checkpoint primitive
 - [Steps](/docs/concepts/run-hierarchy/steps) · [ModelCalls](/docs/concepts/run-hierarchy/model-calls) — what a Run contains
 - [Checkpoints](/docs/concepts/recovery/checkpoints) — resumable safe-points anchored to a Run + Step
 - [Budgets](/docs/concepts/policy/budgets) · [ContextBudgets](/docs/concepts/policy/context-budgets) · [PolicyScopes](/docs/concepts/policy/policy-scopes) — the control objects a Run binds at creation
-- [`POST /v1/ks/runs`](/docs/api/runs/create) · [`GET /v1/ks/runs/{id}`](/docs/api/runs/get) · [`POST /v1/ks/runs/{id}/cancel`](/docs/api/runs/cancel) · [`POST /v1/ks/runs/{id}/subruns`](/docs/api/runs/sub-runs)
+- [`POST /v1/ks/runs`](/docs/api/runs/create) · [`GET /v1/ks/runs/{id}`](/docs/api/runs/get) · [`POST /v1/ks/runs/{id}/cancel`](/docs/api/runs/cancel)

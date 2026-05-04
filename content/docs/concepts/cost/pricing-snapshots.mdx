@@ -108,7 +108,7 @@ The v1 anonymous path computes cost and writes snapshots on the same `usage_reco
 ## What pricing snapshots are not
 
 - **Not the model_pricing table.** `model_pricing` is the live current-rate registry. The snapshots are the historical record of what was applied per row.
-- **Not per-tenant rates.** A tenant whose contract specifies a discounted rate has that rate written into the `model_pricing` row that applies to its calls; the snapshot mechanism is the same.
+- **Not per-Tenant rates.** A Tenant whose contract specifies a discounted rate has that rate written into the `model_pricing` row that applies to its calls; the snapshot mechanism is the same.
 - **Not editable.** Snapshot columns are immutable post-insert. Manual edits would break the audit identity that downstream systems depend on.
 - **Not present on pre-Slice 7.3 rows.** Rows that predate the snapshot contract were never re-snapshotted (forward-only backfill). Such rows are surfaced through the `cost_status` indicator.
 

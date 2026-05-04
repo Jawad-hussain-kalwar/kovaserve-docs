@@ -38,9 +38,6 @@ The semantic model — Run, Session, Step, ModelCall, ContextManifest, Budget, C
 | Context Artifact Store | Yes — MinIO-backed object storage for offloaded artifacts. |
 | Context Admission Service | Yes — pre-dispatch admission against [ContextBudget](/docs/concepts/policy/context-budgets). |
 | Compaction Lineage Service | Yes — [CompactionRecord](/docs/concepts/context/compaction-records) storage. |
-| Memory Store Service | Yes — typed namespace + key store with [MemoryScope](/docs/concepts/memory/memory-scopes) retention. |
-| Tool Catalog Registry | Yes — hashed, immutable, versioned [ToolCatalog](/docs/concepts/tools/tool-catalogs) bundles. |
-| Tool Context Governance | Yes — [ToolContextDisposition](/docs/concepts/tools/tool-context-disposition) decisions. |
 | KV Event System / KV Index | Yes — `kv_events` ingestion and reusable-state lookup. |
 | Cache-Aware Router | Yes — [manifest-aware routing](/docs/concepts/routing/manifest-aware-routing) across the fleet. |
 | Session Registry | Yes — [Session](/docs/concepts/continuity/sessions) lifecycle and `current_manifest_id` continuity. |
@@ -49,16 +46,15 @@ The semantic model — Run, Session, Step, ModelCall, ContextManifest, Budget, C
 | Tiering / State Manager | Yes — tier movement planning and state-identity preservation. |
 | Policy / Governance Layer | Yes — model ACLs, rate limits, share-scope rules, tool policy. |
 | Metering / Cost / Budget Layer | Yes — usage aggregation, [Budget](/docs/concepts/policy/budgets) and [ContextBudget](/docs/concepts/policy/context-budgets) enforcement, cost roll-up. |
-| Tenant Management | Yes — [Organization → Project → Environment → Key](/docs/concepts/tenancy) hierarchy. |
-| Dashboard | Yes — run explorer, session explorer, checkpoint browser, usage and budget panels, tenant admin. |
+| Tenant Management | Yes — [Tenant → Project → Environment → Deployment](/docs/concepts/tenancy) hierarchy. |
+| Dashboard | Yes — run explorer, session explorer, checkpoint browser, usage and budget panels, Tenant admin. |
 
 ## What the customer brings
 
 | Surface | Customer responsibility |
 |---|---|
-| Tenancy and identity | The Organization, its Projects, Environments, and the Keys that authenticate workloads. Provisioned through the dashboard or `POST /v1/ks/tenants`. |
+| Tenancy and identity | The Tenant, its Projects, Environments, and the Keys that authenticate workloads. Provisioned through the dashboard or `POST /v1/ks/tenants`. |
 | Runtime | Either an external orchestrator using [BYO runtime mode](/docs/concepts/deployment/byo-runtime), or KovaServe's [managed runtime](/docs/concepts/deployment/managed-runtime). |
-| Tool catalogs | Tool definitions registered into [ToolCatalog](/docs/concepts/tools/tool-catalogs) bundles. |
 | Policies and budgets | [PolicyScope](/docs/concepts/policy/policy-scopes) overlays, [Budgets](/docs/concepts/policy/budgets), [ContextBudgets](/docs/concepts/policy/context-budgets) configured at the appropriate level. |
 | GPU compute (optional) | The default shared KovaServe fleet is the simplest path. Customers can also bind a partner fleet or a private fleet through the runtime-binding API while keeping the rest of the control plane managed. |
 
@@ -71,7 +67,6 @@ The customer-facing surface on managed cloud:
 | Inference (OpenAI-compatible) | `https://api.kovaserve.com/v1/chat/completions`, `/v1/models` |
 | Native control plane | `https://api.kovaserve.com/v1/ks/...` |
 | Context engineering | `https://api.kovaserve.com/v1/ks/context/...` |
-| Memory | `https://api.kovaserve.com/v1/ks/memory/...` |
 | Runtime APIs | `https://api.kovaserve.com/v1/ks/runtime/...` |
 | Events (pulled) | `https://api.kovaserve.com/v1/ks/events/...` |
 | Dashboard | `https://app.kovaserve.com` |
@@ -80,15 +75,14 @@ The wire shapes, the [error envelope](/docs/api/errors), the [pagination](/docs/
 
 ## Tenant isolation
 
-Multi-tenancy on managed cloud is **strong logical isolation**. Every record — every Run, every Session, every Checkpoint, every ContextArtifact, every MemoryEntry, every event, every usage row — carries `(organization_id, project_id, environment_id)` columns. Access checks resolve through the [tenancy](/docs/concepts/tenancy) hierarchy on every call.
+Multi-tenancy on managed cloud is **strong logical isolation**. Every record — every Run, every Session, every Checkpoint, every ContextArtifact, every event, every usage row — carries `(tenant_id, project_id, environment_id)` columns. Access checks resolve through the [tenancy](/docs/concepts/tenancy) hierarchy on every call.
 
 | Boundary | Enforcement |
 |---|---|
-| Cross-organization access | `404 Not Found` — identical to the response for a missing entity. ID probing leaks no information. |
+| Cross-tenant access | `404 Not Found` — identical to the response for a missing entity. ID probing leaks no information. |
 | Cross-project cache reuse | Default `context_share_scope = project`. The [Cache-Aware Router](/docs/concepts/routing/manifest-aware-routing) only considers replicas whose origin matches the configured scope. |
-| Object storage | ContextArtifact bytes and KV exports are stored under tenant-scoped paths. |
-| Memory entries | Namespaced by `(organization_id, project_id, scope_type, scope_id, namespace, key)`; `tenant` scope spans Projects within an Organization, `global` spans Organizations only under admin control. |
-| Rate limits | Configured at any level; the most-specific applicable limit wins; Organization-level limits cap the sum of all Projects. |
+| Object storage | ContextArtifact bytes and KV exports are stored under Tenant-scoped paths. |
+| Rate limits | Configured at any level; the most-specific applicable limit wins; Tenant-level limits cap the sum of all Projects. |
 
 Stronger isolation modes — region pinning, single-tenant control-plane partitions, dedicated routing — are deployment-time choices that come with the [private deployment](/docs/concepts/deployment/private-deployment) topology.
 
@@ -96,7 +90,7 @@ Stronger isolation modes — region pinning, single-tenant control-plane partiti
 
 By default, hosted storage covers everything the control plane needs:
 
-- **Hosted Postgres** — canonical entity persistence (Runs, Sessions, Steps, ModelCalls, ContextManifests, Budgets, Checkpoints, PolicyScopes, MemoryEntries, ToolCatalogs, usage records).
+- **Hosted Postgres** — canonical entity persistence (Runs, Sessions, Steps, ModelCalls, ContextManifests, Budgets, Checkpoints, PolicyScopes, usage records).
 - **Hosted Redis** — rate-limit counters, idempotency cache, hot-path lookups.
 - **Hosted NATS JetStream** — `ks.>` event subjects with bounded retention; `kv_events` substrate stream with 24-hour retention.
 - **Hosted MinIO** — Context Artifact Store, KV export bundles, [WorkspaceArtifact](/docs/concepts/runtime/workspace-artifacts) bytes, checkpoint blobs.
@@ -105,13 +99,13 @@ Customers who want object storage in their own bucket configure it on the Projec
 
 ## Chargeback and metering
 
-Every `usage_records` row carries `organization_id`, `project_id`, frozen [pricing snapshots](/docs/concepts/cost/pricing-snapshots), and the `cached_tokens` [savings](/docs/concepts/routing/cached-tokens) that landed on it. Roll-up granularity:
+Every `usage_records` row carries `tenant_id`, `project_id`, frozen [pricing snapshots](/docs/concepts/cost/pricing-snapshots), and the `cached_tokens` [savings](/docs/concepts/routing/cached-tokens) that landed on it. Roll-up granularity:
 
 | Layer | Surface |
 |---|---|
 | Per-Run | `cost_cents`, `gross_cost_cents`, `cache_savings_cents` on the Run record. |
 | Per-Project | `GET /v1/ks/metering/usage?scope=project&project_id=...` |
-| Per-Organization | `GET /v1/ks/metering/usage?scope=organization&organization_id=...` |
+| Per-Tenant | `GET /v1/ks/metering/usage?scope=tenant&tenant_id=...` |
 | Export (audit) | `GET /v1/ks/metering/export` — one JSONL line per `usage_records` row. |
 
 The rounding contract preserves `gross = net + savings` exactly across rows and across scopes — see [cost model](/docs/concepts/cost/cost-model).
@@ -129,7 +123,7 @@ This is the path neoclouds use to launch [managed agents](/docs/concepts/managed
 | Time-to-first-Run matters more than topology control. | Data residency, sovereign jurisdiction, or air-gap constraints rule out hosted services. |
 | Hosted Postgres / Redis / NATS / MinIO are acceptable. | Customer-owned datastores are required. |
 | Default shared GPU fleet is acceptable, or a partner fleet covers it. | Specific GPU fleets must be operated under customer control. |
-| Cross-organization isolation through logical tenancy is sufficient. | Single-organization control-plane partitioning is required. |
+| Cross-tenant isolation through logical tenancy is sufficient. | Single-tenant control-plane partitioning is required. |
 
 ## See also
 

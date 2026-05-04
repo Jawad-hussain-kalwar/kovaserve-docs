@@ -25,7 +25,7 @@ ModelCalls are owned by the **Canonical Execution Service**. The service inserts
 | `gross_cost_cents` | Cost the call would have incurred without any cache reuse. |
 | `cache_savings_cents` | `gross_cost_cents - cost_cents`. The identity `gross = net + savings` always holds. |
 | `ttft_ms` / `total_ms` | Real time-to-first-token and total latency from the substrate. |
-| `stable_prefix_id` | The legacy prefix-cache identity used by the cache-aware router. |
+| `stable_prefix_id` | The legacy prefix-cache identity used by the cache-aware router. Computed once at manifest assembly, written to both the ContextManifest and the ModelCall row, and never recomputed thereafter. |
 | `traceparent` | W3C trace context for OpenTelemetry correlation. Recorded in `metadata`. |
 | `metadata` | Open key-value bag for runtime annotations the Canonical Execution Service does not interpret. |
 | `created_at` | When the row was inserted — after the substrate completed. |
@@ -46,7 +46,7 @@ The FK is mandatory. Every ModelCall the gateway inserts has an admitted manifes
 ## How a ModelCall is created
 
 1. The gateway authenticates and resolves PolicyScope.
-2. GCM assembles the ContextManifest; Tool Context Governance assigns ToolContextDispositions.
+2. GCM assembles the ContextManifest.
 3. ContextBudget admission and Run-level Budget pre-check pass; the manifest is admitted.
 4. The Step row is inserted, bound to the admitted manifest.
 5. The Cache-Aware Router selects a node using the manifest's `stable_context_id`, `stable_prefix_id`, KV Index lookup, scope filters, placement hints, and budget pressure.
@@ -67,8 +67,6 @@ The row is inserted exactly once per substrate dispatch. A Step that issues para
 | `CHECKPOINT`, `PAUSE`, `RESUME`, `BRANCH` | Zero. |
 | `COMPLETE`, `FAIL` | Zero. |
 | `COMPACT` | Zero or one — present when the compactor is a model invocation; absent when compaction is mechanical. |
-| `MEMORY_READ`, `MEMORY_WRITE` | Zero. |
-| `SUB_RUN_DISPATCH`, `SUB_RUN_JOIN` | Zero. The child Run owns its own ModelCalls. |
 
 A Step with zero ModelCalls has zero cost — its presence on the timeline is informational, durability-related, or governance-related rather than substrate-bound.
 

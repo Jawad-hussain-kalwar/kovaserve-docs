@@ -12,9 +12,9 @@ A Project has at least one Environment. Most have three: `production`, `staging`
 | Field | Purpose |
 |---|---|
 | `id` | Bare 26-char Crockford ULID. |
-| `organization_id` | Inherited from Project. |
+| `tenant_id` | Inherited from Project. |
 | `project_id` | Parent Project. |
-| `name` | One of `production`, `staging`, `development` — or a custom label allowed by the Organization's policy. |
+| `name` | One of `production`, `staging`, `development` — or a custom label allowed by the Tenant's policy. |
 | `tier` | Canonical tier: `prod`, `staging`, `dev`. Drives default policy posture. |
 | `status` | `ACTIVE` or `ARCHIVED`. |
 | `policy_scope_id` | Environment-level [PolicyScope](/docs/concepts/policy/policy-scopes) override. Narrows against the Project resolved scope. |
@@ -26,9 +26,8 @@ A Project has at least one Environment. Most have three: `production`, `staging`
 
 The Environment level is what makes safe iteration practical:
 
-- **Independent cache.** Cache reuse is bounded by `(organization_id, project_id, environment_id)` at the substrate. A development Run never benefits from a production prefix and never warms one — see [manifest-aware routing](/docs/concepts/routing/manifest-aware-routing).
+- **Independent cache.** Cache reuse is bounded by `(tenant_id, project_id, environment_id)` at the substrate. A development Run never benefits from a production prefix and never warms one — see [manifest-aware routing](/docs/concepts/routing/manifest-aware-routing).
 - **Independent rate limits.** A staging load test cannot burn through the production Project's rate limit budget.
-- **Independent memory.** [MemoryEntry](/docs/concepts/memory/memory-entries) rows are namespaced by Environment for `session`, `user`, and `tenant` scopes — production memory is invisible to staging callers.
 - **Independent cost.** Cost accumulates per Environment so a staging spike is visible without inflating the production bill in the headline.
 - **Deploy-target restrictions.** A `production` Environment can be pinned to specific deployments via `deployment_restrictions[]`; staging can run anywhere.
 
@@ -55,7 +54,7 @@ Content-Type: application/json
 ```json
 {
   "id": "01J8X9Y2Z3K4M5N6P7Q8R9ENV1",
-  "organization_id": "01J8X9Y2Z3K4M5N6P7Q8R9ORG1",
+  "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9ORG1",
   "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9PRJ1",
   "name": "production",
   "tier": "prod",
@@ -76,11 +75,11 @@ The `tier` field carries the canonical posture independent of the human-readable
 
 | Tier | Default posture |
 |---|---|
-| `prod` | Strict admission. `degraded_mode_policy = reject`. Hard rate limits enforced. ContextArtifacts pinned to `tenant_local` data boundary unless the Organization permits otherwise. |
+| `prod` | Strict admission. `degraded_mode_policy = reject`. Hard rate limits enforced. ContextArtifacts pinned to `tenant_local` data boundary unless the Tenant permits otherwise. |
 | `staging` | Same admission as prod by default; intended for pre-release verification. Rate limits typically a fraction of prod. |
 | `dev` | Permissive. `degraded_mode_policy = warn`. Optional segments may drop without `HARD_STOP`. Suitable for iteration. |
 
-The defaults are configurable per Organization through the parent PolicyScope; the tier identifies the *posture class* so downstream subsystems can apply class-specific defaults. The [Cache-Aware Router](/docs/concepts/routing/manifest-aware-routing) treats `tier` as a hard partition: a `prod` Run never reuses cache warmed by a `dev` Run, even within the same Project.
+The defaults are configurable per Tenant through the parent PolicyScope; the tier identifies the *posture class* so downstream subsystems can apply class-specific defaults. The [Cache-Aware Router](/docs/concepts/routing/manifest-aware-routing) treats `tier` as a hard partition: a `prod` Run never reuses cache warmed by a `dev` Run, even within the same Project.
 
 ## What carries the Environment ID
 
@@ -92,7 +91,6 @@ Step.environment_id
 ModelCall.environment_id
 Checkpoint.environment_id
 ContextArtifact.environment_id
-MemoryEntry.environment_id        (for session/user/tenant scopes)
 usage_records.environment_id
 event_envelope.environment_id
 ```
@@ -109,7 +107,7 @@ Environment-level totals are sums over `usage_records` rows tagged with the Envi
 | Per-day breakdown | `GET /v1/ks/metering/usage?scope=environment&environment_id=...&group_by=day` |
 | Per-Run breakdown | `GET /v1/ks/metering/usage?scope=environment&environment_id=...&group_by=run` |
 
-Like other scoped queries, an unknown `environment_id` for the authenticated Organization returns `200` with zeros (ADR-023 error semantics carried through the cost model — see [cost-model aggregation](/docs/concepts/cost/cost-model#aggregation)).
+Like other scoped queries, an unknown `environment_id` for the authenticated Tenant returns `200` with zeros (ADR-023 error semantics carried through the cost model — see [cost-model aggregation](/docs/concepts/cost/cost-model#aggregation)).
 
 ## Inheritance
 
@@ -129,7 +127,7 @@ An Environment can be moved to `ARCHIVED`. New admission rejects; in-flight Runs
 
 ## What an Environment is not
 
-- **Not a deployment.** A deployment is a substrate placement — a cluster, region, or fleet. An Environment is a logical scope; multiple deployments can serve one Environment, and one deployment can host multiple Environments under different Organizations.
+- **Not a deployment.** A deployment is a substrate placement — a cluster, region, or fleet. An Environment is a logical scope; multiple deployments can serve one Environment, and one deployment can host multiple Environments under different Tenants.
 - **Not a release stage.** Promotion between Environments is the application's concern. KovaServe does not orchestrate "promote staging to prod" — it isolates the runtime so the application can.
 - **Not a network boundary.** Network isolation is a deployment property carried in `data_boundary`. Environments are independent in the logical model regardless of network topology.
 - **Not free-form.** The `tier` field is closed (`prod`, `staging`, `dev`). The `name` field is a human-readable label and does not affect routing or policy.

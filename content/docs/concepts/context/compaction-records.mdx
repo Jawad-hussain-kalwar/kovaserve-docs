@@ -18,22 +18,26 @@ The CompactionRecord is the lineage anchor that makes compaction safe to use as 
 - Re-compaction with a different method (or a managed summarizer roll-forward) can use the original sources, not the prior summary.
 - Quality regressions are debuggable — the record carries enough metadata to reproduce the prior compaction pass.
 
-## Two production paths
+## The two methods
 
-The Compaction Lineage Service supports two identical-shape production paths:
+The Compaction Lineage Service supports two production paths under one identical-shape contract. Both are first-class; the lineage record looks the same in both cases. The `method` field on the record names which path produced it:
 
-| Producer | Where the summary text comes from |
+| `method` | Where the summary text comes from |
 |---|---|
-| Runtime-produced | The runtime calls a model itself, produces the summary, and reports the record via `POST /v1/ks/context/compact`. KovaServe records lineage; it does not generate the summary. |
-| KovaServe-managed | The Compaction Lineage Service runs a managed summarizer (model-specific policies, optional quality scoring) and writes both the output segments and the record. |
+| `runtime_reported` | The runtime calls a model itself, produces the summary, and reports the record via `POST /v1/ks/context/compact`. KovaServe records the lineage; the runtime owns the summary content. |
+| `kovaserve_managed` | The Compaction Lineage Service runs a managed summarizer (model-specific policies, optional quality scoring) and writes both the output segments and the record in one transaction. |
 
-The lineage contract is identical in both cases. The same downstream consumers — resume, observability, re-compaction — operate on records produced by either path without distinguishing them.
+The lineage contract is identical across both methods. The same downstream consumers — resume, observability, re-compaction — operate on records produced by either path without distinguishing them. Lineage is always KovaServe's responsibility; summary quality is the runtime's responsibility under `runtime_reported` and a managed enhancement under `kovaserve_managed`.
 
 ## Shape
 
 ```json
 {
   "id": "01J8X9Y2Z3K4M5N6P7Q8R9CR04",
+  "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+  "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+  "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+  "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
   "source_manifest_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T6",
   "source_segment_ids": [
     "01J8X9Y2Z3K4M5N6P7Q8R9SG10",
@@ -43,30 +47,18 @@ The lineage contract is identical in both cases. The same downstream consumers �
   "output_segment_ids": [
     "01J8X9Y2Z3K4M5N6P7Q8R9SG20"
   ],
-  "method": "summarize_history",
-  "model": "qwen3-coder-30b",
-  "token_counts": {
-    "source_total": 9842,
-    "output_total": 412,
-    "savings": 9430
-  },
-  "byte_counts": {
-    "source_total": 39280,
-    "output_total": 1648
-  },
-  "source_artifact_ids": [
-    "01J8X9Y2Z3K4M5N6P7Q8R9AR05"
-  ],
-  "output_artifact_id": "01J8X9Y2Z3K4M5N6P7Q8R9AR06",
-  "producer": "runtime",
+  "method": "runtime_reported",
+  "model_id": "qwen3-coder-30b",
+  "token_count_before": 9842,
+  "token_count_after": 412,
   "quality_flags": {
     "verbatim_quotes_preserved": true,
     "tool_call_records_preserved": true,
     "decisions_preserved": true
   },
-  "scope": {
-    "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
-    "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1"
+  "metadata": {
+    "source_artifact_ids": ["01J8X9Y2Z3K4M5N6P7Q8R9AR05"],
+    "output_artifact_id": "01J8X9Y2Z3K4M5N6P7Q8R9AR06"
   },
   "created_at": "2026-04-30T12:00:00Z"
 }
@@ -77,20 +69,18 @@ The lineage contract is identical in both cases. The same downstream consumers �
 | Field | Purpose |
 |---|---|
 | `id` | Bare 26-char ULID. |
+| `tenant_id`, `project_id` | Scope ownership. Cross-scope reads return 404. |
+| `run_id`, `session_id` | The Run and Session the compaction belongs to. |
 | `source_manifest_id` | The ContextManifest the source segments belonged to. |
-| `source_segment_ids[]` | Ordered ids of the segments that were compacted. |
-| `output_segment_ids[]` | Ids of the resulting segments. Usually one; may be more when the source spans distinct topics. |
-| `method` | Method tag — `summarize_history`, `summarize_tool_output`, `truncate_with_marker`, `extract_decisions`, etc. Closed enum maintained by the Compaction Lineage Service. |
-| `model` | The model used to produce the summary, if any. Null for non-model methods like `truncate_with_marker`. |
-| `token_counts.source_total` | Sum of source segment `token_count`s under the source manifest's tokenizer fingerprint. |
-| `token_counts.output_total` | Sum of output segment `token_count`s. |
-| `token_counts.savings` | `source_total - output_total`. Recorded so it does not need to be recomputed. |
-| `byte_counts` | Same shape, bytes. |
-| `source_artifact_ids[]` | Optional. When source segments were artifact-backed, the artifacts are recorded too so the source bytes survive segment retention. |
-| `output_artifact_id` | Optional. Pre/post-compaction transcripts may be retained as artifacts for replay. |
-| `producer` | `runtime` or `managed`. |
-| `quality_flags` | Method-specific structured flags asserting properties the runtime or managed summarizer guaranteed. |
-| `scope` | Tenant/project ownership. |
+| `source_segment_ids[]` | Ordered ids of the segments that were compacted. JSONB column. |
+| `output_segment_ids[]` | Ids of the resulting segments. Usually one; may be more when the source spans distinct topics. JSONB column. |
+| `method` | `runtime_reported` or `kovaserve_managed`. The closed enum maintained by the Compaction Lineage Service. |
+| `model_id` | The model used to produce the summary. Required for `kovaserve_managed`; optional and informational for `runtime_reported`. |
+| `token_count_before` | Sum of source segment `token_count`s under the source manifest's tokenizer fingerprint. |
+| `token_count_after` | Sum of output segment `token_count`s. The savings is the difference; it is recorded implicitly. |
+| `quality_flags` | JSONB. Method- and runtime-specific structured flags asserting properties the summarizer guaranteed. |
+| `metadata` | JSONB. Free-form metadata; conventionally carries `source_artifact_ids` and `output_artifact_id` when source or output segments are artifact-backed, byte counts, and policy refs. |
+| `created_at` | Timestamp. |
 
 ## Records and segments
 
@@ -99,7 +89,7 @@ A compacted output segment carries `compaction_record_id` pointing back at its C
 ```
 ContextSegment (compacted)
 ├── id = 01J8X9Y2Z3K4M5N6P7Q8R9SG20
-├── context_type = "history_summary"
+├── context_type = "summary"
 ├── compaction_record_id = 01J8X9Y2Z3K4M5N6P7Q8R9CR04   ◀── the record
 └── ...
 
@@ -109,7 +99,7 @@ CompactionRecord
 └── output_segment_ids = [SG20]
 ```
 
-The relationship is bidirectional and indexed: given a record, the source and output segments resolve directly; given a compacted segment, the record resolves directly.
+The relationship is bidirectional and indexed: given a record, the source and output segments resolve directly; given a compacted segment, the record resolves directly. Output segments always carry `context_type = "summary"` per [segment types](/docs/concepts/context/segment-types).
 
 ## Producing a record
 
@@ -119,18 +109,19 @@ Authorization: Bearer ks_...
 Content-Type: application/json
 
 {
+  "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
   "source_manifest_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T6",
   "source_segment_ids": [
     "01J8X9Y2Z3K4M5N6P7Q8R9SG10",
     "01J8X9Y2Z3K4M5N6P7Q8R9SG11",
     "01J8X9Y2Z3K4M5N6P7Q8R9SG12"
   ],
-  "method": "summarize_history",
-  "model": "qwen3-coder-30b",
+  "method": "runtime_reported",
+  "model_id": "qwen3-coder-30b",
   "output_segments": [
     {
-      "context_type": "history_summary",
-      "memory_scope": "session",
+      "context_type": "summary",
+      "memory_class": "session",
       "text": "<the summary>",
       "token_count": 412
     }
@@ -145,18 +136,19 @@ Content-Type: application/json
 
 The Compaction Lineage Service writes the output segment rows, the CompactionRecord row, and the `compaction_record_id` back-reference in a single transaction. The next manifest assembled by GCM v2 may then drop the source segments and include the output segment instead — admission re-runs against the reduced shape.
 
+For `method: kovaserve_managed` the call is internal — the managed summarizer invokes the same atomic write path with `method: kovaserve_managed`, the model_id of the summarizer it ran, and `quality_flags` produced by its policy. Runtimes do not call `kovaserve_managed` from the wire; they observe the resulting record like any other.
+
 ## Triggers
 
 CompactionRecords are produced when:
 
-| Trigger | Source |
-|---|---|
-| `ContextBudget` admission returned `COMPACT_REQUIRED` | The runtime (or managed summarizer) compacts to fit; the record is registered before re-admission. |
-| Runtime-driven proactive summarization | The runtime decides to compact ahead of an admission failure. |
-| Managed summarizer policy | A scheduled policy compacts long Sessions or large tool outputs without runtime involvement. |
-| Sub-run summary handoff | The child Run's summary registration produces both an artifact and a CompactionRecord whose `source_artifact_ids` reference the child's transcript. |
+| Trigger | `method` | Source |
+|---|---|---|
+| `ContextBudget` admission returned `COMPACT_REQUIRED` | `runtime_reported` or `kovaserve_managed` | The runtime (or managed summarizer) compacts to fit; the record is registered before re-admission. |
+| Runtime-driven proactive summarization | `runtime_reported` | The runtime decides to compact ahead of an admission failure. |
+| Managed summarizer policy | `kovaserve_managed` | A scheduled policy compacts long Sessions or large tool outputs without runtime involvement. |
 
-The `COMPACT` [step type](/docs/concepts/run-hierarchy/step-types) is the canonical step under which the runtime performs runtime-produced compaction. Managed-summarizer compactions are not Steps on the runtime's Run; they are control-plane-internal operations that produce records but do not occupy step slots.
+The `COMPACT` [step type](/docs/concepts/run-hierarchy/step-types) is the canonical step under which the runtime performs `runtime_reported` compaction. `kovaserve_managed` compactions are not Steps on the runtime's Run; they are control-plane-internal operations that produce records but do not occupy step slots.
 
 ## Retention
 
@@ -170,22 +162,25 @@ This makes lineage replayable across the full retention window: a record from th
 
 ## Quality flags
 
-`quality_flags` is a method-specific JSON object whose keys depend on the `method`. The Compaction Lineage Service does not enforce semantics on the flag values — it stores them. Conventions for the most common methods:
+`quality_flags` is a method- and summarizer-specific JSON object. The Compaction Lineage Service does not enforce semantics on the flag values — it stores them. The runtime (under `runtime_reported`) or the managed summarizer policy (under `kovaserve_managed`) decides which flags to assert. KovaServe does not score or guarantee summary quality; it stores what the producer asserted and exposes it for downstream replay, observability, and re-compaction policies.
 
-| Method | Typical flags |
+Common conventions:
+
+| Producer pattern | Typical flags |
 |---|---|
-| `summarize_history` | `verbatim_quotes_preserved`, `tool_call_records_preserved`, `decisions_preserved`, `latest_user_request_preserved`. |
-| `summarize_tool_output` | `error_messages_preserved`, `result_schema_preserved`, `numeric_values_preserved`. |
-| `truncate_with_marker` | `truncation_marker_inserted`, `head_kept_tokens`, `tail_kept_tokens`. |
-| `extract_decisions` | `decision_count`, `bullet_form`. |
+| History summary | `verbatim_quotes_preserved`, `tool_call_records_preserved`, `decisions_preserved`, `latest_user_request_preserved`. |
+| Tool-output summary | `error_messages_preserved`, `result_schema_preserved`, `numeric_values_preserved`. |
+| Truncation with marker | `truncation_marker_inserted`, `head_kept_tokens`, `tail_kept_tokens`. |
+| Decision extraction | `decision_count`, `bullet_form`. |
 
 The flags are read by observability, by re-compaction policies, and by the `compaction-lineage` view in dashboards.
 
 ## What CompactionRecords are not
 
-- **Not a summarizer.** The Compaction Lineage Service stores lineage. Summary generation is either the runtime's job or the managed summarizer's job; the record is the durable trace of the operation, not the operation itself.
+- **Not a summarizer.** The Compaction Lineage Service stores lineage. Summary generation is either the runtime's job (`runtime_reported`) or the managed summarizer's job (`kovaserve_managed`); the record is the durable trace of the operation, not the operation itself.
 - **Not optional metadata.** Any compacted segment **must** carry `compaction_record_id`. A compacted segment without lineage is rejected at admission.
 - **Not chained automatically.** Re-compaction (compacting an already-compacted segment further) produces a fresh record whose sources include the prior output. The chain is explicit; there is no implicit transitive lineage.
+- **Not a quality contract.** KovaServe stores `quality_flags` as the producer asserted them. KovaServe does not score summaries, does not enforce flag semantics, and does not guarantee semantic fidelity — that responsibility lives with whoever produced the summary.
 - **Not free.** Source-segment retention extension under `with_compaction_lineage` increases storage; tenants pay for it through standard metering.
 
 ## See also

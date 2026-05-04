@@ -15,7 +15,7 @@ A Step is a thin row by design — it points at the things that did the work, ra
 |---|---|
 | `id` | The Step identifier (bare 26-character Crockford ULID). |
 | `run_id` | The owning [Run](/docs/concepts/run-hierarchy/runs). Immutable. |
-| `step_type` | The typed progression marker. See [Step types](/docs/concepts/run-hierarchy/step-types) for the canonical 19-value enum. |
+| `step_type` | The typed progression marker. See [Step types](/docs/concepts/run-hierarchy/step-types) for the canonical enum. |
 | `status` | The current state in the [Step state machine](/docs/concepts/run-hierarchy/step-state-machine). |
 | `ordinal` | Monotonic position within the Run. Assigned at creation and never reused. |
 | `parent_step_id` | The dispatching Step when this Step nests inside another (e.g. a `TOOL_EXECUTE` under a `TOOL_PLAN`). `null` for top-level Steps. |
@@ -31,16 +31,15 @@ Step creation is **deferred until after admission succeeds**. This is a load-bea
 ```
 1. Gateway authenticates and resolves PolicyScope.
 2. GCM assembles the ContextManifest.
-3. Tool Context Governance assigns ToolContextDispositions.
-4. ContextBudget admission evaluates the manifest.
+3. ContextBudget admission evaluates the manifest.
    ├─ HARD_STOP  → request rejected. NO STEP ROW IS CREATED.
    ├─ DEGRADE / OFFLOAD_REQUIRED / COMPACT_REQUIRED → manifest re-shaped, re-admitted.
    └─ ALLOW / WARN → admission succeeds.
-5. Run-level Budget pre-check against admitted manifest.
+4. Run-level Budget pre-check against admitted manifest.
    ├─ Reject → NO STEP ROW IS CREATED.
    └─ Allow → continue.
-6. STEP ROW IS CREATED, bound to the admitted manifest.
-7. Router plans placement; Layer 1 executes; ModelCall is recorded.
+5. STEP ROW IS CREATED, bound to the admitted manifest.
+6. Router plans placement; Layer 1 executes; ModelCall is recorded.
 ```
 
 The consequence: a Run's `step_count` reflects only Steps the system actually committed to executing. A request that bounced off [ContextBudget](/docs/concepts/policy/context-budgets) admission or run-level [Budget](/docs/concepts/policy/budgets) pre-check leaves no Step trace on the Run row. Audit and metering of *rejected* requests live on the policy and budget event streams instead — `ks.policy.denied`, `ks.context.budget.hard_stop`, `ks.budget.hard_stop` — keyed to the Run but not consuming a Step ordinal.
@@ -53,7 +52,7 @@ When a Step is created in step 6 above, it is bound to the admitted [ContextMani
 
 A Step typically owns one ModelCall, but Steps that issue multiple parallel substrate calls — a `TOOL_PLAN` that fans out across several models, a `MODEL_CALL` Step that triggers structured output paired with reasoning — may own several. Each ModelCall inside the Step carries its own `context_manifest_id`; the Canonical Execution Service does not coalesce them.
 
-Steps that do not invoke the substrate (`OBSERVE`, `THINK`, `CHECKPOINT`, `PAUSE`, `RESUME`, `BRANCH`, `MEMORY_READ`, `MEMORY_WRITE`, `SUB_RUN_DISPATCH`, `SUB_RUN_JOIN`, `COMPLETE`, `FAIL`) own zero ModelCalls. Their effect is recorded on the Step row, on the relevant subsystem (Memory Store, Checkpoint Manager, Sub-Run lineage), and on the corresponding event stream.
+Steps that do not invoke the substrate (`OBSERVE`, `THINK`, `CHECKPOINT`, `PAUSE`, `RESUME`, `BRANCH`, `COMPLETE`, `FAIL`) own zero ModelCalls. Their effect is recorded on the Step row, on the relevant subsystem (Checkpoint Manager, branch lineage), and on the corresponding event stream.
 
 ## Ordering inside a Run
 
@@ -135,7 +134,7 @@ Authorization: Bearer ks_...
 
 ## Step types are an open enum
 
-Step types are validated at the application layer, not via a database `CHECK` constraint. The canonical set is large enough to cover the documented runtime semantics — the standard agent loop, workspace and process orchestration, reflection, durability and lineage, terminal markers, context engineering, and sub-run dispatch — and new types can be introduced without a DDL change. See [Step types](/docs/concepts/run-hierarchy/step-types) for the full canonical list and what each type represents.
+Step types are validated at the application layer, not via a database `CHECK` constraint. The canonical set is large enough to cover the documented runtime semantics — the standard agent loop, workspace and process orchestration, reflection, durability and lineage, terminal markers, and context engineering — and new types can be introduced without a DDL change. See [Step types](/docs/concepts/run-hierarchy/step-types) for the full canonical list and what each type represents.
 
 A runtime that does not need a particular type can ignore it. A runtime that wants a custom type beyond the canonical set should propose it; KovaServe extends the enum rather than letting the surface fragment.
 
@@ -144,7 +143,7 @@ A runtime that does not need a particular type can ignore it. A runtime that wan
 - **Not a transaction boundary.** A Step records progression, not durability. The durable safe-points are [Checkpoints](/docs/concepts/recovery/checkpoints), which bind to a specific Step but are not the Step itself.
 - **Not the cost unit.** ModelCalls inside a Step carry the cost. A Step's cost is the sum of its ModelCalls; a Step that owns zero ModelCalls has zero cost.
 - **Not a synchronization primitive.** Steps are recorded as work happens; they do not gate other Steps. A runtime that needs ordering between Steps enforces that itself.
-- **Not the runtime's plan.** The runtime decides what to do next; the Step records what was done. Plans, scratchpads, and intermediate reasoning live in [Memory Store](/docs/concepts/memory/memory-store) entries or runtime-local state, not on the Step row.
+- **Not the runtime's plan.** The runtime decides what to do next; the Step records what was done. Plans, scratchpads, and intermediate reasoning live in [runtime-local state](/docs/concepts/runtime/runtime-local-state), not on the Step row.
 
 ## See also
 
@@ -153,5 +152,5 @@ A runtime that does not need a particular type can ignore it. A runtime that wan
 - [Runs](/docs/concepts/run-hierarchy/runs) — what a Step belongs to
 - [ModelCalls](/docs/concepts/run-hierarchy/model-calls) — what a substrate-bound Step contains
 - [Context manifests](/docs/concepts/context/context-manifests) — the audit anchor each ModelCall references
-- [Sub-runs](/docs/concepts/run-hierarchy/sub-runs) — the `SUB_RUN_DISPATCH` and `SUB_RUN_JOIN` Step types
+- [Branches](/docs/concepts/recovery/branches) — the `BRANCH` Step and the `BRANCHING` Run state
 - [`POST /v1/ks/runs/{id}/steps`](/docs/api/runs/steps) · [`GET /v1/ks/runs/{id}/steps`](/docs/api/runs/steps)

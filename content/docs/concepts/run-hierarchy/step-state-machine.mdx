@@ -36,7 +36,7 @@ The Step row exists but no work has begun. The Step has been admitted (admission
 
 ### `STARTED`
 
-Work is in progress. For substrate-bound Steps (`MODEL_CALL`, `TOOL_PLAN`), this means the Cache-Aware Router has selected a node and dispatch is underway. For runtime-emitted Steps (`OBSERVE`, `THINK`, `CHECKPOINT`, `PAUSE`, `RESUME`, `BRANCH`, `MEMORY_READ`, `MEMORY_WRITE`, `SUB_RUN_DISPATCH`, `SUB_RUN_JOIN`), `STARTED` means the runtime has begun the corresponding action.
+Work is in progress. For substrate-bound Steps (`MODEL_CALL`, `TOOL_PLAN`), this means the Cache-Aware Router has selected a node and dispatch is underway. For runtime-emitted Steps (`OBSERVE`, `THINK`, `CHECKPOINT`, `PAUSE`, `RESUME`, `BRANCH`, `COMPLETE`, `FAIL`), `STARTED` means the runtime has begun the corresponding action.
 
 `started_at` is set on this transition. The Canonical Execution Service publishes `ks.step.started`.
 
@@ -50,7 +50,7 @@ A `SUCCEEDED` `MODEL_CALL` Step does **not** imply the model produced a useful r
 
 ### `FAILED` (terminal)
 
-The Step's work failed. For substrate-bound Steps, this covers substrate errors, admission-time rejections that escaped the pre-Step gates, and routing failures with no viable fallback. For runtime Steps, this covers the runtime's own classification of failure — a tool that errored, a `FILE_WRITE` blocked by workspace policy, a Memory Store write that violated retention.
+The Step's work failed. For substrate-bound Steps, this covers substrate errors, admission-time rejections that escaped the pre-Step gates, and routing failures with no viable fallback. For runtime Steps, this covers the runtime's own classification of failure — a tool that errored, a `FILE_WRITE` blocked by workspace policy, a process that violated its sandbox.
 
 A `FAILED` Step does **not** automatically fail the Run. The runtime decides whether to retry (a new Step), branch off a Checkpoint, or surface the failure as terminal via a `FAIL` Step. The [Run state machine](/docs/concepts/run-hierarchy/run-state-machine) only moves to `FAILED` when failure is unrecoverable at the Run level.
 
@@ -60,7 +60,7 @@ The Step was decided not to execute, with no failure semantics. Reached only fro
 
 - A `TOOL_PLAN` Step whose plan resolves to "no action needed."
 - A speculative Step the runtime emitted optimistically and then declined to execute.
-- A `MEMORY_READ` Step where the keys were already cached in the runtime's local state.
+- A `FILE_READ` Step where the runtime's cache already covers the requested paths.
 
 `SKIPPED` is distinct from `FAILED` in that it carries no error metadata and counts as a successful no-op for retry and recovery logic. The Step's `ordinal` is consumed and not reused.
 

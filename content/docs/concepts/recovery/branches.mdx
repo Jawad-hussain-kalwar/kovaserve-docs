@@ -53,7 +53,6 @@ A branched child carries two distinct references:
 |---|---|
 | `restored_from` | The [Checkpoint](/docs/concepts/recovery/checkpoints) the child resumes from. Always populated on a branch. |
 | `branch_from` | The parent [Run](/docs/concepts/run-hierarchy/runs) the child forked from. Populated only on branches; `null` on a plain resume. |
-| `parent_run_id` | The [sub-run](/docs/concepts/run-hierarchy/sub-runs) parent, if any. Distinct from `branch_from` — branch lineage and sub-run lineage are independent and may both be set on the same Run. |
 
 `branch_from` is preserved across the child's lifetime. It travels into events tagged to the child Run, into observability traces, and into the timeline UI so operators can navigate from any point in the branch tree back to its origin.
 
@@ -67,7 +66,6 @@ A branched child does **not** inherit the parent's running totals. It inherits t
 | Budget consumed-to-date | Reset to zero. The child gets its own fresh budget. |
 | [ContextBudget](/docs/concepts/policy/context-budgets) dimensions | Inherited; overridable downward. |
 | [PolicyScope](/docs/concepts/policy/policy-scopes) | Inherited unchanged. A branch cannot escape its parent's scope. |
-| [ToolCatalog](/docs/concepts/tools/tool-catalogs) reference | Inherited unchanged. |
 | [Session](/docs/concepts/continuity/sessions) binding | Inherited by default; may be overridden to bind the child to a fresh Session. |
 | [`current_manifest_id`](/docs/concepts/continuity/current-manifest) on the bound Session | Set to the source Checkpoint's frozen manifest at branch time, identical to the resume case. |
 
@@ -96,7 +94,6 @@ Branches sharing a [Session](/docs/concepts/continuity/sessions) are subject to 
 
 - **Not a clone of the parent's row.** The child has a fresh `run_id`, fresh timestamps, fresh execution events. It references the parent through `branch_from`; it does not duplicate it.
 - **Not a substitute for [retries](/docs/concepts/recovery/retries).** A retry adds a new Step within the same Run for transient failures. A branch creates a new Run for divergent trajectories.
-- **Not a substitute for [sub-runs](/docs/concepts/run-hierarchy/sub-runs).** A sub-run is a child Run dispatched by the parent's logic during execution and joined via summary handoff. A branch is an out-of-band fork from a Checkpoint. The two coexist; a branched Run can dispatch sub-runs, and a sub-run can be branched.
 - **Not free.** Each branch creates its own budget consumption and its own observability surface. The control plane does not silently coalesce branches that converge.
 
 ## Wire shape
@@ -139,4 +136,3 @@ Content-Type: application/json
 - [Checkpoints](/docs/concepts/recovery/checkpoints) — the surface every branch forks from
 - [Resume flow](/docs/concepts/recovery/resume-flow) — the alternate path from a Checkpoint
 - [Run state machine](/docs/concepts/run-hierarchy/run-state-machine) — `BRANCHING` on the parent FSM
-- [Sub-runs](/docs/concepts/run-hierarchy/sub-runs) — the in-band parallel-execution primitive

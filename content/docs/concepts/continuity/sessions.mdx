@@ -49,7 +49,7 @@ Quick orientation:
 
 A Run becomes the current Run via the `kovaserve.session_id` extension on `POST /v1/chat/completions`, or by passing `session_id` to `POST /v1/ks/runs`. Internally this calls a `bind_run` operation that enforces six invariants:
 
-1. **Tenant scoping.** The target Run must belong to the same tenant as the Session. A cross-tenant bind returns the same `404` as a missing Session — the existence of the foreign Run is not leaked.
+1. **Tenant scoping.** The target Run must belong to the same Tenant as the Session. A cross-tenant bind returns the same `404` as a missing Session — the existence of the foreign Run is not leaked.
 2. **Run ID shape.** The Run ID must be a valid 26-character Crockford ULID.
 3. **Non-terminal Runs only.** Runs in `COMPLETED`, `FAILED`, or `CANCELED` cannot be bound.
 4. **No cross-Session re-binding.** A Run already bound to a different Session cannot be moved.
@@ -91,7 +91,7 @@ Each Session tracks the most recently admitted [ContextManifest](/docs/concepts/
 
 ## Tenant scoping
 
-Every Session is owned by exactly one `(tenant_id, project_id)` pair, inherited from the API key that created it. The owning pair is immutable. Reads, writes, and binds from any other tenant return `404 Not Found` — the same response as a genuinely missing Session — so cross-tenant probing yields no information.
+Every Session is owned by exactly one `(tenant_id, project_id)` pair, inherited from the API key that created it. The owning pair is immutable. Reads, writes, and binds from any other Tenant return `404 Not Found` — the same response as a genuinely missing Session — so cross-tenant probing yields no information.
 
 ## ID format
 
@@ -159,7 +159,6 @@ If the Session is `EXPIRED` or `ARCHIVED`, the request is rejected before infere
 
 - **Not the unit of value.** That is the [Run](/docs/concepts/run-hierarchy/runs). A Session can host zero, one, or many Runs over its lifetime.
 - **Not a runtime construct.** The Session Registry is owned by the control plane; runtimes (LangGraph, Temporal, custom) reference Sessions but do not implement them.
-- **Not a memory store.** Cross-Session memory belongs to the [Memory Store](/docs/concepts/memory/memory-store) with explicit [`MemoryScope`](/docs/concepts/memory/memory-scopes) (`user`, `tenant`, `global`). Sessions hold per-conversation continuity only.
 - **Not the canonical owner of every ContextManifest.** Each ModelCall carries its own `context_manifest_id`; the Session tracks `current_manifest_id` and a bounded history for resume planning, not the full per-call lineage.
 
 ## See also

@@ -8,7 +8,7 @@ description: The persistent runtime-side state — planner scratchpad, active pr
 ```
 ┌─ Layer 2 (canonical ledger) ─────────────────────┐
 │  Run / Step / ModelCall / ContextManifest /      │
-│  Checkpoint / CompactionRecord / MemoryEntry     │
+│  Checkpoint / CompactionRecord                   │
 │  ────────────────────────────────────────────    │
 │  durable, ordered, audit-grade,                  │
 │  the source of truth for "what happened"         │
@@ -47,7 +47,7 @@ The [Runtime State Store](/docs/concepts/runtime/runtime-architecture#runtime-st
 | `active_process_handles[]` | Live process descriptors inside the [sandbox](/docs/concepts/runtime/sandboxes) — pid, command, started_at, expected_outcome. A resuming Worker uses these to reattach output capture or to mark the process as observed. |
 | `tool_loop_position` | The runtime's position in a tool loop — last tool selected, retry counter for the current tool, planned next step. |
 | `workspace_refs` | The [Workspace](/docs/concepts/runtime/workspaces) id, the current sandbox id, the active mutation log cursor. |
-| `branch_pointer` | When the Run is part of a [branch lineage](/docs/concepts/recovery/branch-flow), the parent Run id and the snapshot the branch was seeded from. |
+| `branch_pointer` | When the Run is part of a [branch lineage](/docs/concepts/recovery/branch-flow), the source Run's id and the snapshot the branch was seeded from. |
 | `last_safe_checkpoint_id` | The most recent [Checkpoint](/docs/concepts/recovery/checkpoints) the runtime considers safe to resume from on failure. |
 | `version` | Monotonic version, incremented on every write. The Worker uses CAS on this field to detect lease loss. |
 | `updated_at` | Last write time. |
@@ -91,7 +91,6 @@ A Worker whose lease has been silently reassigned will see zero rows updated and
 
 - **Canonical execution rows.** Steps, ModelCalls, ContextManifests, Checkpoints — these are Layer 2.
 - **Context bytes.** Tool outputs, file diffs, retrieved documents go to [ContextArtifact](/docs/concepts/context/context-artifacts) or [WorkspaceArtifact](/docs/concepts/runtime/workspace-artifacts) storage, not to runtime-local state.
-- **Agent memory.** Anything the agent should remember across Runs goes to the [Memory Store](/docs/concepts/memory/memory-store) under the right [MemoryScope](/docs/concepts/memory/memory-scopes), not to runtime-local state. Runtime-local state is per-Run; Memory Store is cross-Run.
 - **Workspace bytes.** The Workspace's filesystem state lives in the [sandbox](/docs/concepts/runtime/sandboxes); snapshots live in object storage as `workspace_snapshot` WorkspaceArtifacts. Runtime-local state holds *references* to these, not the bytes.
 
 ## Inspection
@@ -153,4 +152,3 @@ A Run's runtime-local state is retained for the Run's full lifetime plus a confi
 - [Workers](/docs/concepts/runtime/workers) — the lease-owned executors that read and write runtime-local state
 - [Runtime execution semantics](/docs/concepts/runtime/runtime-execution-semantics) — the Step boundary contract
 - [Checkpoints](/docs/concepts/recovery/checkpoints) · [Resume flow](/docs/concepts/recovery/resume-flow) · [Retries](/docs/concepts/recovery/retries) — how `last_safe_checkpoint_id` and the canonical ledger interact on recovery
-- [Memory store](/docs/concepts/memory/memory-store) — the cross-Run continuity surface that runtime-local state explicitly is not

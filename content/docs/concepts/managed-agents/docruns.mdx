@@ -55,7 +55,7 @@ The SKU's discipline is **citation grade**: every assertion the agent makes is a
 | Runtime | The KovaServe managed runtime — workers, sandboxes (lightweight; document processing is rarely process-heavy), runtime-native timeline. |
 | Workspace | Optional. Most DocRuns operate against artifact-registered documents and do not need a writable filesystem; reconciliation workloads may bind a workspace for intermediate output. |
 | Sandbox profile | Container image with text-processing toolchains (PDF extraction, DOCX parsing, structured-document parsers). Network policy targets the customer's content store only — no general internet egress. |
-| Tool catalog | Document fetchers (content store, document management system), text segmenters, structured extractors, rule-engine adapters, citation validators. Outbound HTTP is governed per-host. |
+| Tools | Document fetchers (content store, document management system), text segmenters, structured extractors, rule-engine adapters, citation validators. Outbound HTTP is governed per-host. |
 | Default budget | Per-document and per-run budget caps. Reconciliation runs across multiple documents have a higher cap, set by the SKU operator. |
 | Default context budget | Aggressive offload of full document bytes to artifacts; only currently-analyzed spans inline. Compact-required threshold tuned to keep the working context lean across long documents. |
 | Default policy scope | Tool policy that blocks document export, blocks unbounded document fetch, and requires explicit policy for any cross-document write. Data boundary set to the customer's document residency region. Audit retention extended to compliance-grade. |
@@ -125,6 +125,5 @@ This is what makes DocRuns suitable for legal and compliance work: a reviewer ca
 - [CodeRuns](/docs/concepts/managed-agents/coderuns) · [OpsRuns](/docs/concepts/managed-agents/opsruns) — the other reference SKUs
 - [KovaServe runtime mode](/docs/concepts/deployment/managed-runtime) — the runtime DocRuns runs on
 - [Context artifacts](/docs/concepts/context/context-artifacts) · [Context segments](/docs/concepts/context/context-segments) — the entities documents and spans become
-- [Tool governance](/docs/concepts/tools/tool-governance) · [Tool context disposition](/docs/concepts/tools/tool-context-disposition) — the governance the SKU enforces
 - [Private deployment](/docs/concepts/deployment/private-deployment) — the topology most DocRuns deployments choose for residency
 - [Cost per completed run](/docs/concepts/cost/cost-per-completed-run) — the unit of value

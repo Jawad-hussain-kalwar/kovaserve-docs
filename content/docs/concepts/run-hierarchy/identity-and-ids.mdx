@@ -5,7 +5,7 @@ description: How KovaServe identifies entities — ULIDs across the surface, the
 
 KovaServe uses three distinct identity primitives across its surface:
 
-- **ULIDs** for almost every persistent entity — Run, Step, ModelCall, Checkpoint, ContextManifest, ContextSegment, ContextArtifact, MemoryEntry, ToolCatalog, Budget, PolicyScope, StateHandle, Organization, Project, Environment, Key, and others.
+- **ULIDs** for almost every persistent entity — Run, Step, ModelCall, Checkpoint, ContextManifest, ContextSegment, ContextArtifact, Budget, PolicyScope, StateHandle, Tenant, Project, Environment, Key, and others.
 - **Prefixed Session IDs** (`ses_<24hex>`) — the one deliberate exception, distinguishable at a glance from execution-scoped IDs.
 - **Idempotency keys** — caller-supplied strings that let clients safely retry mutating operations.
 
@@ -23,10 +23,10 @@ Properties:
 
 - **Lexicographically sortable by creation time.** The first 48 bits encode a millisecond timestamp; sorting `id` strings sorts entities by creation order without an index.
 - **Crockford base32.** Uppercase alphanumeric, no `I`, `L`, `O`, or `U` to avoid ambiguity. Case-insensitive on input; the canonical form is uppercase.
-- **128 bits of entropy.** Collisions are not a practical concern within or across tenants.
+- **128 bits of entropy.** Collisions are not a practical concern within or across Tenants.
 - **Length-stable.** Always 26 characters. Validators can reject malformed IDs cheaply.
 
-Entities that use bare ULIDs include `run_id`, `step_id`, `model_call_id`, `checkpoint_id`, `context_manifest_id`, `context_segment_id`, `context_artifact_id`, `compaction_record_id`, `memory_entry_id`, `tool_catalog_id` (semantically derived from a content hash but stored as a ULID handle), `budget_id`, `context_budget_id`, `policy_scope_id`, `state_handle_id`, `organization_id`, `project_id`, `environment_id`, `key_id`, and `event_id` envelope fields.
+Entities that use bare ULIDs include `run_id`, `step_id`, `model_call_id`, `checkpoint_id`, `context_manifest_id`, `context_segment_id`, `context_artifact_id`, `compaction_record_id`, `budget_id`, `context_budget_id`, `policy_scope_id`, `state_handle_id`, `tenant_id`, `project_id`, `environment_id`, `key_id`, and `event_id` envelope fields.
 
 ## Why bare, not prefixed
 
@@ -122,7 +122,7 @@ A different kind of caller-supplied identifier is `external_run_id` on the [Run]
 
 This is the runtime's own identifier for the work — a LangGraph task ID, a Temporal workflow ID, a custom job ID — recorded on the Run row so the runtime can look up "my task" → "KovaServe Run" without maintaining a separate mapping.
 
-`external_run_id` is **idempotency-keyed per `(tenant_id, external_runtime, external_run_id)`**. Reusing an `external_run_id` under the same tenant and runtime returns the existing Run rather than creating a duplicate. This makes it safe for runtimes that crash and replay their own work to call into KovaServe at the runtime's own granularity.
+`external_run_id` is **idempotency-keyed per `(tenant_id, external_runtime, external_run_id)`**. Reusing an `external_run_id` under the same Tenant and runtime returns the existing Run rather than creating a duplicate. This makes it safe for runtimes that crash and replay their own work to call into KovaServe at the runtime's own granularity.
 
 `external_run_id` is not the same as the `Idempotency-Key` header. The header protects against duplicate HTTP requests in a short window; `external_run_id` protects against duplicate Runs across the runtime's whole lifetime.
 
@@ -144,8 +144,8 @@ Every KovaServe ID is scoped to its owning `(tenant_id, project_id)` pair. Cross
 
 The two consequences:
 
-- An ID alone is not an authorization token. The ID plus the API key's tenant scope determines what the caller can see.
-- ID collisions across tenants are not observable. Even if two tenants somehow generated the same ULID (they will not, but the system does not rely on the assumption), neither would see the other's row.
+- An ID alone is not an authorization token. The ID plus the API key's Tenant scope determines what the caller can see.
+- ID collisions across Tenants are not observable. Even if two Tenants somehow generated the same ULID (they will not, but the system does not rely on the assumption), neither would see the other's row.
 
 ## See also
 

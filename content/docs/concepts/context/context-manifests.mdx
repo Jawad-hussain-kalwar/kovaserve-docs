@@ -43,7 +43,6 @@ ContextManifest
 ├── byte_counts
 │   └── artifact_bytes          ▸ total bytes referenced via artifact_ref_id
 ├── compaction_records[]        ▸ CompactionRecord refs that produced any segment
-├── tool_catalog_id?            ▸ ToolCatalog binding when tools are present
 ├── admission
 │   ├── decision                ▸ ALLOW | WARN | OFFLOAD_REQUIRED | ...
 │   ├── transformations[]       ▸ what was applied to reach the admitted shape
@@ -64,33 +63,33 @@ Two identity fields travel on every manifest. Both are pure functions of the man
 
 Two requests that produce the same `stable_context_id` will route to the same warm placement. Two manifests that share `stable_prefix_id` but differ on `stable_context_id` (e.g. same prefix but different downstream segments) share the prefix tier of the cache but fan out at the manifest tier.
 
-## Multi-tier prefix breakpoints
+## Four storage tiers
 
-The manifest is partitioned along canonical breakpoints so different cache layers can find their own reuse boundary on the same data structure:
+GCM v2 groups segments into **four prefix-tier buckets** on the `context_manifest_segments` join row, so different cache layers can find their own reuse boundary on the same data structure:
 
 ```
-[ tools ][ system ][ history-prefix ][ summary ][ active ]
-   ▲         ▲           ▲              ▲          ▲
-   │         │           │              │          │
-   tool      system      reused turn    bounded    fresh
-   catalog   prompt      history        manifest   user input
-   tier      tier        tier           summary    +
-                                        tier       generation
+tier 0       tier 1        tier 2              tier 3            volatile tail
+[ tools ][ system ][ history_prefix ][ summary ][ agent_state + tool_result ]
+   ▲         ▲          ▲                ▲           ▲
+   │         │          │                │           │
+   tool      system     verbatim turn    bounded     fresh per-step state
+   defs      prompt     history          summary     and latest tool output
 ```
 
-Pass 4 routing reuses the leftmost breakpoints; Anthropic-style prompt cache hints reuse breakpoints further right; manifest-tier reuse spans the full structure. Every breakpoint produces its own digest, recorded on the manifest for downstream consumers.
+Tier 0 carries [`persistent_context`](/docs/concepts/context/segment-types) segments whose content is tool definitions; tier 1 carries `system_prompt`; tier 2 carries `session_history`; tier 3 carries `summary` segments. The volatile tail (`agent_state`, `tool_result`) is appended after the four-tier prefix and is recomputed every call. Pass 4 routing reuses the leftmost tiers; Anthropic-style prompt cache hints reuse tiers further right; manifest-tier reuse spans the full structure. Every tier produces its own digest, recorded on the manifest for downstream consumers.
 
 ## Segment ordering
 
-Segments inside a manifest follow **canonical ordering** (ADR-003). The order is deterministic and renderer-invariant for the same input set, so two assemblies that consume the same inputs produce the same `stable_context_id`. The order is, in summary:
+Segments inside a manifest follow **canonical ordering** (ADR-003). The order is deterministic and renderer-invariant for the same input set, so two assemblies that consume the same inputs produce the same `stable_context_id`. The six canonical positions are:
 
-1. Tool catalog segments (`tool_definitions`, in catalog order).
-2. System segments (`system_prompt`, then any system-scope memory injections).
-3. History prefix (turn history up to the last summarization point).
-4. Summary segments (compacted history if any).
-5. Active segments (current user message, current assistant draft, current generation).
+1. `system_prompt` — the runtime-supplied system prompt.
+2. `persistent_context` — long-lived material (RAG documents, tool definitions, [StateHandle](/docs/concepts/recovery/state-handles) references).
+3. `summary` — compaction outputs replacing older history.
+4. `session_history` — verbatim turn history back to the most recent compaction point.
+5. `agent_state` — the runtime's per-step scratchpad, planner output, or current draft.
+6. `tool_result` — the latest tool result that has not yet been summarized.
 
-Runtimes provide *content*; GCM owns *order*. Runtimes do not influence the canonical position assigned to a segment.
+Runtimes provide *content*; GCM owns *position*. Runtimes do not influence the canonical position assigned to a segment. See [segment types](/docs/concepts/context/segment-types) for the closed enum and how the six values map onto the four storage tiers.
 
 ## Admission decision
 
@@ -118,7 +117,6 @@ The recorded transformations make the path from "raw assembly" to "admitted shap
 | [ContextBudget admission](/docs/concepts/policy/admission) | Token counts and admission decision are produced here. |
 | [Run-level Budget pre-check](/docs/concepts/policy/budgets) | Cost estimate against `active_tokens` + tokenizer fingerprint. |
 | [CompactionRecord](/docs/concepts/context/compaction-records) | Source manifest reference; output segment list. |
-| [Sub-runs](/docs/concepts/run-hierarchy/sub-runs) | Parent's next manifest may include the child's summary segment without inflating the full child transcript. |
 
 ## Wire shape
 
@@ -154,7 +152,6 @@ Authorization: Bearer ks_...
   "byte_counts": {
     "artifact_bytes": 3145728
   },
-  "tool_catalog_id": "01J8X9Y2Z3K4M5N6P7Q8R9TC01",
   "admission": {
     "decision": "OFFLOAD_REQUIRED",
     "transformations": [

@@ -1,9 +1,9 @@
 ---
 title: Keys
-description: The Key entity — the Bearer credential that authenticates every request, bound to one (Organization, Project, Environment) triple, with hashed storage, scoped resolution, rotation, and revocation.
+description: The Key entity — the Bearer credential that authenticates every request, bound to one (Tenant, Project, Environment) triple, with hashed storage, scoped resolution, rotation, and revocation.
 ---
 
-A **Key** is the Bearer credential that authenticates every request to KovaServe. Every Key is bound to exactly one `(organization_id, project_id, environment_id)` triple, and every authenticated request resolves through that triple to produce the [AuthContext](/docs/concepts/run-hierarchy/identity-and-ids) that propagates to every internal module.
+A **Key** is the Bearer credential that authenticates every request to KovaServe. Every Key is bound to exactly one `(tenant_id, project_id, environment_id)` triple, and every authenticated request resolves through that triple to produce the [AuthContext](/docs/concepts/run-hierarchy/identity-and-ids) that propagates to every internal module.
 
 Keys are the bottom level of the [tenancy hierarchy](/docs/concepts/tenancy). They carry no permissions of their own beyond the resolved [PolicyScope](/docs/concepts/policy/policy-scopes) — they are bearers, not policies.
 
@@ -30,7 +30,7 @@ Keys are stored as **SHA-256 hashes** — the raw secret is never persisted:
 | Column | Purpose |
 |---|---|
 | `id` | Bare 26-char Crockford ULID. The `key_id` referenced in events, audit logs, and PolicyScope resolution. |
-| `organization_id` | Bound parent. |
+| `tenant_id` | Bound parent Tenant. |
 | `project_id` | Bound parent. |
 | `environment_id` | Bound parent. |
 | `name` | Human-readable label. Surfaces in dashboards and audit logs. |
@@ -54,7 +54,7 @@ Authorization: Bearer ks_admin_...
 Content-Type: application/json
 
 {
-  "organization_id": "01J8X9Y2Z3K4M5N6P7Q8R9ORG1",
+  "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9ORG1",
   "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9PRJ1",
   "environment_id": "01J8X9Y2Z3K4M5N6P7Q8R9ENV1",
   "name": "ci-bot",
@@ -68,7 +68,7 @@ The response is the **only time the raw secret is returned** — clients must st
 ```json
 {
   "id": "01J8X9Y2Z3K4M5N6P7Q8R9KEY1",
-  "organization_id": "01J8X9Y2Z3K4M5N6P7Q8R9ORG1",
+  "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9ORG1",
   "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9PRJ1",
   "environment_id": "01J8X9Y2Z3K4M5N6P7Q8R9ENV1",
   "name": "ci-bot",
@@ -87,13 +87,13 @@ The response is the **only time the raw secret is returned** — clients must st
 
 ## Scope binding
 
-A Key's `(organization_id, project_id, environment_id)` triple is **immutable after creation**. Re-binding is not an operation:
+A Key's `(tenant_id, project_id, environment_id)` triple is **immutable after creation**. Re-binding is not an operation:
 
 - A Key issued for Project A cannot later be moved to Project B.
 - A Key issued for the `staging` Environment cannot later be promoted to `production`.
 - The pattern for promotion is: create a new Key for the target Environment and revoke the old one.
 
-The triple is the only thing the Key carries. Permissions, rate limits, model ACLs, and data boundary all come from the resolved [PolicyScope](/docs/concepts/policy/policy-scopes#resolution), which overlays Organization → Project → Environment defaults at admission time.
+The triple is the only thing the Key carries. Permissions, rate limits, model ACLs, and data boundary all come from the resolved [PolicyScope](/docs/concepts/policy/policy-scopes#resolution), which overlays Tenant → Project → Environment defaults at admission time.
 
 ## Rotation
 
@@ -149,8 +149,8 @@ Authorization: Bearer ks_live_3f2a...e1f2
         ▼  status = ACTIVE? mode matches deployment tier?
    pass / 401
         │
-        ▼  load Organization, Project, Environment
-   AuthContext { organization_id, project_id, environment_id, key_id }
+        ▼  load Tenant, Project, Environment
+   AuthContext { tenant_id, project_id, environment_id, key_id }
         │
         ▼  overlay PolicyScope
    resolved scope → admission, routing, metering
@@ -178,7 +178,7 @@ A Key with `mode = "test"` resolves identically against `tier = "dev"` Environme
 - **Not a user identity.** Keys are service credentials. End-user identity is mapped by the application; KovaServe records `key_id` on every request and the application is responsible for mapping users to Keys.
 - **Not a permission set.** Permissions come from the resolved PolicyScope, not the Key. Two Keys bound to the same triple resolve to identical permissions.
 - **Not editable.** Name and `expires_at` can be updated; everything else is immutable. To change the bound scope, issue a new Key and revoke the old one.
-- **Not transferable across Organizations.** A Key is rooted at a specific Organization at creation. Moving workloads between Organizations is a re-issuance operation, not a Key edit.
+- **Not transferable across Tenants.** A Key is rooted at a specific Tenant at creation. Moving workloads between Tenants is a re-issuance operation, not a Key edit.
 
 ## See also
 
