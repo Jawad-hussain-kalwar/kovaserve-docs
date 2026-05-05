@@ -5,7 +5,7 @@ description: The Key entity — the Bearer credential that authenticates every r
 
 A **Key** is the Bearer credential that authenticates every request to KovaServe. Every Key is bound to exactly one `(tenant_id, project_id, environment_id)` triple, and every authenticated request resolves through that triple to produce the [AuthContext](/docs/concepts/run-hierarchy/identity-and-ids) that propagates to every internal module.
 
-Keys are the bottom level of the [tenancy hierarchy](/docs/concepts/tenancy). They carry no permissions of their own beyond the resolved [PolicyScope](/docs/concepts/policy/policy-scopes) — they are bearers, not policies.
+A Key sits orthogonal to the [tenancy hierarchy](/docs/concepts/tenancy) — it is the credential surface that authenticates a request and resolves it to one path through `Tenant → Project → Environment`. A Key carries no permissions of its own beyond the resolved [PolicyScope](/docs/concepts/policy/policy-scopes) — it is the bearer, not the policy.
 
 ## Key shape
 
@@ -180,7 +180,7 @@ A Key is a service credential — KovaServe records `key_id` on every request, a
 ## See also
 
 - [Tenancy](/docs/concepts/tenancy) — the four-level hierarchy
-- [Environments](/docs/concepts/tenancy/environments) — the parent
+- [Environments](/docs/concepts/tenancy/environments) — the most specific level a Key binds to
 - [PolicyScope](/docs/concepts/policy/policy-scopes) — the governance binding the Key resolves to
 - [Authentication](/docs/api/using-the-api/authentication) — the request-side contract
 - [Identity and IDs](/docs/concepts/run-hierarchy/identity-and-ids) — `key_id` ULID format
