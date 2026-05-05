@@ -1,0 +1,321 @@
+---
+title: Chat Completions
+description: POST /v1/chat/completions — OpenAI-compatible chat inference, with the kovaserve envelope opting into runs, sessions, context manifests, budgets, and placement.
+---
+
+`POST /v1/chat/completions` is KovaServe's inference endpoint. It accepts the OpenAI Chat Completions wire shape verbatim and adds one optional field — `kovaserve` — that opts the call into the native control plane. The same endpoint serves both modes; the only difference between an anonymous OpenAI-shaped call and a fully native call is whether the `kovaserve` envelope is present.
+
+## Endpoint
+
+```
+POST /v1/chat/completions
+```
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_live_...` — see [Authentication](/docs/api/using-the-api/authentication). |
+| Content type | `application/json` request; `application/json` response (or `text/event-stream` when `stream: true`). |
+| Idempotent | Yes, when `Idempotency-Key` is supplied — see [Idempotency](/docs/api/using-the-api/idempotency). |
+| Errors | OpenAI-compatible envelope on this endpoint — see [Errors](/docs/api/using-the-api/errors). |
+
+The endpoint is identical across managed cloud and private deployments — same path, same body, same headers.
+
+## Request body
+
+The body is an OpenAI Chat Completions request with one optional addition: the [`kovaserve` extension envelope](/docs/api/inference/extension-envelope).
+
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `model` | string | yes | The model ID to invoke. Must be admitted by the resolved [PolicyScope](/docs/concepts/policy/policy-scopes). See [`GET /v1/models`](/docs/api/inference/models) for the available list. |
+| `messages` | array | yes | OpenAI message array — `[{ "role": "user" \| "assistant" \| "system" \| "tool", "content": "..." }]`. |
+| `temperature` | number | no | Standard OpenAI semantics. |
+| `max_tokens` | integer | no | Standard OpenAI semantics. The gateway may reduce this when the resolved [Budget](/docs/concepts/policy/budgets) is in `DEGRADED_ALLOWED`. |
+| `stream` | boolean | no | When `true`, the response is Server-Sent Events. Default `false`. See [Streaming](/docs/api/using-the-api/streaming). |
+| `kovaserve` | object | no | Native [extension envelope](/docs/api/inference/extension-envelope). Presence opts the call into the native path. |
+
+Any other OpenAI Chat Completions field passes through to the substrate untouched — `top_p`, `n`, `stop`, `presence_penalty`, `frequency_penalty`, `response_format`, `tools`, `tool_choice`, `seed`, `logprobs`, and `user` are all accepted.
+
+### Example — anonymous (drop-in OpenAI)
+
+```json
+{
+  "model": "qwen3-coder-30b",
+  "messages": [
+    { "role": "user", "content": "Refactor the function in src/auth.py to use early returns." }
+  ],
+  "temperature": 0.2,
+  "max_tokens": 1024
+}
+```
+
+### Example — native (run-bound, session-bound, with placement hint)
+
+```json
+{
+  "model": "qwen3-coder-30b",
+  "messages": [
+    { "role": "user", "content": "Refactor the function in src/auth.py to use early returns." }
+  ],
+  "temperature": 0.2,
+  "max_tokens": 1024,
+  "stream": false,
+  "kovaserve": {
+    "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+    "memory_class_hints": [
+      { "selector": "messages[0]", "memory_class": "session", "checkpoint_relevant": true }
+    ],
+    "context_blocks": [
+      { "type": "tool_definition", "name": "search_repo", "context_type": "tool_catalog", "memory_class": "tenant" }
+    ],
+    "placement_hint": { "session_affinity": true, "warmness_min": "warm" },
+    "external_runtime": "langgraph",
+    "external_run_id": "lg-run-2026-05-05-a7f3"
+  }
+}
+```
+
+## How a request is admitted
+
+Every authenticated request passes through the same admission ordering before the substrate executes:
+
+```
+authentication              resolve API key → AuthContext (tenant, project, environment, key_id)
+   │
+   ▼
+envelope parse              validate `kovaserve` shape and entity scope
+   │
+   ▼
+session pre-flight          if session_id supplied: fetch + tenant-check + state guard
+   │
+   ▼
+policy ACL                  PolicyScope admits the requested model
+   │
+   ▼
+rate limit                  requests-per-second / tokens-per-minute
+   │
+   ▼
+context assembly            GCM builds the ContextManifest
+   │
+   ▼
+context admission           ContextBudget evaluates the manifest (ALLOW | WARN | OFFLOAD_REQUIRED |
+                            COMPACT_REQUIRED | DEGRADE | HARD_STOP)
+   │
+   ▼
+run-budget pre-check        Budget evaluates against the admitted manifest's token counts and cost estimate
+   │
+   ▼
+step creation               create the MODEL_CALL Step bound to the manifest
+   │
+   ▼
+routing                     Cache-Aware Router selects placement
+   │
+   ▼
+substrate execution         Layer 1 runs the model
+   │
+   ▼
+recording                   ModelCall written, cost computed, events emitted, headers attached
+```
+
+A rejection at any stage materializes no [Step](/docs/concepts/run-hierarchy/steps) and no [ModelCall](/docs/concepts/run-hierarchy/model-calls). Cost is only charged for the work actually performed.
+
+## Response — non-streaming
+
+Non-streaming responses return the OpenAI Chat Completions shape with cost, identity, and budget delivered in headers.
+
+### Body
+
+```json
+{
+  "id": "chatcmpl-01J8X9Y2Z3K4M5N6P7Q8R9S0",
+  "object": "chat.completion",
+  "created": 1746460800,
+  "model": "qwen3-coder-30b",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "Here is the refactored function..."
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 1240,
+    "completion_tokens": 482,
+    "total_tokens": 1722
+  }
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | string | OpenAI-shaped completion ID. The native [ModelCall](/docs/concepts/run-hierarchy/model-calls) ID is delivered in `X-KS-Model-Call-Id`. |
+| `object` | string | Always `"chat.completion"`. |
+| `created` | integer | Unix timestamp (seconds). |
+| `model` | string | The model the substrate actually executed against. May differ from the request `model` when the [Budget](/docs/concepts/policy/budgets) is in `DEGRADED_ALLOWED` and a cheaper substitute was applied. |
+| `choices` | array | OpenAI choice array. `finish_reason` is one of `stop`, `length`, `tool_calls`, `content_filter`. |
+| `usage` | object | Real token counts from the substrate, never an estimate. |
+
+### Headers
+
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+X-Request-Id:                01J8X9Y2Z3K4M5N6P7Q8R9S0XX
+X-KS-Run-Id:                 01J8X9Y2Z3K4M5N6P7Q8R9S0T1
+X-KS-Step-Id:                01J8X9Y2Z3K4M5N6P7Q8R9S0T2
+X-KS-Model-Call-Id:          01J8X9Y2Z3K4M5N6P7Q8R9S0T3
+X-KS-Session-Id:             ses_a7f3c2b8d4e1f0925a1b6c3d
+X-KS-Context-Manifest-Id:    01J8X9Y2Z3K4M5N6P7Q8R9S0T7
+X-Routed-Node:               gpu-node-2
+X-KS-Cost-Cents:             0.0420
+X-KS-Gross-Cost-Cents:       0.0612
+X-KS-Cache-Savings-Cents:    0.0192
+X-KS-Cost-Currency:          USD
+X-KS-Budget-State:           ACTIVE
+X-KS-Budget-Remaining-Pct:   0.850000
+```
+
+The full header reference — including the `DEGRADED`, `WARN`, and `no-pricing` variants — is in [Cost headers](/docs/api/using-the-api/cost-headers). Identity headers are emitted when (and only when) the call took the native path.
+
+## Response — streaming
+
+When `stream: true`, the response is Server-Sent Events using the OpenAI line format. Identity and budget headers are sent in the response head; cost lands on the final SSE chunk's `usage` block.
+
+```
+data: {"id":"chatcmpl-01J8X9...","object":"chat.completion.chunk","choices":[{"delta":{"role":"assistant"},"index":0}]}
+
+data: {"id":"chatcmpl-01J8X9...","object":"chat.completion.chunk","choices":[{"delta":{"content":"def "},"index":0}]}
+
+data: {"id":"chatcmpl-01J8X9...","object":"chat.completion.chunk","choices":[{"delta":{"content":"refactor"},"index":0}]}
+
+...
+
+data: {"id":"chatcmpl-01J8X9...","object":"chat.completion.chunk","choices":[{"delta":{},"index":0,"finish_reason":"stop"}],"usage":{"prompt_tokens":1240,"completion_tokens":482,"total_tokens":1722,"cached_tokens":980,"cost_cents":0.0420,"gross_cost_cents":0.0612,"cache_savings_cents":0.0192,"cost_currency":"USD","cost_status":"ok"}}
+
+data: [DONE]
+```
+
+The full streaming wire format, end-of-stream signaling, mid-stream errors, and disconnect semantics are documented at [Streaming](/docs/api/using-the-api/streaming).
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `200 OK` | The call ran. The body contains the completion. |
+| `400 Bad Request` | Malformed JSON, unknown top-level fields, or invalid envelope shape. The OpenAI envelope `code` is one of `invalid_encoding`, `validation_error`, `invalid_request`. |
+| `401 Unauthorized` | Missing, malformed, or unresolved API key. Codes: `missing_token`, `invalid_token`, `token_revoked`. |
+| `403 Forbidden` | Policy denied access to the requested model. Code: `model_access_denied`. |
+| `404 Not Found` | A `kovaserve.session_id`, `run_id`, `checkpoint_id`, or other entity ID does not resolve in the caller's tenant. Cross-tenant probes return the same response as a genuinely missing entity. |
+| `409 Conflict` | Run, Step, or Budget is in a state that disallows the call. Codes: `run_not_runnable`, `illegal_state_transition`, `invalid_run_state`, `idempotency_conflict`. |
+| `410 Gone` | Bound Session is in `EXPIRED`. Code: `session_expired`. |
+| `413 Payload Too Large` | Request body exceeded the gateway's configured maximum. |
+| `422 Unprocessable Entity` | Request shape parsed but failed schema validation. `details` lists field-level errors. |
+| `429 Too Many Requests` | Rate-limit, [Budget](/docs/concepts/policy/budgets), or [ContextBudget](/docs/concepts/policy/context-budgets) admission rejected the call. Codes: `rate_limited`, `budget_exceeded`, `context_budget_exceeded`. `Retry-After` is set when retry timing is meaningful. |
+| `500 Internal Server Error` | Unexpected condition. Report `X-Request-Id`. |
+| `502 Bad Gateway` | Substrate returned an unrecoverable error. Code: `backend_error`. |
+| `503 Service Unavailable` | A required dependency (KV Index, Router) is temporarily down. Retry with backoff. |
+
+The error envelope follows the OpenAI shape on this endpoint — `{ "error": { "type", "message", "code", "details" } }`. The full code list and meaning is at [Errors](/docs/api/using-the-api/errors).
+
+## Examples
+
+```bash
+# Anonymous — drop-in OpenAI
+curl https://api.kovaserve.com/v1/chat/completions \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen3-coder-30b",
+    "messages": [
+      {"role": "user", "content": "Refactor the function in src/auth.py."}
+    ],
+    "temperature": 0.2,
+    "max_tokens": 1024
+  }'
+
+# Native — opt into runs, sessions, placement, and identity headers
+curl https://api.kovaserve.com/v1/chat/completions \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: 6c1f8a30-9b22-4f0e-9d6c-12c4f0a1b2c3" \
+  -d '{
+    "model": "qwen3-coder-30b",
+    "messages": [
+      {"role": "user", "content": "Refactor the function in src/auth.py."}
+    ],
+    "temperature": 0.2,
+    "max_tokens": 1024,
+    "kovaserve": {
+      "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+      "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+      "placement_hint": {"session_affinity": true, "warmness_min": "warm"}
+    }
+  }'
+
+# Streaming
+curl -N https://api.kovaserve.com/v1/chat/completions \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen3-coder-30b",
+    "messages": [{"role": "user", "content": "Refactor src/auth.py."}],
+    "stream": true,
+    "kovaserve": {"run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1"}
+  }'
+```
+
+```python
+# Drop-in with the OpenAI SDK — works because /v1/chat/completions is OpenAI-shaped
+from openai import OpenAI
+
+client = OpenAI(
+    api_key="ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b",
+    base_url="https://api.kovaserve.com/v1",
+)
+
+resp = client.chat.completions.create(
+    model="qwen3-coder-30b",
+    messages=[{"role": "user", "content": "Refactor src/auth.py."}],
+    temperature=0.2,
+    max_tokens=1024,
+    extra_body={
+        "kovaserve": {
+            "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+            "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+        }
+    },
+)
+
+# Native — KovaServe SDK, with cost and identity surfaced as first-class attributes
+from kovaserve import KovaClient
+
+kova = KovaClient(api_key="ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b")
+
+resp = kova.chat.completions.create(
+    model="qwen3-coder-30b",
+    messages=[{"role": "user", "content": "Refactor src/auth.py."}],
+    kovaserve={
+        "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+        "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+        "placement_hint": {"session_affinity": True, "warmness_min": "warm"},
+    },
+)
+
+print(resp.choices[0].message.content)
+print(f"cost: {resp.kovaserve.cost_cents} cents")
+print(f"saved: {resp.kovaserve.cache_savings_cents} cents from cache")
+print(f"run:   {resp.kovaserve.run_id}")
+print(f"node:  {resp.kovaserve.routed_node}")
+```
+
+## See also
+
+- [The kovaserve extension envelope](/docs/api/inference/extension-envelope) — the full field reference for the opt-in `kovaserve` object
+- [`GET /v1/models`](/docs/api/inference/models) — the model list this endpoint accepts
+- [Authentication](/docs/api/using-the-api/authentication) · [Errors](/docs/api/using-the-api/errors) · [Idempotency](/docs/api/using-the-api/idempotency) · [Streaming](/docs/api/using-the-api/streaming) · [Cost headers](/docs/api/using-the-api/cost-headers)
+- [Runs](/docs/concepts/run-hierarchy/runs) · [Sessions](/docs/concepts/continuity/sessions) · [ContextManifests](/docs/concepts/context/context-manifests) — the entities materialized by a native call
+- [Budgets](/docs/concepts/policy/budgets) · [ContextBudgets](/docs/concepts/policy/context-budgets) · [PolicyScopes](/docs/concepts/policy/policy-scopes) — the admission decisions that govern the call
+- [Manifest-aware routing](/docs/concepts/routing/manifest-aware-routing) · [PlacementHints](/docs/concepts/routing/placement-hints) — how the substrate node is chosen

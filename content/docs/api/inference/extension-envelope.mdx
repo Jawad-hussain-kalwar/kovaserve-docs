@@ -1,0 +1,144 @@
+---
+title: The kovaserve extension envelope
+description: The opt-in field on /v1/chat/completions that turns an OpenAI-shaped call into a native KovaServe call — runs, sessions, context, budgets, policy, placement.
+---
+
+The OpenAI Chat Completions wire shape has no place to put a Run ID, a Session ID, a placement hint, or a context manifest reference. Rather than fork the request format, KovaServe carries those concerns in a single optional field on the existing body: **`kovaserve`**. Clients that ignore the field continue to work as plain OpenAI clients; clients that opt in get the full native surface inline with their existing call.
+
+This page is the canonical reference for what the envelope contains. The endpoint that consumes it is documented at [`POST /v1/chat/completions`](/docs/api/inference/chat-completions).
+
+## Where it lives
+
+The envelope is a top-level object on the request body alongside `model`, `messages`, and the rest of the OpenAI fields:
+
+```json
+{
+  "model": "qwen3-coder-30b",
+  "messages": [
+    { "role": "user", "content": "Refactor this function." }
+  ],
+  "stream": false,
+  "kovaserve": {
+    "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+    "context_blocks": [
+      { "type": "tool_definition", "name": "search_repo" }
+    ]
+  }
+}
+```
+
+Every field inside `kovaserve` is optional. An empty `{ "kovaserve": {} }` is sufficient to opt the call into the native path.
+
+## What presence and absence mean
+
+The presence of the `kovaserve` key is a binary discriminator the gateway uses to choose between two execution paths:
+
+| `kovaserve` field | Path | What materializes |
+|---|---|---|
+| absent | OpenAI-compatible (anonymous) | No [Run](/docs/concepts/run-hierarchy/runs), no [Step](/docs/concepts/run-hierarchy/steps), no [ModelCall](/docs/concepts/run-hierarchy/model-calls), no [ContextManifest](/docs/concepts/context/context-manifests). Cost is still computed and returned in headers; usage rows are still written for tenant-level metering. |
+| present (even `{}`) | Native | A Run, Step, and ModelCall are materialized. A ContextManifest is assembled and bound to the call. Identity and budget headers appear on the response. Native event streams emit. |
+
+Anonymous traffic exists deliberately. Drop-in OpenAI-SDK migrations work without any code change; the upgrade path to native execution is one literal field — `kovaserve: {}` — and from there a progressive opt-in to runs, sessions, placement, and the rest.
+
+## Field reference
+
+The envelope is a flat object. Fields fall into seven groups by purpose.
+
+### Execution identity
+
+| Field | Type | Meaning |
+|---|---|---|
+| `run_id` | ULID | The [Run](/docs/concepts/run-hierarchy/runs) this call belongs to. When omitted, the gateway auto-creates a Run for the call. When set, the Run must exist in the caller's tenant scope and must be in a runnable state. |
+| `step_id` | ULID | The [Step](/docs/concepts/run-hierarchy/steps) this call belongs to. When omitted, a `MODEL_CALL` Step is auto-created under the resolved Run. When set, the Step must belong to the resolved Run and must be in `STARTED`. |
+| `external_run_id` | string | Opaque correlation ID supplied by an external runtime (LangGraph, Temporal, custom). Idempotency-keyed per tenant — re-submitting the same `external_run_id` from the same key resolves to the same Run. |
+| `external_runtime` | string | Name of the originating runtime, e.g. `"langgraph"`, `"temporal"`, `"custom"`. Used by [Runtime Integration Adapters](/docs/concepts/run-hierarchy/runs) to route metadata back to its source. |
+
+### Continuity
+
+| Field | Type | Meaning |
+|---|---|---|
+| `session_id` | `ses_<24hex>` | The [Session](/docs/concepts/continuity/sessions) the call binds to. Session history is fetched and rendered into the [ContextManifest](/docs/concepts/context/context-manifests); the resulting [SessionTurn](/docs/concepts/continuity/sessions) is appended after the call completes. The Session must be in `OPEN` or `IDLE`; an `IDLE` Session reactivates atomically on append. |
+| `resume_marker` | string | Resume signal supplied by the runtime when the call follows a [Checkpoint restore](/docs/concepts/recovery/resume-flow). The gateway uses it to thread continuity events and to suppress duplicate Step creation. |
+| `checkpoint_id` | ULID | The [Checkpoint](/docs/concepts/recovery/checkpoints) the call resumes from. Sets the bound Run's transition path through `RECOVERING → RESUMING → RUNNING`. |
+
+### Context
+
+| Field | Type | Meaning |
+|---|---|---|
+| `context_blocks` | array of objects | Typed context segments to admit alongside `messages`. Each block carries a `type`, `context_type`, `memory_class`, and either `text` or `artifact_ref_id`. See [ContextSegments](/docs/concepts/context/context-segments) and the [`parts` wire format](/docs/concepts/context/context-segments). |
+| `memory_class_hints` | array of objects | Hints for how `messages` and `context_blocks` should be classified by [memory class](/docs/concepts/context/context-segments) — `ephemeral`, `session`, `user`, `tenant`, `global`. Each hint is `{ "selector": "...", "memory_class": "...", "retention": "...", "checkpoint_relevant": true|false }`. |
+| `context_manifest_id` | ULID | Pre-assembled [ContextManifest](/docs/concepts/context/context-manifests) to consume verbatim. When set, the gateway validates the manifest, runs admission, and skips re-assembly. |
+| `context_budget_ref` | ULID \| string | The [ContextBudget](/docs/concepts/policy/context-budgets) to admit the call against. Resolves to a bound `context_budget_id` on the Run. |
+| `context_scope_ref` | ULID \| string | Override the inherited context-share scope for this call. Resolves to a [PolicyScope](/docs/concepts/policy/policy-scopes) `context_share_scope` value. |
+| `artifact_refs` | array of ULIDs | [ContextArtifacts](/docs/concepts/context/context-artifacts) referenced by `context_blocks`. The gateway validates existence and tenant scope before admission. |
+| `compaction_policy` | object | Optional runtime-supplied compaction strategy hint. Carried through to the [Compaction Lineage](/docs/concepts/context/compaction-lineage) record when the runtime later reports a compaction. |
+| `activation_handle` | ULID | A typed [StateHandle](/docs/concepts/recovery/state-handles) to seed the call's reusable state — a KV prefix, a manifest snapshot, an artifact bundle, or runtime state. |
+
+### Policy and budget
+
+| Field | Type | Meaning |
+|---|---|---|
+| `policy_scope_ref` | ULID \| string | The [PolicyScope](/docs/concepts/policy/policy-scopes) to bind the Run to. When omitted, the default scope for the API key's `(tenant, project, environment)` is used. |
+| `budget_context` | object | Hints to propagate into the [Budget](/docs/concepts/policy/budgets) decision — `{ "owner": "...", "purpose": "...", "tags": [...] }`. Recorded on budget events for downstream attribution. |
+
+### Routing
+
+| Field | Type | Meaning |
+|---|---|---|
+| `placement_hint` | object | A [PlacementHint](/docs/concepts/routing/placement-hints) the runtime would like the [Cache-Aware Router](/docs/concepts/routing/manifest-aware-routing) to consider — `{ "preferred_node_id": "...", "session_affinity": true, "warmness_min": "warm" }`. The router treats it as advisory; admission, scope filters, and budget pressure can override. |
+
+### Identification and audit
+
+| Field | Type | Meaning |
+|---|---|---|
+| `tenant_id` | ULID | Optional explicit tenant binding. The resolved API key already carries the tenant; setting this field as anything other than the resolved tenant returns `403`. |
+| `idempotency_key` | string | Equivalent to the `Idempotency-Key` header. When both are present, they must match — the gateway returns `400 invalid_request` on mismatch. See [Idempotency](/docs/api/using-the-api/idempotency). |
+
+## Validation
+
+The envelope is parsed before any inference dispatch. Validation runs in this order; each check produces a distinct error:
+
+1. **Schema** — unknown top-level fields, mistyped values, or malformed IDs return `400 invalid_request` with `details` listing the offending fields. The envelope schema is permissive about new optional fields appearing in additive releases; clients that ignore unknown fields are forward-compatible.
+2. **Tenant scope** — every entity ID inside the envelope must resolve within the API key's tenant. Cross-tenant IDs return `404` (the same response as a missing entity); probing leaks no information.
+3. **State preconditions** — the resolved Run must be runnable, the resolved Step must be in `STARTED`, the resolved Session must be in `OPEN` or `IDLE`. Violations return `409` with the relevant code (`run_not_runnable`, `illegal_state_transition`, `invalid_run_state`).
+4. **Admission** — the [PolicyScope](/docs/concepts/policy/admission), the [Budget](/docs/concepts/policy/budgets), and the [ContextBudget](/docs/concepts/policy/context-budgets) admit the call in that order. Rejections return `403 model_access_denied`, `429 budget_exceeded`, or `429 context_budget_exceeded` respectively.
+
+Validation runs to completion before any GPU work happens. A rejected call materializes no [Step](/docs/concepts/run-hierarchy/steps) row and no [ModelCall](/docs/concepts/run-hierarchy/model-calls) row.
+
+## Stripped before forwarding
+
+The `kovaserve` field is **stripped from the request body** before the gateway forwards to the inference substrate. The substrate sees only the OpenAI-shaped portion — `model`, `messages`, `temperature`, `max_tokens`, `stream`, and the rest of the OpenAI surface. The substrate never sees `kovaserve`, `context_blocks`, or any native field; the control plane consumes them and translates the call into substrate-shaped work.
+
+This is the seam that makes OpenAI compatibility lossless: the envelope is purely additive on the request side, and the response shape on `/v1/chat/completions` is unchanged from OpenAI's. Native concerns surface through response headers and (on streaming) the final-chunk `usage` block.
+
+## Minimum opt-in
+
+The smallest meaningful native call is the empty envelope:
+
+```json
+{
+  "model": "qwen3-coder-30b",
+  "messages": [{ "role": "user", "content": "Hello." }],
+  "kovaserve": {}
+}
+```
+
+The gateway:
+
+- Auto-creates a Run under the API key's default [PolicyScope](/docs/concepts/policy/policy-scopes).
+- Auto-creates a `MODEL_CALL` Step.
+- Assembles a [ContextManifest](/docs/concepts/context/context-manifests) from `messages`.
+- Records a [ModelCall](/docs/concepts/run-hierarchy/model-calls) with the manifest, cost, cache-hit ratio, and TTFT.
+- Returns identity and cost headers on the response.
+
+The empty envelope is the recommended starting point. Add fields as the integration matures — bind a Session to keep continuity across turns, attach a Budget to bound cost, supply context blocks to surface tool definitions, and so on.
+
+## See also
+
+- [`POST /v1/chat/completions`](/docs/api/inference/chat-completions) — the endpoint that consumes the envelope
+- [Runs](/docs/concepts/run-hierarchy/runs) · [Sessions](/docs/concepts/continuity/sessions) · [ContextManifests](/docs/concepts/context/context-manifests) — the entities the envelope binds to
+- [Authentication](/docs/api/using-the-api/authentication) — how the API key resolves the tenancy the envelope is validated against
+- [Errors](/docs/api/using-the-api/errors) — the full envelope-related error code list
+- [Cost headers](/docs/api/using-the-api/cost-headers) — the response-side counterpart of opting into native execution
+- [PlacementHints](/docs/concepts/routing/placement-hints) · [PolicyScopes](/docs/concepts/policy/policy-scopes) · [Budgets](/docs/concepts/policy/budgets)

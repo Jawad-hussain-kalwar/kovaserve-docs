@@ -1,0 +1,8 @@
+{
+  "title": "Inference",
+  "pages": [
+    "chat-completions",
+    "models",
+    "extension-envelope"
+  ]
+}

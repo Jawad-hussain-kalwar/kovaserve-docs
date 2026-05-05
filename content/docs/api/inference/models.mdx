@@ -1,0 +1,110 @@
+---
+title: List Models
+description: GET /v1/models — returns the OpenAI-shaped list of models the resolved scope is permitted to invoke through /v1/chat/completions.
+---
+
+`GET /v1/models` returns the list of models available to the caller — every model that the resolved [PolicyScope](/docs/concepts/policy/policy-scopes) admits and that the inference substrate is currently serving. The response shape is OpenAI-compatible; the same call works against any OpenAI client library without modification.
+
+## Endpoint
+
+```
+GET /v1/models
+```
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_live_...` — see [Authentication](/docs/api/using-the-api/authentication). |
+| Content type | `application/json`. |
+| Idempotent | Yes — no side effects. |
+| Errors | OpenAI-compatible envelope on this endpoint. |
+
+The list is scoped to the API key's `(tenant, project, environment)` triple. A model that the substrate hosts but the resolved PolicyScope does not admit does not appear in the response. Two keys in the same Project may see different lists when their PolicyScopes diverge.
+
+## Request
+
+`GET /v1/models` takes no body and no query parameters. Authentication is the only thing the gateway requires.
+
+```http
+GET /v1/models
+Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b
+```
+
+## Response
+
+```json
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "qwen3-coder-30b",
+      "object": "model",
+      "created": 1734566400,
+      "owned_by": "kovaserve"
+    },
+    {
+      "id": "llama-3.3-70b-instruct",
+      "object": "model",
+      "created": 1731974400,
+      "owned_by": "kovaserve"
+    }
+  ]
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `object` | string | Always `"list"`. |
+| `data` | array of `Model` | The admitted model list. |
+| `data[].id` | string | The model identifier to pass as `model` on [`POST /v1/chat/completions`](/docs/api/inference/chat-completions). |
+| `data[].object` | string | Always `"model"`. |
+| `data[].created` | integer | Unix timestamp (seconds) when the substrate first registered the model. Stable for the lifetime of the registration; survives gateway restarts. |
+| `data[].owned_by` | string | Always `"kovaserve"` for substrate-hosted models. |
+
+The list is unordered. Callers that need a stable presentation order should sort on `id`.
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `200 OK` | Models returned. The list may be empty when the resolved PolicyScope admits no models. |
+| `401 Unauthorized` | Missing, malformed, or unresolved API key. Codes: `missing_token`, `invalid_token`, `token_revoked`. |
+| `502 Bad Gateway` | The substrate is unreachable. The gateway returns the OpenAI-compatible error envelope with `code: "backend_error"`. Retry with backoff. |
+| `503 Service Unavailable` | A required dependency is temporarily down. Retry with exponential backoff. |
+
+`/v1/models` does not run policy ACL or rate-limiting against an individual model — it only lists. Per-model authorization happens at [`POST /v1/chat/completions`](/docs/api/inference/chat-completions) call time, where a denied model returns `403 model_access_denied`.
+
+## Examples
+
+```bash
+curl https://api.kovaserve.com/v1/models \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+```
+
+```python
+# OpenAI SDK — works because the response is OpenAI-shaped
+from openai import OpenAI
+
+client = OpenAI(
+    api_key="ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b",
+    base_url="https://api.kovaserve.com/v1",
+)
+
+for model in client.models.list().data:
+    print(model.id)
+
+# KovaServe SDK
+from kovaserve import KovaClient
+
+kova = KovaClient(api_key="ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b")
+
+for model in kova.models.list():
+    print(model.id)
+```
+
+## See also
+
+- [`POST /v1/chat/completions`](/docs/api/inference/chat-completions) — the endpoint that consumes the model IDs returned here
+- [The kovaserve extension envelope](/docs/api/inference/extension-envelope) — the opt-in surface for native execution on the inference path
+- [Authentication](/docs/api/using-the-api/authentication) · [Errors](/docs/api/using-the-api/errors)
+- [PolicyScopes](/docs/concepts/policy/policy-scopes) — the admission decision that filters this list
+- [Models](/docs/models) — the deployable model catalog with capability matrix, context windows, and tokenizers
