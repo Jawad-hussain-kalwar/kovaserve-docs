@@ -1,0 +1,222 @@
+---
+title: Restore from a Checkpoint
+description: POST /v1/ks/runs/{id}/resume — create a new Run that restores from a Checkpoint via the logical-context-first resume flow, with KV restore as an optional optimization.
+---
+
+`POST /v1/ks/runs/{id}/resume` creates a new [Run](/docs/concepts/run-hierarchy/runs) that restores from a [Checkpoint](/docs/concepts/recovery/checkpoints) of the path's Run. The Checkpoint Manager runs the [logical-context-first resume flow](/docs/concepts/recovery/resume-flow): manifest validation, [ContextArtifact](/docs/concepts/context/context-artifacts) validation, compatibility check, optional KV import, manifest replay if KV is unavailable, and routing. The response is the freshly created resumed Run, in `RECOVERING`, with its `restored_from` reference and the planned restore sequence.
+
+The defining property: **manifest replay is the always-available restore path**. Restore succeeds whenever the manifest, artifacts, and compatibility vector validate — KV import is best-effort and never required. A resumed Run is functionally indistinguishable from a Run that came back via warm KV restore; only the latency profile of the first ModelCall differs.
+
+The path's `run_id` identifies the **originating** Run — the Run that produced the Checkpoint. The response carries the **resumed** Run, a new Run with a fresh `run_id`. Use [`POST /v1/ks/runs/{id}/branch`](/docs/api/runs/branch) instead when the goal is to fork an alternate continuation that runs in parallel with the original; resume continues the same logical thread on a fresh Run row.
+
+## What restore does
+
+1. **Reads the Checkpoint.** The Checkpoint must belong to the path's Run, must be in `VALIDATED` or `RESTORED`, and its `context_manifest` [StateHandle](/docs/concepts/recovery/state-handles) must resolve. See the [Checkpoint state machine](/docs/concepts/recovery/checkpoint-state-machine).
+2. **Validates the manifest and artifacts.** Every artifact referenced by the frozen manifest is read-checked from object storage and matched against its recorded hash. Missing or corrupted artifacts reject restore — there is no partial-restore path with placeholder content. Compaction lineage is validated alongside.
+3. **Validates the compatibility vector.** Hard checks on `model_family` and `policy_scope`; soft checks on `tokenizer_fingerprint`, `renderer_version`, `quantization`, `tensor_parallel_config`. Hard mismatches reject. Soft mismatches skip KV restore silently and proceed with manifest replay.
+4. **Plans KV restore (optional).** When the Checkpoint carries a `kv_prefix` StateHandle, the Checkpoint Manager queries the [KV Index](/docs/concepts/routing/kv-index) for compatible replicas. Hot or warm matches are scheduled for import; cold or absent matches fall through to manifest replay.
+5. **Reconstructs active context.** KV import when feasible, manifest replay otherwise. The first ModelCall of the resumed Run is admitted at the end of this window.
+6. **Creates the resumed Run.** A new Run row is created in `RECOVERING`, with `restored_from` pinned to the Checkpoint and (transitively) `branch_from = null`. The resumed Run inherits the originating Run's [PolicyScope](/docs/concepts/policy/policy-scopes); it gets a fresh [Budget](/docs/concepts/policy/budgets) initialized from the originating Run's limits.
+7. **Routes and transitions.** The [Cache-Aware Router](/docs/concepts/routing/manifest-aware-routing) selects placement using `resume_feasible`, restore cost, and manifest reuse score. The resumed Run progresses `RECOVERING → RESUMING → RUNNING` once the first ModelCall is admitted.
+
+## Endpoint
+
+```
+POST /v1/ks/runs/{run_id}/resume
+```
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_...` — see [Authentication](/docs/api/using-the-api/authentication). |
+| Path parameter | `run_id` — the **originating** Run ID (the Run the Checkpoint was captured on). |
+| Content type | `application/json`. |
+| Idempotent | Yes, when `Idempotency-Key` is supplied — see [Idempotency](/docs/api/using-the-api/idempotency). |
+| Errors | Native envelope — see [Errors](/docs/api/using-the-api/errors). |
+
+## Request body
+
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `checkpoint_id` | string | yes | The [Checkpoint](/docs/concepts/recovery/checkpoints) to restore from. Must belong to the path's Run and be in `VALIDATED` or `RESTORED`. |
+| `session_id` | string \| null | no | Session to bind the resumed Run to. Defaults to the originating Run's `session_id`. Pass `null` (explicitly) to detach the resumed Run from any Session. The Session must be visible to the same Tenant. Format `ses_<24hex>`. |
+| `resume_marker` | string \| null | no | Opaque marker the runtime uses to position itself within the restored context. The control plane records and echoes this value but does not interpret it. |
+| `target_node_id` | string \| null | no | Soft hint to the [Cache-Aware Router](/docs/concepts/routing/manifest-aware-routing) — prefer this node for the first ModelCall, when feasible under the current scope and load. The router may override the hint. |
+| `external_run_id` | string \| null | no | External-runtime correlation ID for the resumed Run. |
+| `external_runtime` | string \| null | no | Originating runtime name for the resumed Run. Defaults to the originating Run's value. |
+| `metadata` | object \| null | no | Free-form metadata recorded on the resumed Run row. |
+
+```json
+{
+  "checkpoint_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0CK",
+  "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+  "resume_marker": "step:7",
+  "target_node_id": "01J8X9Y2Z3K4M5N6P7Q8R9N002"
+}
+```
+
+## Response — `201 Created`
+
+The body is the resumed Run row, in `RECOVERING`, with its restore plan. The endpoint returns as soon as the Run is created and the restore plan is committed; the `RECOVERING → RESUMING → RUNNING` transitions happen asynchronously and are observable on the [Run state machine](/docs/concepts/run-hierarchy/run-state-machine) and via the [timeline](/docs/api/runs/timeline).
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9S0V1",
+  "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+  "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+  "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+  "policy_scope_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T3",
+  "budget_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0V4",
+  "context_budget_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0V5",
+  "branch_from": null,
+  "restored_from": "01J8X9Y2Z3K4M5N6P7Q8R9S0CK",
+  "status": "RECOVERING",
+  "model": "qwen3-coder-30b",
+  "external_run_id": "lg-task-9821-resumed",
+  "external_runtime": "langgraph",
+  "step_count": 0,
+  "created_at": "2026-05-05T12:11:42Z",
+  "started_at": null,
+  "completed_at": null,
+  "resume_marker": "step:7",
+  "restore_plan": {
+    "context_manifest_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0M7",
+    "kv_restore": "warm",
+    "manifest_replay": "ready",
+    "target_node_id": "01J8X9Y2Z3K4M5N6P7Q8R9N002",
+    "expected_prefill_savings_tokens": 2840,
+    "estimated_first_token_ms": 220
+  }
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | string | Resumed Run ID — bare 26-character Crockford ULID. Distinct from the originating Run. |
+| `tenant_id` / `project_id` | string | Owning tenancy pair, inherited from the originating Run. |
+| `session_id` | string \| null | Bound Session for the resumed Run. |
+| `policy_scope_id` | string | Inherited PolicyScope. Identical to the originating Run's PolicyScope and the Checkpoint's pinned PolicyScope. |
+| `budget_id` / `context_budget_id` | string \| null | Fresh Budget and ContextBudget for the resumed Run. Limits are initialized from the originating Run's; consumption starts at zero. |
+| `branch_from` | string \| null | Always `null` on resume. Branching uses [`POST /v1/ks/runs/{id}/branch`](/docs/api/runs/branch) and pins both `branch_from` and `restored_from`. |
+| `restored_from` | string | The Checkpoint the resumed Run restored from. |
+| `status` | string | `RECOVERING` on creation. Progresses through `RESUMING → RUNNING` asynchronously. |
+| `model` | string \| null | Default model, inherited from the originating Run. |
+| `external_run_id` / `external_runtime` | string \| null | Echo of the request fields, falling back to the originating Run's. |
+| `step_count` | integer | `0` on creation. The first Step of the resumed Run carries `restored_from` referencing the Checkpoint. |
+| `created_at` | string | ISO-8601 timestamp. |
+| `started_at` / `completed_at` | string \| null | Set on `RESUMING → RUNNING` and on terminal transitions, respectively. |
+| `resume_marker` | string \| null | Echoed verbatim from the request. |
+| `restore_plan` | object | The committed restore plan for this Run. |
+
+### `restore_plan`
+
+| Field | Type | Meaning |
+|---|---|---|
+| `context_manifest_id` | string | The frozen manifest snapshot that anchors restore. |
+| `kv_restore` | string | One of `warm`, `cold`, `skipped`. `warm` means a compatible replica was found and KV import is scheduled. `cold` means a `kv_prefix` StateHandle exists but no compatible replica is available; manifest replay will run. `skipped` means no `kv_prefix` was captured or compatibility forbids KV restore. |
+| `manifest_replay` | string | One of `ready`, `unused`. `ready` when KV restore was skipped, cold, or fails. `unused` when a warm KV import succeeds end-to-end. Manifest replay is always **planned** — it is the always-available fallback — and either runs or doesn't depending on KV outcome. |
+| `target_node_id` | string \| null | The node selected for the first ModelCall. Honors `target_node_id` from the request when feasible. |
+| `expected_prefill_savings_tokens` | integer | Token count the router expects to save on the first ModelCall via cache reuse. `0` when KV is `skipped` or `cold`. |
+| `estimated_first_token_ms` | integer | Router estimate for time-to-first-token of the first ModelCall under this plan. |
+
+### Headers
+
+```http
+HTTP/1.1 201 Created
+Content-Type: application/json
+X-Request-Id:  01J8X9Y2Z3K4M5N6P7Q8R9S0XX
+X-KS-Run-Id:   01J8X9Y2Z3K4M5N6P7Q8R9S0V1
+X-KS-Restored-From: 01J8X9Y2Z3K4M5N6P7Q8R9S0CK
+```
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `201 Created` | The resumed Run was created and the restore plan committed. |
+| `400 Bad Request` | Malformed JSON, unknown fields, an invalid `session_id` shape, or `target_node_id` referencing a node that does not exist. Codes: `invalid_request`, `invalid_id`, `unknown_node`. |
+| `401 Unauthorized` | Missing, malformed, or unresolved API key. |
+| `403 Forbidden` | The resolved PolicyScope blocks the model the Checkpoint pins, or the Tenant has been suspended for the resumed Run's Project. Code: `model_access_denied`. |
+| `404 Not Found` | The originating Run does not exist or belongs to another Tenant; or the Checkpoint does not exist; or the supplied `session_id` does not resolve. Codes: `run_not_found`, `checkpoint_not_found`, `unknown_session`. |
+| `409 Conflict` | The Checkpoint does not belong to the path's Run; the Checkpoint is not in `VALIDATED` or `RESTORED`; the compatibility vector cannot be satisfied (`model_family` or `policy_scope` mismatch); a referenced artifact is unrecoverable; or the supplied `Idempotency-Key` was reused with a different request body. Codes: `checkpoint_not_restorable`, `checkpoint_incompatible`, `artifact_unrecoverable`, `idempotency_conflict`. |
+| `422 Unprocessable Entity` | The body parsed but failed schema validation. |
+| `429 Too Many Requests` | Rate limit exceeded. Code: `rate_limited`. |
+| `503 Service Unavailable` | Object storage was unreachable during manifest validation. The originating Run is unaffected. Code: `manifest_unreachable`. |
+
+KV import failure mid-restore is **not** an error — the resume falls through to manifest replay and the Run still reaches `RUNNING`. Inspect `restore_plan.kv_restore` and `restore_plan.manifest_replay` on the resumed Run, and the corresponding `ks.checkpoint.restore_completed` event, to see which path actually executed.
+
+## Examples
+
+```bash
+# Plain resume — bind to the originating Run's Session, default everything else
+curl -X POST https://api.kovaserve.com/v1/ks/runs/01J8X9Y2Z3K4M5N6P7Q8R9S0T1/resume \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "checkpoint_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0CK"
+  }'
+
+# Resume with a soft node hint and a runtime resume marker, idempotent
+curl -X POST https://api.kovaserve.com/v1/ks/runs/01J8X9Y2Z3K4M5N6P7Q8R9S0T1/resume \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: 6c1f8a30-9b22-4f0e-9d6c-12c4f0a1b2c3" \
+  -d '{
+    "checkpoint_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0CK",
+    "resume_marker": "step:7",
+    "target_node_id": "01J8X9Y2Z3K4M5N6P7Q8R9N002"
+  }'
+```
+
+```python
+from kovaserve import KovaClient, KovaError
+
+kova = KovaClient(api_key="ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b")
+
+# Resume the freshest restorable Checkpoint for a stalled Session
+candidates = kova.checkpoints.list(
+    session_id="ses_a7f3c2b8d4e1f0925a1b6c3d",
+    restorable=True,
+    limit=1,
+)
+if not candidates.data:
+    raise SystemExit("no restorable Checkpoint")
+
+checkpoint = candidates.data[0]
+
+try:
+    resumed = kova.checkpoints.restore(
+        run_id=checkpoint.run_id,
+        checkpoint_id=checkpoint.id,
+        resume_marker="step:7",
+    )
+except KovaError as exc:
+    if exc.code == "checkpoint_incompatible":
+        print(f"deployment moved past this Checkpoint: {exc.details}")
+        raise SystemExit(1)
+    raise
+
+print(f"resumed Run: {resumed.id}")
+print(f"  restored_from: {resumed.restored_from}")
+print(f"  KV path:       {resumed.restore_plan.kv_restore}")
+print(f"  estimated TTFT: {resumed.restore_plan.estimated_first_token_ms} ms")
+
+# Continue execution against the resumed Run via the inference path
+reply = kova.chat.completions.create(
+    model=resumed.model,
+    messages=[{"role": "user", "content": "Continue from where we left off."}],
+    kovaserve={
+        "run_id": resumed.id,
+        "session_id": resumed.session_id,
+    },
+)
+```
+
+## See also
+
+- [`POST /v1/ks/runs/{id}/checkpoints`](/docs/api/checkpoints/create) · [`GET /v1/ks/checkpoints/{id}`](/docs/api/checkpoints/get) · [`GET /v1/ks/checkpoints`](/docs/api/checkpoints/list)
+- [`POST /v1/ks/runs/{id}/branch`](/docs/api/runs/branch) — fork an alternate continuation instead of continuing the same thread
+- [Resume flow](/docs/concepts/recovery/resume-flow) — the logical-context-first restore order this endpoint runs
+- [Checkpoints](/docs/concepts/recovery/checkpoints) · [Checkpoint state machine](/docs/concepts/recovery/checkpoint-state-machine) · [State handles](/docs/concepts/recovery/state-handles)
+- [Run state machine](/docs/concepts/run-hierarchy/run-state-machine) — `RECOVERING / RESUMING` from the resumed Run's side
+- [Manifest-aware routing](/docs/concepts/routing/manifest-aware-routing) — how the router consumes `resume_feasible` and restore cost
+- [Idempotency](/docs/api/using-the-api/idempotency) · [IDs](/docs/api/using-the-api/ids) · [Errors](/docs/api/using-the-api/errors)

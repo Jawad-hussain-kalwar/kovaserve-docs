@@ -1,0 +1,182 @@
+---
+title: List Checkpoints
+description: GET /v1/ks/checkpoints — page through Checkpoints with cursor pagination, filtered by run, session, project, state, or capture window.
+---
+
+`GET /v1/ks/checkpoints` lists [Checkpoints](/docs/concepts/recovery/checkpoints) the caller owns, newest first. The response uses cursor pagination — the same shape as every other list endpoint in the API. Filters narrow the result set to a single Run, Session, Project, [Checkpoint state](/docs/concepts/recovery/checkpoint-state-machine), or capture window.
+
+`state_handles` and the full `compatibility_vector` are **not** embedded on list responses — fetch [`GET /v1/ks/checkpoints/{id}`](/docs/api/checkpoints/get) for the full row. List entries carry the fields needed to triage and pick a restore candidate without N+1 reads.
+
+## Endpoint
+
+```
+GET /v1/ks/checkpoints
+```
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_...` — see [Authentication](/docs/api/using-the-api/authentication). |
+| Pagination | Cursor — see [Pagination](/docs/api/using-the-api/pagination). |
+| Errors | Native envelope — see [Errors](/docs/api/using-the-api/errors). |
+
+## Query parameters
+
+| Parameter | Type | Default | Meaning |
+|---|---|---|---|
+| `limit` | integer | `100` | Maximum Checkpoints to return. Capped at `200`. Values outside `1..200` return `400 invalid_request`. |
+| `after` | string \| null | `null` | Cursor — return Checkpoints strictly after it in descending creation order. |
+| `before` | string \| null | `null` | Cursor — return Checkpoints strictly before it. Mutually exclusive with `after`. |
+| `run_id` | string \| null | `null` | Restrict to one Run. |
+| `session_id` | string \| null | `null` | Restrict to one Session. Useful for picking a restore candidate when continuing a conversational thread on a fresh Run. Format `ses_<24hex>`. |
+| `project_id` | string \| null | `null` | Restrict to one Project. |
+| `state` | string \| null | `null` | Restrict to one [Checkpoint state](/docs/concepts/recovery/checkpoint-state-machine) — `REQUESTED`, `CAPTURING`, `STORED`, `VALIDATED`, `RESTORING`, `RESTORED`, `CAPTURE_FAILED`, `VALIDATION_FAILED`, or `RESTORE_FAILED`. |
+| `restorable` | boolean \| null | `null` | Convenience filter — `true` returns only Checkpoints in `VALIDATED` or `RESTORED` (eligible for restore); `false` returns only Checkpoints in terminal failure states. Mutually exclusive with `state`. |
+| `model_family` | string \| null | `null` | Restrict to Checkpoints whose compatibility vector pins the given `model_family`. Useful when planning a restore against a specific deployment. |
+| `created_after` | string \| null | `null` | ISO-8601 timestamp — Checkpoints with `created_at >= created_after`. |
+| `created_before` | string \| null | `null` | ISO-8601 timestamp — Checkpoints with `created_at < created_before`. |
+
+The Tenant filter is implicit — Checkpoints from other Tenants never appear in the result, regardless of any query parameter combination. Terminal failure rows are included when `state` selects them or when `restorable=false`; otherwise the default list excludes them so triage queries skip noise.
+
+## Response — `200 OK`
+
+```json
+{
+  "data": [
+    {
+      "id": "01J8X9Y2Z3K4M5N6P7Q8R9S0CK",
+      "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+      "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+      "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+      "step_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0S2",
+      "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+      "context_manifest_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0M7",
+      "state": "VALIDATED",
+      "model_id": "qwen3-coder-30b",
+      "model_family": "qwen3-coder",
+      "renderer_version": "v3",
+      "size_bytes": 1547820,
+      "has_kv_export": true,
+      "has_runtime_state": false,
+      "reason": "before risky tool call",
+      "created_at": "2026-05-05T12:04:18Z",
+      "validated_at": "2026-05-05T12:04:19Z",
+      "restored_at": null
+    },
+    {
+      "id": "01J8X9Y2Z3K4M5N6P7Q8R9S0CJ",
+      "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+      "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+      "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+      "step_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0S0",
+      "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+      "context_manifest_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0M3",
+      "state": "RESTORED",
+      "model_id": "qwen3-coder-30b",
+      "model_family": "qwen3-coder",
+      "renderer_version": "v3",
+      "size_bytes": 982110,
+      "has_kv_export": false,
+      "has_runtime_state": false,
+      "reason": "periodic",
+      "created_at": "2026-05-05T11:58:02Z",
+      "validated_at": "2026-05-05T11:58:02Z",
+      "restored_at": "2026-05-05T12:00:14Z"
+    }
+  ],
+  "page": {
+    "next_cursor": "01J8X9Y2Z3K4M5N6P7Q8R9S0CJ",
+    "prev_cursor": "01J8X9Y2Z3K4M5N6P7Q8R9S0CK",
+    "has_more": true,
+    "limit": 100
+  }
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | string | Checkpoint ID. |
+| `tenant_id` / `project_id` | string | Owning tenancy pair. |
+| `run_id` | string | Originating Run. |
+| `step_id` | string | Step the Checkpoint is anchored to. |
+| `session_id` | string \| null | Bound Session at the time of capture. |
+| `context_manifest_id` | string | Frozen manifest snapshot. |
+| `state` | string | Current value in the [Checkpoint state machine](/docs/concepts/recovery/checkpoint-state-machine). |
+| `model_id` / `model_family` / `renderer_version` | string | Flat extracts from the compatibility vector — enough to filter and rank without the full vector. The full vector is on [`GET /v1/ks/checkpoints/{id}`](/docs/api/checkpoints/get). |
+| `size_bytes` | integer | Total bytes durable for this Checkpoint. |
+| `has_kv_export` | boolean | `true` when a `kv_prefix` [StateHandle](/docs/concepts/recovery/state-handles) is present — predicts warm-resume latency. |
+| `has_runtime_state` | boolean | `true` when a `runtime_state` StateHandle is present. |
+| `reason` | string \| null | Free-form capture reason. |
+| `created_at` | string | ISO-8601 capture-request timestamp. |
+| `validated_at` | string \| null | ISO-8601 validation timestamp. `null` for in-flight or failed Checkpoints. |
+| `restored_at` | string \| null | ISO-8601 timestamp of the most recent successful restore. |
+
+The pagination envelope is documented at [Pagination](/docs/api/using-the-api/pagination). Empty `data` is valid — it means no Checkpoints match the supplied filters.
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `200 OK` | Returns a page of Checkpoints. Empty `data` is valid. |
+| `400 Bad Request` | Both `before` and `after` supplied; both `state` and `restorable` supplied; `limit` outside `1..200`; an unrecognized `state` value; or a malformed timestamp. Code: `invalid_request`. |
+| `401 Unauthorized` | Missing or invalid bearer token. |
+| `404 Not Found` | A scoping ID (`run_id`, `session_id`, `project_id`) does not resolve in the caller's Tenant. Codes: `run_not_found`, `session_not_found`, `project_not_found`. |
+
+## Examples
+
+```bash
+# Newest 50 Checkpoints across the Tenant
+curl "https://api.kovaserve.com/v1/ks/checkpoints?limit=50" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# Every Checkpoint for a Run, oldest-to-newest by walking the cursor
+curl "https://api.kovaserve.com/v1/ks/checkpoints?run_id=01J8X9Y2Z3K4M5N6P7Q8R9S0T1" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# Restorable Checkpoints for a Session — pick a resume candidate
+curl "https://api.kovaserve.com/v1/ks/checkpoints?session_id=ses_a7f3c2b8d4e1f0925a1b6c3d&restorable=true" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# Capture failures in the last hour — operator triage
+curl "https://api.kovaserve.com/v1/ks/checkpoints?state=CAPTURE_FAILED&created_after=2026-05-05T11:00:00Z" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+```
+
+```python
+from kovaserve import KovaClient
+
+kova = KovaClient(api_key="ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b")
+
+# Pick the freshest restorable Checkpoint with a warm KV export for a Session
+candidates = kova.checkpoints.list(
+    session_id="ses_a7f3c2b8d4e1f0925a1b6c3d",
+    restorable=True,
+    limit=20,
+)
+warm = next((c for c in candidates.data if c.has_kv_export), None)
+if warm:
+    print(f"warm restore from {warm.id} (captured {warm.created_at})")
+else:
+    print("no warm Checkpoint — manifest replay only")
+
+# Iterate every Checkpoint for a Run, page-by-page
+cursor = None
+while True:
+    page = kova.checkpoints.list(run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1", limit=100, after=cursor)
+    for cp in page.data:
+        marker = "★" if cp.has_kv_export else "·"
+        print(f"  {marker} {cp.id} [{cp.state}] {cp.size_bytes // 1024} KiB  {cp.reason}")
+    if not page.has_more:
+        break
+    cursor = page.next_cursor
+
+# Built-in iterator helper — auto-paginates
+for cp in kova.checkpoints.iter(project_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T0", restorable=True):
+    if cp.model_family == "qwen3-coder":
+        print(f"compatible: {cp.id}")
+```
+
+## See also
+
+- [`POST /v1/ks/runs/{id}/checkpoints`](/docs/api/checkpoints/create) · [`GET /v1/ks/checkpoints/{id}`](/docs/api/checkpoints/get) · [`POST /v1/ks/runs/{id}/resume`](/docs/api/checkpoints/restore)
+- [Checkpoints](/docs/concepts/recovery/checkpoints) · [Checkpoint state machine](/docs/concepts/recovery/checkpoint-state-machine) · [State handles](/docs/concepts/recovery/state-handles)
+- [Pagination](/docs/api/using-the-api/pagination) · [IDs](/docs/api/using-the-api/ids) · [Errors](/docs/api/using-the-api/errors)

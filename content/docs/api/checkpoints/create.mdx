@@ -1,0 +1,184 @@
+---
+title: Create a Checkpoint
+description: POST /v1/ks/runs/{id}/checkpoints — capture a frozen ContextManifest snapshot, typed StateHandles, and an optional KV export as a durable, restorable Checkpoint.
+---
+
+`POST /v1/ks/runs/{id}/checkpoints` captures a [Checkpoint](/docs/concepts/recovery/checkpoints) on a Run. The Checkpoint Manager freezes a [ContextManifest](/docs/concepts/context/context-manifests) snapshot, gathers the typed [StateHandles](/docs/concepts/recovery/state-handles) that compose recoverable state, optionally exports KV cache from the Layer 1 Node Agent, and persists everything to object storage. The endpoint returns the new Checkpoint row once it reaches `VALIDATED` — the eligible-for-restore state.
+
+The defining property is that **logical context is the primary capability**: the Checkpoint is durable and restorable from its manifest snapshot alone. KV export is best-effort and never blocks completion. A Checkpoint that captured without a KV export still validates, still resumes, and still serves as a branch source — only the next ModelCall after restore loses the warm-cache latency win.
+
+## What capture does
+
+1. **Freezes the manifest snapshot.** The currently active [ContextManifest](/docs/concepts/context/context-manifests) — segments, token counts, artifact references, compaction lineage — is snapshotted as a `context_manifest` [StateHandle](/docs/concepts/recovery/state-handles). This is the audit anchor.
+2. **Validates referenced artifacts.** Every [ContextArtifact](/docs/concepts/context/context-artifacts) referenced by the manifest is read-checked from object storage and recorded as an `artifact_bundle` StateHandle.
+3. **Records compaction lineage.** [CompactionRecords](/docs/concepts/context/compaction-records) accumulated up to the captured Step are referenced so a future restore can reconstruct logical context exactly.
+4. **Captures runtime-local state.** When the originating runtime carries persisted scratchpad / sandbox / workspace state, it is captured as a `runtime_state` StateHandle.
+5. **Exports KV cache (best effort).** When `include_kv` is `true` the Checkpoint Manager asks the Node Agent on the Run's last serving node to export KV blocks for the Run's current `stable_prefix_id`. On success the export is recorded as a `kv_prefix` StateHandle. On failure the Checkpoint completes anyway.
+6. **Records the compatibility vector.** Model id, model family, tokenizer fingerprint, renderer version, quantization, tensor parallel config, and PolicyScope are pinned for restore-time compatibility checks. See [renderer versions](/docs/concepts/context/renderer-versions).
+7. **Travels the FSM.** The Checkpoint progresses `REQUESTED → CAPTURING → STORED → VALIDATED` on the [Checkpoint state machine](/docs/concepts/recovery/checkpoint-state-machine). The owning Run holds `RUNNING → CHECKPOINTING → RUNNING` for the duration.
+
+## Endpoint
+
+```
+POST /v1/ks/runs/{run_id}/checkpoints
+```
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_...` — see [Authentication](/docs/api/using-the-api/authentication). |
+| Path parameter | `run_id` — bare 26-character Crockford ULID. The Run must be in `RUNNING`, `WAITING`, or `PAUSED`; terminal Runs reject capture. |
+| Content type | `application/json`. |
+| Idempotent | Yes, when `Idempotency-Key` is supplied — see [Idempotency](/docs/api/using-the-api/idempotency). |
+| Errors | Native envelope — see [Errors](/docs/api/using-the-api/errors). |
+
+## Request body
+
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `step_id` | string \| null | no | The [Step](/docs/concepts/run-hierarchy/steps) the Checkpoint is anchored to. Defaults to the Run's most recently completed Step. The Step must belong to the path's `run_id` and must be in `SUCCEEDED`. |
+| `include_kv` | boolean | no | Request a KV cache export. Defaults to `true`. When `false`, the Checkpoint captures logical context only and skips the Node Agent call. |
+| `reason` | string \| null | no | Free-form capture reason (`"before risky tool call"`, `"budget warning"`, `"periodic"`). Surfaces on the Checkpoint row and on the `ks.checkpoint.created` event. |
+| `metadata` | object \| null | no | Free-form JSON recorded on the Checkpoint row. Reserved keys are namespaced under `_ks`. |
+
+```json
+{
+  "step_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0S2",
+  "include_kv": true,
+  "reason": "before risky tool call",
+  "metadata": {
+    "tool": "git_apply"
+  }
+}
+```
+
+## Response — `201 Created`
+
+The body is the new Checkpoint row. The endpoint blocks until the Checkpoint reaches `VALIDATED`; capture and validation are typically sub-second for logical-only checkpoints and sub-30-seconds for warm KV exports.
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9S0CK",
+  "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+  "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+  "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+  "step_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0S2",
+  "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+  "context_manifest_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0M7",
+  "state": "VALIDATED",
+  "state_handles": [
+    { "type": "context_manifest", "ref": "01J8X9Y2Z3K4M5N6P7Q8R9S0M7" },
+    { "type": "artifact_bundle",  "ref": "01J8X9Y2Z3K4M5N6P7Q8R9S0AR" },
+    { "type": "kv_prefix",        "ref": "kv://gpu-node-2/01J8X9Y2Z3K4M5N6P7Q8R9S0CK" }
+  ],
+  "compatibility_vector": {
+    "model_id": "qwen3-coder-30b",
+    "model_family": "qwen3-coder",
+    "tokenizer_fingerprint": "sha256:9f2c4e1f0925a1b6c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f70",
+    "renderer_version": "v3",
+    "quantization": "fp8",
+    "tensor_parallel_config": "tp=2",
+    "policy_scope": "01J8X9Y2Z3K4M5N6P7Q8R9S0T3"
+  },
+  "manifest_uri": "s3://ks-checkpoints/01J8X9Y2Z3K4M5N6P7Q8R9S0CK/manifest.json",
+  "size_bytes": 1547820,
+  "reason": "before risky tool call",
+  "metadata": { "tool": "git_apply" },
+  "created_at": "2026-05-05T12:04:18Z",
+  "validated_at": "2026-05-05T12:04:19Z",
+  "restored_at": null
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | string | Checkpoint ID — bare 26-character Crockford ULID. |
+| `tenant_id` / `project_id` | string | Owning tenancy pair, inherited from the Run. |
+| `run_id` | string | Originating Run. |
+| `step_id` | string | Step the Checkpoint is anchored to. |
+| `session_id` | string \| null | Bound Session at the time of capture, when the Run was Session-bound. |
+| `context_manifest_id` | string | The frozen manifest snapshot. Always non-null — logical context is the primary capability. |
+| `state` | string | One of the values in the [Checkpoint state machine](/docs/concepts/recovery/checkpoint-state-machine). New Checkpoints return in `VALIDATED`. |
+| `state_handles` | array | Typed references to recoverable state. Always contains `context_manifest`; optionally contains `artifact_bundle`, `kv_prefix`, `runtime_state`. See [StateHandles](/docs/concepts/recovery/state-handles). |
+| `compatibility_vector` | object | Model id, model family, tokenizer fingerprint, renderer version, quantization, tensor parallel config, PolicyScope. Validated on every restore. |
+| `manifest_uri` | string | Object-storage URI for the frozen manifest snapshot. |
+| `size_bytes` | integer | Total bytes durable across all StateHandles for this Checkpoint. |
+| `reason` / `metadata` | string \| null / object \| null | Echo of the request fields. |
+| `created_at` | string | ISO-8601 timestamp at which the Checkpoint entered `REQUESTED`. |
+| `validated_at` | string \| null | ISO-8601 timestamp at which the Checkpoint reached `VALIDATED`. |
+| `restored_at` | string \| null | ISO-8601 timestamp of the most recent successful restore. `null` until the Checkpoint is restored from. |
+
+### Headers
+
+```http
+HTTP/1.1 201 Created
+Content-Type: application/json
+X-Request-Id:    01J8X9Y2Z3K4M5N6P7Q8R9S0XX
+X-KS-Run-Id:     01J8X9Y2Z3K4M5N6P7Q8R9S0T1
+X-KS-Checkpoint-Id: 01J8X9Y2Z3K4M5N6P7Q8R9S0CK
+```
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `201 Created` | The Checkpoint reached `VALIDATED`. |
+| `400 Bad Request` | Malformed JSON or unknown fields. Codes: `invalid_request`, `invalid_id`. |
+| `401 Unauthorized` | Missing, malformed, or unresolved API key. |
+| `404 Not Found` | The Run does not exist or belongs to another Tenant; or the supplied `step_id` does not belong to this Run. Codes: `run_not_found`, `step_not_found`. |
+| `409 Conflict` | The Run is in a terminal state (`COMPLETED`, `FAILED`, `CANCELED`) and cannot be checkpointed; or the supplied `Idempotency-Key` was reused with a different request body; or the supplied `step_id` is not in `SUCCEEDED`. Codes: `run_not_checkpointable`, `step_not_checkpointable`, `idempotency_conflict`. |
+| `422 Unprocessable Entity` | The body parsed but failed schema validation. |
+| `429 Too Many Requests` | Rate limit exceeded. Code: `rate_limited`. |
+| `503 Service Unavailable` | The Checkpoint reached `CAPTURE_FAILED` or `VALIDATION_FAILED` during the request — object storage was unreachable, an artifact failed its hash check, or the manifest snapshot could not be serialized. Codes: `capture_failed`, `validation_failed`. The body includes `details.reason` and `details.checkpoint_id` so the failed row can be inspected. |
+
+KV export failure is **not** an error — when `include_kv: true` and the export fails, the Checkpoint still completes in `VALIDATED` and the response simply omits the `kv_prefix` StateHandle. Inspect `state_handles` to see which handles were captured.
+
+## Examples
+
+```bash
+# Default capture — logical context + best-effort KV export
+curl -X POST https://api.kovaserve.com/v1/ks/runs/01J8X9Y2Z3K4M5N6P7Q8R9S0T1/checkpoints \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b" \
+  -H "Content-Type: application/json" \
+  -d '{}'
+
+# Anchored to a specific Step, KV skipped, with a labeled reason
+curl -X POST https://api.kovaserve.com/v1/ks/runs/01J8X9Y2Z3K4M5N6P7Q8R9S0T1/checkpoints \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: 6c1f8a30-9b22-4f0e-9d6c-12c4f0a1b2c3" \
+  -d '{
+    "step_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0S2",
+    "include_kv": false,
+    "reason": "before risky tool call"
+  }'
+```
+
+```python
+from kovaserve import KovaClient
+
+kova = KovaClient(api_key="ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b")
+
+# Capture a Checkpoint before a destructive tool call
+checkpoint = kova.checkpoints.create(
+    run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    reason="before risky tool call",
+    metadata={"tool": "git_apply"},
+)
+
+print(f"checkpoint {checkpoint.id} validated at {checkpoint.validated_at}")
+for handle in checkpoint.state_handles:
+    print(f"  {handle.type}: {handle.ref}")
+
+# Inspect whether KV export came along — useful for predicting resume latency
+has_kv = any(h.type == "kv_prefix" for h in checkpoint.state_handles)
+print(f"warm resume available: {has_kv}")
+```
+
+## See also
+
+- [`GET /v1/ks/checkpoints/{id}`](/docs/api/checkpoints/get) · [`GET /v1/ks/checkpoints`](/docs/api/checkpoints/list) · [`POST /v1/ks/runs/{id}/resume`](/docs/api/checkpoints/restore)
+- [`POST /v1/ks/runs/{id}/branch`](/docs/api/runs/branch) — fork a new Run lineage from a Checkpoint
+- [Checkpoints](/docs/concepts/recovery/checkpoints) · [Checkpoint state machine](/docs/concepts/recovery/checkpoint-state-machine) · [State handles](/docs/concepts/recovery/state-handles)
+- [Resume flow](/docs/concepts/recovery/resume-flow) — the logical-context-first restore order this Checkpoint is captured for
+- [Context manifests](/docs/concepts/context/context-manifests) · [Renderer versions](/docs/concepts/context/renderer-versions) — how the manifest snapshot and compatibility vector are computed
+- [Idempotency](/docs/api/using-the-api/idempotency) · [IDs](/docs/api/using-the-api/ids) · [Errors](/docs/api/using-the-api/errors)

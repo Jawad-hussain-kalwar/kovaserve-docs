@@ -5,6 +5,7 @@
     "using-the-api",
     "inference",
     "runs",
-    "sessions"
+    "sessions",
+    "checkpoints"
   ]
 }

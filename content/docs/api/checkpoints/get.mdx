@@ -1,0 +1,129 @@
+---
+title: Get a Checkpoint
+description: GET /v1/ks/checkpoints/{id} — fetch a Checkpoint with its frozen ContextManifest reference, typed StateHandles, and compatibility vector.
+---
+
+`GET /v1/ks/checkpoints/{id}` returns a single [Checkpoint](/docs/concepts/recovery/checkpoints) by ID. The response carries the frozen [ContextManifest](/docs/concepts/context/context-manifests) reference, the typed [StateHandles](/docs/concepts/recovery/state-handles) that compose recoverable state, the compatibility vector validated on every restore, and lifecycle timestamps for capture, validation, and most-recent restore.
+
+The Checkpoint is resolved against the API key's Tenant. Cross-tenant fetches return `404 Not Found` — the same response as a genuinely missing Checkpoint — so the surface leaks no information about Checkpoints the caller cannot see.
+
+## Endpoint
+
+```
+GET /v1/ks/checkpoints/{checkpoint_id}
+```
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_...` — see [Authentication](/docs/api/using-the-api/authentication). |
+| Path parameter | `checkpoint_id` — bare 26-character Crockford ULID. |
+| Errors | Native envelope — see [Errors](/docs/api/using-the-api/errors). |
+
+## Response — `200 OK`
+
+The body is the Checkpoint row in its current [state](/docs/concepts/recovery/checkpoint-state-machine). Long-lived Checkpoints sit in `VALIDATED` between capture and any subsequent restore; restored Checkpoints land in `RESTORED`.
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9S0CK",
+  "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+  "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+  "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+  "step_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0S2",
+  "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+  "context_manifest_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0M7",
+  "state": "RESTORED",
+  "state_handles": [
+    { "type": "context_manifest", "ref": "01J8X9Y2Z3K4M5N6P7Q8R9S0M7" },
+    { "type": "artifact_bundle",  "ref": "01J8X9Y2Z3K4M5N6P7Q8R9S0AR" },
+    { "type": "kv_prefix",        "ref": "kv://gpu-node-2/01J8X9Y2Z3K4M5N6P7Q8R9S0CK" }
+  ],
+  "compatibility_vector": {
+    "model_id": "qwen3-coder-30b",
+    "model_family": "qwen3-coder",
+    "tokenizer_fingerprint": "sha256:9f2c4e1f0925a1b6c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f70",
+    "renderer_version": "v3",
+    "quantization": "fp8",
+    "tensor_parallel_config": "tp=2",
+    "policy_scope": "01J8X9Y2Z3K4M5N6P7Q8R9S0T3"
+  },
+  "manifest_uri": "s3://ks-checkpoints/01J8X9Y2Z3K4M5N6P7Q8R9S0CK/manifest.json",
+  "size_bytes": 1547820,
+  "reason": "before risky tool call",
+  "metadata": { "tool": "git_apply" },
+  "created_at": "2026-05-05T12:04:18Z",
+  "validated_at": "2026-05-05T12:04:19Z",
+  "restored_at": "2026-05-05T12:11:42Z",
+  "error_reason": null
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | string | Checkpoint ID. |
+| `tenant_id` / `project_id` | string | Owning tenancy pair, inherited from the originating Run. |
+| `run_id` | string | Originating Run. |
+| `step_id` | string | Step the Checkpoint is anchored to. |
+| `session_id` | string \| null | Bound Session at the time of capture. |
+| `context_manifest_id` | string | Frozen [ContextManifest](/docs/concepts/context/context-manifests) snapshot. The audit anchor for restore. Always non-null. |
+| `state` | string | Current value in the [Checkpoint state machine](/docs/concepts/recovery/checkpoint-state-machine). |
+| `state_handles` | array | Typed references to recoverable state — see [StateHandles](/docs/concepts/recovery/state-handles). Always contains `context_manifest`; optionally contains `artifact_bundle`, `kv_prefix`, `runtime_state`. |
+| `compatibility_vector` | object | Model id, model family, tokenizer fingerprint, renderer version, quantization, tensor parallel config, PolicyScope. Validated on every restore. See [renderer versions](/docs/concepts/context/renderer-versions). |
+| `manifest_uri` | string | Object-storage URI for the frozen manifest snapshot. |
+| `size_bytes` | integer | Total bytes durable across all StateHandles for this Checkpoint. |
+| `reason` | string \| null | Free-form capture reason supplied at create time. |
+| `metadata` | object \| null | Free-form metadata supplied at create time. |
+| `created_at` | string | ISO-8601 timestamp at which the Checkpoint entered `REQUESTED`. |
+| `validated_at` | string \| null | ISO-8601 timestamp at which the Checkpoint reached `VALIDATED`. `null` for Checkpoints stuck in `REQUESTED`, `CAPTURING`, `STORED`, `CAPTURE_FAILED`, or `VALIDATION_FAILED`. |
+| `restored_at` | string \| null | ISO-8601 timestamp of the most recent successful restore. `null` until the Checkpoint is restored from at least once. |
+| `error_reason` | string \| null | Set on terminal failure states (`CAPTURE_FAILED`, `VALIDATION_FAILED`). Carries the diagnostic the Checkpoint Manager recorded — object storage write failure, artifact hash mismatch, etc. |
+
+The `state_handles` array always contains a `context_manifest` entry. Logical context is the primary capability — a Checkpoint without a manifest snapshot is invalid by construction and the capture path rejects before reaching `STORED`. Other handle types are present only when the corresponding state was captured: `artifact_bundle` when the manifest references at least one [ContextArtifact](/docs/concepts/context/context-artifacts), `kv_prefix` when KV export succeeded, `runtime_state` when the originating runtime carried persisted state.
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `200 OK` | The Checkpoint exists and is visible to the caller. |
+| `401 Unauthorized` | Missing, malformed, or unresolved API key. |
+| `404 Not Found` | The Checkpoint does not exist *or* belongs to another Tenant. Code: `checkpoint_not_found`. |
+
+## Examples
+
+```bash
+curl https://api.kovaserve.com/v1/ks/checkpoints/01J8X9Y2Z3K4M5N6P7Q8R9S0CK \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+```
+
+```python
+from kovaserve import KovaClient
+
+kova = KovaClient(api_key="ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b")
+
+checkpoint = kova.checkpoints.get("01J8X9Y2Z3K4M5N6P7Q8R9S0CK")
+
+print(f"state: {checkpoint.state}")
+print(f"validated at: {checkpoint.validated_at}")
+print(f"size: {checkpoint.size_bytes / 1024:.1f} KiB")
+
+# Inspect what was captured — predicts resume latency
+handles_by_type = {h.type: h.ref for h in checkpoint.state_handles}
+print(f"manifest:        {handles_by_type['context_manifest']}")
+print(f"warm KV import:  {'yes' if 'kv_prefix' in handles_by_type else 'no'}")
+print(f"runtime state:   {'yes' if 'runtime_state' in handles_by_type else 'no'}")
+
+# Eligibility — only VALIDATED and RESTORED Checkpoints accept restore
+if checkpoint.state in ("VALIDATED", "RESTORED"):
+    print("ready to restore")
+elif checkpoint.state in ("CAPTURE_FAILED", "VALIDATION_FAILED"):
+    print(f"unrestorable: {checkpoint.error_reason}")
+else:
+    print(f"transient: {checkpoint.state} — try again shortly")
+```
+
+## See also
+
+- [`POST /v1/ks/runs/{id}/checkpoints`](/docs/api/checkpoints/create) · [`GET /v1/ks/checkpoints`](/docs/api/checkpoints/list) · [`POST /v1/ks/runs/{id}/resume`](/docs/api/checkpoints/restore)
+- [Checkpoints](/docs/concepts/recovery/checkpoints) · [Checkpoint state machine](/docs/concepts/recovery/checkpoint-state-machine) · [State handles](/docs/concepts/recovery/state-handles)
+- [Resume flow](/docs/concepts/recovery/resume-flow) · [Context manifests](/docs/concepts/context/context-manifests) · [Renderer versions](/docs/concepts/context/renderer-versions)
+- [IDs](/docs/api/using-the-api/ids) · [Errors](/docs/api/using-the-api/errors)

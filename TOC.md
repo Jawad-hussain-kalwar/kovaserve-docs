@@ -236,10 +236,10 @@ Living roadmap for `docs.kovaserve.com`. Source of structure for `content/docs/`
 
 ### Checkpoints
 
-- [ ] `api/checkpoints/create.mdx`
-- [ ] `api/checkpoints/get.mdx`
-- [ ] `api/checkpoints/list.mdx`
-- [ ] `api/checkpoints/restore.mdx`
+- [x] `api/checkpoints/create.mdx`
+- [x] `api/checkpoints/get.mdx`
+- [x] `api/checkpoints/list.mdx`
+- [x] `api/checkpoints/restore.mdx`
 
 ### Handles
 
