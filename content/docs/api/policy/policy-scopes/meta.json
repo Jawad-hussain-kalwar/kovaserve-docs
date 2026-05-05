@@ -1,0 +1,8 @@
+{
+  "title": "Policy Scopes",
+  "pages": [
+    "create",
+    "get",
+    "list"
+  ]
+}

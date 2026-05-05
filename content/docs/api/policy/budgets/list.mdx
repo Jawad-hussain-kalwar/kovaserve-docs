@@ -1,0 +1,146 @@
+---
+title: List Budgets
+description: GET /v1/ks/budgets — page through Run-level Budgets with cursor pagination, filtered by Run, Project, status, or creation window.
+---
+
+`GET /v1/ks/budgets` lists [Budgets](/docs/concepts/policy/budgets) the caller owns, newest first. The response uses cursor pagination — the same shape as every other list endpoint in the API. Filters narrow the result set to a single Run, Project, [Budget state](/docs/concepts/policy/budget-state-machine), or creation window.
+
+The list response carries the same shape as [`GET /v1/ks/budgets/{id}`](/docs/api/policy/budgets/get) for each entry — counters, limits, thresholds, and current state — so dashboards and operator triage scripts can render a fleet view without N+1 reads.
+
+## Endpoint
+
+```
+GET /v1/ks/budgets
+```
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_...` — see [Authentication](/docs/api/using-the-api/authentication). |
+| Pagination | Cursor — see [Pagination](/docs/api/using-the-api/pagination). |
+| Errors | Native envelope — see [Errors](/docs/api/using-the-api/errors). |
+
+## Query parameters
+
+| Parameter | Type | Default | Meaning |
+|---|---|---|---|
+| `limit` | integer | `100` | Maximum Budgets to return. Capped at `200`. Values outside `1..200` return `400 invalid_request`. |
+| `after` | string \| null | `null` | Cursor — return Budgets strictly after it in descending creation order. |
+| `before` | string \| null | `null` | Cursor — return Budgets strictly before it. Mutually exclusive with `after`. |
+| `run_id` | string \| null | `null` | Restrict to one Run. Each Run carries at most one Budget, so this filter returns either zero or one entry. |
+| `project_id` | string \| null | `null` | Restrict to Budgets attached to Runs in one Project. |
+| `status` | string \| null | `null` | Restrict to one [Budget state](/docs/concepts/policy/budget-state-machine) — `ACTIVE`, `WARNING`, `DEGRADED_ALLOWED`, `HARD_STOP`, or `CLOSED`. |
+| `live` | boolean \| null | `null` | Convenience filter — `true` returns only Budgets in non-terminal states (`ACTIVE`, `WARNING`, `DEGRADED_ALLOWED`); `false` returns only `HARD_STOP` and `CLOSED`. Mutually exclusive with `status`. |
+| `created_after` | string \| null | `null` | ISO-8601 timestamp — Budgets with `created_at >= created_after`. |
+| `created_before` | string \| null | `null` | ISO-8601 timestamp — Budgets with `created_at < created_before`. |
+
+The Tenant filter is implicit — Budgets from other Tenants never appear in the result, regardless of any query parameter combination. `CLOSED` Budgets are included in list responses (the row persists for audit) and reflect the final consumption counters.
+
+## Response — `200 OK`
+
+Each entry in `data` is a Budget row in the same shape as [`GET /v1/ks/budgets/{id}`](/docs/api/policy/budgets/get). The pagination envelope is documented at [Pagination](/docs/api/using-the-api/pagination).
+
+```json
+{
+  "data": [
+    {
+      "id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T4",
+      "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+      "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+      "token_limit": 1000000,
+      "step_limit": 100,
+      "time_limit_seconds": 1800,
+      "tool_limit": 50,
+      "cost_limit_cents": "5000.0000",
+      "tokens_used": 412840,
+      "steps_used": 23,
+      "time_used_seconds": 612,
+      "tools_used": 7,
+      "cost_used_cents": "1240.4180",
+      "status": "WARNING",
+      "warning_threshold": 0.7,
+      "degraded_threshold": 0.9,
+      "created_at": "2026-05-05T12:00:00Z",
+      "updated_at": "2026-05-05T12:08:14Z"
+    },
+    {
+      "id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T3",
+      "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+      "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+      "token_limit": 500000,
+      "step_limit": 60,
+      "time_limit_seconds": null,
+      "tool_limit": null,
+      "cost_limit_cents": "2000.0000",
+      "tokens_used": 500000,
+      "steps_used": 41,
+      "time_used_seconds": 482,
+      "tools_used": 3,
+      "cost_used_cents": "1980.2200",
+      "status": "HARD_STOP",
+      "warning_threshold": 0.7,
+      "degraded_threshold": 0.9,
+      "created_at": "2026-05-05T11:42:00Z",
+      "updated_at": "2026-05-05T11:58:33Z"
+    }
+  ],
+  "page": {
+    "next_cursor": "01J8X9Y2Z3K4M5N6P7Q8R9S0T3",
+    "prev_cursor": "01J8X9Y2Z3K4M5N6P7Q8R9S0T4",
+    "has_more": true,
+    "limit": 100
+  }
+}
+```
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `200 OK` | Returns a page of Budgets. Empty `data` is valid. |
+| `400 Bad Request` | Both `before` and `after` supplied, `limit` outside `1..200`, an unrecognized `status` value, `status` and `live` both supplied, or a malformed timestamp. Code: `invalid_request`. |
+| `401 Unauthorized` | Missing or invalid bearer token. |
+| `404 Not Found` | A scoping ID (`run_id`, `project_id`) does not resolve in the caller's Tenant. Codes: `run_not_found`, `project_not_found`. |
+| `429 Too Many Requests` | Rate limit exceeded. Code: `rate_limited`. |
+
+## Examples
+
+```bash
+# Newest 50 Budgets across the Tenant
+curl "https://api.kovaserve.com/v1/ks/budgets?limit=50" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# Live Budgets in one Project — operator triage
+curl "https://api.kovaserve.com/v1/ks/budgets?project_id=01J8X9Y2Z3K4M5N6P7Q8R9S0T0&live=true" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# Budgets that hit HARD_STOP in the last hour
+curl "https://api.kovaserve.com/v1/ks/budgets?status=HARD_STOP&created_after=2026-05-05T11:00:00Z" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+```
+
+```python
+from kovaserve import KovaClient
+
+kova = KovaClient(api_key="ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b")
+
+# Page through every Budget in the WARNING state
+cursor = None
+while True:
+    page = kova.budgets.list(status="WARNING", limit=100, after=cursor)
+    for b in page.data:
+        print(f"{b.id}  run={b.run_id}  used={b.cost_used_cents}/{b.cost_limit_cents}")
+    if not page.has_more:
+        break
+    cursor = page.next_cursor
+
+# Built-in iterator — auto-paginates
+for b in kova.budgets.iter(project_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T0", live=True):
+    if b.status == "DEGRADED_ALLOWED":
+        print(f"degraded: {b.run_id}")
+```
+
+## See also
+
+- [`POST /v1/ks/budgets`](/docs/api/policy/budgets/create) · [`GET /v1/ks/budgets/{id}`](/docs/api/policy/budgets/get)
+- [Budgets](/docs/concepts/policy/budgets) · [Budget state machine](/docs/concepts/policy/budget-state-machine)
+- [Pagination](/docs/api/using-the-api/pagination) · [IDs](/docs/api/using-the-api/ids) · [Errors](/docs/api/using-the-api/errors)

@@ -8,6 +8,7 @@
     "sessions",
     "checkpoints",
     "handles",
-    "context"
+    "context",
+    "policy"
   ]
 }

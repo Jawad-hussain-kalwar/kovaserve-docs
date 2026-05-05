@@ -1,0 +1,170 @@
+---
+title: Create a Budget
+description: POST /v1/ks/budgets — create a Run-level Budget bounding cost, tokens, steps, wall time, or tool calls, with explicit warning and degraded thresholds.
+---
+
+`POST /v1/ks/budgets` creates a Run-level [Budget](/docs/concepts/policy/budgets) and binds it to an existing [Run](/docs/concepts/run-hierarchy/runs). The Budget is an **active** control object — it evaluates on every Step admission and produces explicit decisions: `ALLOW`, `WARN`, `DEGRADE`, or `HARD_STOP`. Counters are advanced atomically with each admission; reads of the Budget always reflect counters consistent with the most recent admitted Step.
+
+A Run carries at most one Budget. The companion path is **implicit creation** — a Run created with `budget` in its [`POST /v1/ks/runs`](/docs/api/runs/create) body materializes its Budget alongside the Run. This endpoint exists for the case where the runtime wants to attach a Budget to an already-created Run (typically a Run that was bootstrapped without one and gained budget requirements only after work began), and for explicit limit configuration outside the Run-creation flow.
+
+## Endpoint
+
+```
+POST /v1/ks/budgets
+```
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_...` — see [Authentication](/docs/api/using-the-api/authentication). |
+| Content type | `application/json`. |
+| Idempotent | Yes, when `Idempotency-Key` is supplied — see [Idempotency](/docs/api/using-the-api/idempotency). |
+| Errors | Native envelope — see [Errors](/docs/api/using-the-api/errors). |
+
+## Request body
+
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `run_id` | string | yes | Bare 26-character Crockford ULID of the Run the Budget binds to. The Run must be visible to the API key's Tenant and must not be in a terminal state (`COMPLETED`, `FAILED`, `CANCELED`). |
+| `token_limit` | integer \| null | no | Cap on total tokens (prompt + completion) consumed across the Run. `null` means unenforced for this dimension. Must be `> 0` when set. |
+| `step_limit` | integer \| null | no | Cap on the number of admitted Steps. `null` means unenforced. Must be `> 0`. |
+| `time_limit_seconds` | integer \| null | no | Cap on wall-clock seconds from first Step admission to terminal Run state. Must be `> 0`. |
+| `tool_limit` | integer \| null | no | Cap on the number of `TOOL_EXECUTE` Steps admitted under the Run. Must be `> 0`. |
+| `cost_limit_cents` | string \| null | no | Cap on total cost, in cents, expressed as a decimal string with up to four fractional digits (`"5000.0000"`). Numeric inputs are coerced. Must be `> 0`. |
+| `warning_threshold` | float | no | Fraction `(0, 1)` at which the Budget enters `WARNING`. Defaults to `0.7`. |
+| `degraded_threshold` | float | no | Fraction `(0, 1]` at which the Budget enters `DEGRADED_ALLOWED` for degrade-eligible dimensions. Defaults to `0.9`. Must be strictly greater than `warning_threshold`. |
+
+At least one limit dimension must be configured — a Budget with every limit set to `null` is rejected as `400 invalid_request`. Unknown top-level fields return `400 invalid_request` with `details.field_errors` listing the offending keys.
+
+### Example
+
+```json
+{
+  "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+  "cost_limit_cents": "5000.0000",
+  "token_limit": 1000000,
+  "step_limit": 100,
+  "time_limit_seconds": 1800,
+  "tool_limit": 50,
+  "warning_threshold": 0.7,
+  "degraded_threshold": 0.9
+}
+```
+
+## Response — `201 Created`
+
+The body is the new Budget row in `ACTIVE`. Counters are zero on creation. Cost values are decimal strings with four fractional digits.
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T4",
+  "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+  "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+  "token_limit": 1000000,
+  "step_limit": 100,
+  "time_limit_seconds": 1800,
+  "tool_limit": 50,
+  "cost_limit_cents": "5000.0000",
+  "tokens_used": 0,
+  "steps_used": 0,
+  "time_used_seconds": 0,
+  "tools_used": 0,
+  "cost_used_cents": "0.0000",
+  "status": "ACTIVE",
+  "warning_threshold": 0.7,
+  "degraded_threshold": 0.9,
+  "created_at": "2026-05-05T12:00:00Z",
+  "updated_at": "2026-05-05T12:00:00Z"
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | string | Budget ID — bare 26-character Crockford ULID. |
+| `run_id` | string | The Run this Budget governs. Immutable. |
+| `tenant_id` | string | Owning Tenant, inherited from the Run's tenancy. Immutable. |
+| `token_limit` / `step_limit` / `time_limit_seconds` / `tool_limit` | integer \| null | Echo of the request limit fields. `null` when unset. |
+| `cost_limit_cents` | string \| null | Decimal string with four fractional digits, or `null` when unset. |
+| `tokens_used` / `steps_used` / `time_used_seconds` / `tools_used` | integer | Live consumption counters. Read-only — admission is the only writer. |
+| `cost_used_cents` | string | Decimal string with four fractional digits, advanced atomically with each admitted ModelCall. |
+| `status` | string | One of the values in the [Budget state machine](/docs/concepts/policy/budget-state-machine). New Budgets return in `ACTIVE`. |
+| `warning_threshold` / `degraded_threshold` | float | Echo of the request fields. |
+| `created_at` / `updated_at` | string | ISO-8601 timestamps with `Z` suffix. |
+
+### Headers
+
+```http
+HTTP/1.1 201 Created
+Content-Type: application/json
+X-Request-Id:   01J8X9Y2Z3K4M5N6P7Q8R9S0XX
+X-KS-Budget-Id: 01J8X9Y2Z3K4M5N6P7Q8R9S0T4
+```
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `201 Created` | The Budget was created in `ACTIVE` and is immediately enforced on the next Step admission against the Run. |
+| `400 Bad Request` | Malformed JSON, unknown fields, malformed `run_id`, no dimensions configured, a limit `<= 0`, a threshold outside `(0, 1]`, or `warning_threshold >= degraded_threshold`. Codes: `invalid_request`. |
+| `401 Unauthorized` | Missing, malformed, or unresolved API key. Codes: `missing_token`, `invalid_token`, `token_revoked`. |
+| `404 Not Found` | The supplied `run_id` does not resolve in the caller's Tenant. Code: `run_not_found`. |
+| `409 Conflict` | The Run is in a terminal state (`run_not_runnable`), a Budget already exists for the Run (`budget_already_exists`), or the supplied `Idempotency-Key` was reused with a different request body (`idempotency_conflict`). |
+| `429 Too Many Requests` | Rate limit exceeded. Code: `rate_limited`. |
+
+A Budget cannot be detached or replaced on a Run. To change limits after creation, [`PATCH /v1/ks/budgets/{id}`](/docs/api/policy/budgets/get) the existing Budget — limits and thresholds are mutable; counters are not.
+
+## Examples
+
+```bash
+# Pin a Run to a $50 cost cap and a 30-minute wall-clock cap
+curl -X POST https://api.kovaserve.com/v1/ks/budgets \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    "cost_limit_cents": "5000.0000",
+    "time_limit_seconds": 1800
+  }'
+
+# Tighter caps for an autonomous tool-loop, with idempotency
+curl -X POST https://api.kovaserve.com/v1/ks/budgets \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: 6c1f8a30-9b22-4f0e-9d6c-12c4f0a1b2c3" \
+  -d '{
+    "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    "cost_limit_cents": "1000.0000",
+    "step_limit": 40,
+    "tool_limit": 20,
+    "warning_threshold": 0.6,
+    "degraded_threshold": 0.85
+  }'
+```
+
+```python
+from kovaserve import KovaClient
+from decimal import Decimal
+
+kova = KovaClient(api_key="ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b")
+
+budget = kova.budgets.create(
+    run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    cost_limit_cents=Decimal("5000.0000"),
+    token_limit=1_000_000,
+    step_limit=100,
+    time_limit_seconds=1800,
+    tool_limit=50,
+    warning_threshold=0.7,
+    degraded_threshold=0.9,
+)
+
+print(f"Budget {budget.id} bound to Run {budget.run_id}; status={budget.status}")
+```
+
+## See also
+
+- [`GET /v1/ks/budgets/{id}`](/docs/api/policy/budgets/get) · [`GET /v1/ks/budgets`](/docs/api/policy/budgets/list)
+- [Budgets](/docs/concepts/policy/budgets) · [Budget state machine](/docs/concepts/policy/budget-state-machine)
+- [Admission](/docs/concepts/policy/admission) — how Budget pre-check fits the hot path
+- [Context budgets](/docs/concepts/policy/context-budgets) — the per-ModelCall sibling
+- [Cost model](/docs/concepts/cost/cost-model) — gross / net / cache savings accounting
+- [Authentication](/docs/api/using-the-api/authentication) · [Idempotency](/docs/api/using-the-api/idempotency) · [Errors](/docs/api/using-the-api/errors)

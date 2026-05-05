@@ -1,0 +1,114 @@
+---
+title: Get a ContextBudget
+description: GET /v1/ks/context/budgets/{id} — fetch a per-Run ContextBudget with its configured limits, trigger thresholds, and current admission state.
+---
+
+`GET /v1/ks/context/budgets/{id}` returns a single [ContextBudget](/docs/concepts/policy/context-budgets) with its configured limits, trigger thresholds, and current admission state. The state reflects the most recent admission decision applied to a [ContextManifest](/docs/concepts/context/context-manifests) under the bound [Run](/docs/concepts/run-hierarchy/runs).
+
+The ContextBudget is resolved against the API key's Tenant. Cross-tenant fetches return `404 Not Found` — the same response as a genuinely missing ContextBudget — so the surface leaks no information about ContextBudgets the caller cannot see.
+
+The ContextBudget itself does not maintain rolling counters in the way the Run-level [Budget](/docs/concepts/policy/budgets) does — it is an admission-time gate, not a cumulative counter. Per-call consumption is recorded on each [ContextManifest](/docs/concepts/context/context-manifests) under `admission.decision` and `admission.transformations[]`; the FSM `status` on the ContextBudget reflects the most recent decision.
+
+## Endpoint
+
+```
+GET /v1/ks/context/budgets/{context_budget_id}
+```
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_...` — see [Authentication](/docs/api/using-the-api/authentication). |
+| Path parameter | `context_budget_id` — bare 26-character Crockford ULID. |
+| Errors | Native envelope — see [Errors](/docs/api/using-the-api/errors). |
+
+## Response — `200 OK`
+
+The body is the ContextBudget row.
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T5",
+  "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+  "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+  "active_token_limit": 32000,
+  "stable_token_limit": null,
+  "volatile_token_limit": null,
+  "tool_result_token_limit": 8000,
+  "artifact_byte_limit": 67108864,
+  "compaction_required_threshold": 0.85,
+  "offload_required_threshold": 4096,
+  "status": "ACTIVE",
+  "last_decision": "OFFLOAD_REQUIRED",
+  "last_decision_at": "2026-05-05T12:08:14Z",
+  "created_at": "2026-05-05T12:00:00Z",
+  "updated_at": "2026-05-05T12:08:14Z"
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | string | ContextBudget ID. |
+| `run_id` | string | The Run this ContextBudget governs. |
+| `tenant_id` | string | Owning Tenant. |
+| `active_token_limit` / `stable_token_limit` / `volatile_token_limit` / `tool_result_token_limit` / `artifact_byte_limit` | integer \| null | Limit per dimension. `null` indicates the dimension is unenforced. |
+| `compaction_required_threshold` | float \| null | Fraction of `active_token_limit` that triggers `COMPACT_REQUIRED`. |
+| `offload_required_threshold` | integer \| null | Per-segment inline byte threshold that triggers `OFFLOAD_REQUIRED`. |
+| `status` | string | One of the values in the [ContextBudget state machine](/docs/concepts/policy/context-budget-state-machine). The transient advisory states (`WARN`, `OFFLOAD_REQUIRED`, `COMPACT_REQUIRED`, `DEGRADE`) appear only briefly between admission and re-admission; reads typically observe `ACTIVE` or — once exhausted — `CLOSED`. |
+| `last_decision` | string \| null | The most recent admission decision under this ContextBudget. `null` until the first ModelCall has admitted. |
+| `last_decision_at` | string \| null | ISO-8601 timestamp of the most recent decision. |
+| `created_at` / `updated_at` | string | ISO-8601 timestamps. |
+
+## Reading admission history
+
+The ContextBudget itself shows the *current* state. The detailed history of admission decisions, transformations, and the manifests they produced lives on the [ContextManifest](/docs/concepts/context/context-manifests) records under the same Run:
+
+```bash
+# Pull manifests for the Run to see admission decisions in order
+curl "https://api.kovaserve.com/v1/ks/context/manifests?run_id=01J8X9Y2Z3K4M5N6P7Q8R9S0T1" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+```
+
+Each manifest carries `admission.decision`, `admission.transformations[]`, and `admission.timestamp` — the source of truth for what happened, when, and what changed. The [`ks.context.budget.*`](/docs/concepts/events/budget) event family streams the same transitions in real time.
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `200 OK` | The ContextBudget was found and returned. |
+| `400 Bad Request` | `context_budget_id` is not a valid 26-character Crockford ULID. Code: `invalid_request`. |
+| `401 Unauthorized` | Missing, malformed, or unresolved API key. |
+| `404 Not Found` | The ContextBudget does not exist in the caller's Tenant. Code: `context_budget_not_found`. |
+| `429 Too Many Requests` | Rate limit exceeded. Code: `rate_limited`. |
+
+## Examples
+
+```bash
+curl https://api.kovaserve.com/v1/ks/context/budgets/01J8X9Y2Z3K4M5N6P7Q8R9S0T5 \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+```
+
+```python
+from kovaserve import KovaClient
+
+kova = KovaClient(api_key="ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b")
+
+cb = kova.context_budgets.get("01J8X9Y2Z3K4M5N6P7Q8R9S0T5")
+
+print(
+    f"{cb.status}: active_limit={cb.active_token_limit} "
+    f"last_decision={cb.last_decision} at {cb.last_decision_at}"
+)
+
+if cb.status == "CLOSED":
+    raise SystemExit("ContextBudget is terminal; the Run can no longer admit ModelCalls.")
+```
+
+## See also
+
+- [`POST /v1/ks/context/budgets`](/docs/api/policy/context-budgets/create)
+- [Context budgets](/docs/concepts/policy/context-budgets) · [Context budget state machine](/docs/concepts/policy/context-budget-state-machine)
+- [Admission](/docs/concepts/policy/admission) — how decisions are produced
+- [Context manifests](/docs/concepts/context/context-manifests) — admission history per ModelCall
+- [Context budget events](/docs/concepts/events/budget) — `ks.context.budget.*` stream
+- [Budgets](/docs/concepts/policy/budgets) — the Run-level sibling
+- [Authentication](/docs/api/using-the-api/authentication) · [IDs](/docs/api/using-the-api/ids) · [Errors](/docs/api/using-the-api/errors)

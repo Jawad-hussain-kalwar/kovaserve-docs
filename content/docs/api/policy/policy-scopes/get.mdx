@@ -1,0 +1,111 @@
+---
+title: Get a PolicyScope
+description: GET /v1/ks/policies/{id} — fetch a PolicyScope with its model ACLs, rate limits, share-scope, data boundary, restrictions, and tool policy enrichment.
+---
+
+`GET /v1/ks/policies/{id}` returns a single [PolicyScope](/docs/concepts/policy/policy-scopes) — the normalized governance binding that resolves on every Run. The response is the source-of-truth row, not a resolved view: more-specific layers (Project, Environment, Deployment) overlay this scope at admission time, and only the *frozen* per-Run resolution is recorded on the Run.
+
+The PolicyScope is resolved against the API key's Tenant. Cross-tenant fetches return `404 Not Found` — the same response as a genuinely missing scope — so the surface leaks no information about scopes the caller cannot see.
+
+## Endpoint
+
+```
+GET /v1/ks/policies/{policy_scope_id}
+```
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_...` — see [Authentication](/docs/api/using-the-api/authentication). |
+| Path parameter | `policy_scope_id` — bare 26-character Crockford ULID. |
+| Errors | Native envelope — see [Errors](/docs/api/using-the-api/errors). |
+
+## Response — `200 OK`
+
+The body is the PolicyScope row in the same shape as [`POST /v1/ks/policies`](/docs/api/policy/policy-scopes/create).
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9S0P0",
+  "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+  "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+  "name": "production",
+  "model_acl": ["qwen3-coder-30b", "qwen3-coder-7b"],
+  "rate_limits": {
+    "requests_per_second": 50,
+    "tokens_per_second": 1000000
+  },
+  "context_share_scope": "project",
+  "data_boundary": "tenant_local",
+  "tool_policy_ref": "01J8X9Y2Z3K4M5N6P7Q8R9TP01",
+  "deployment_restrictions": ["dep-prod-eu-west"],
+  "environment_restrictions": ["prod"],
+  "degraded_mode_policy": "warn",
+  "created_at": "2026-05-05T12:00:00Z",
+  "updated_at": "2026-05-05T12:00:00Z"
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | string | PolicyScope ID. |
+| `tenant_id` | string | Owning Tenant. |
+| `project_id` | string \| null | Owning Project, or `null` for tenant-level scopes. |
+| `name` | string | Human-readable label, unique within `(tenant_id, project_id)`. |
+| `model_acl` | array of strings | Allowed model ids and families. |
+| `rate_limits` | object \| null | Per-second caps. See [Create a PolicyScope](/docs/api/policy/policy-scopes/create#rate-limit-shape) for the shape. |
+| `context_share_scope` | string | One of `none` / `project` / `tenant`. |
+| `data_boundary` | string | One of `tenant_local` / `region_local` / `unrestricted`. |
+| `tool_policy_ref` | string \| null | Tool policy id, or `null`. |
+| `deployment_restrictions` / `environment_restrictions` | array of strings | Empty array means unrestricted. |
+| `degraded_mode_policy` | string | One of `allow` / `warn` / `reject`. |
+| `created_at` / `updated_at` | string | ISO-8601 timestamps. |
+
+## Resolved scope vs source scope
+
+This endpoint returns the *source* PolicyScope row. The scope a Run actually executes under is the **resolved** scope — produced by overlaying Tenant → Project → Environment → Deployment → API key layers at admission time, then frozen on the Run. To inspect what a specific Run resolved to, fetch the Run and read `policy_scope_id`:
+
+```bash
+curl https://api.kovaserve.com/v1/ks/runs/01J8X9Y2Z3K4M5N6P7Q8R9S0T1 \
+  -H "Authorization: Bearer ks_..."
+```
+
+The Run's `policy_scope_id` is itself a stable PolicyScope — `GET /v1/ks/policies/{id}` on it returns the exact resolved scope as recorded at Run creation. Source-scope edits after that point do not retroactively apply.
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `200 OK` | The PolicyScope was found and returned. |
+| `400 Bad Request` | `policy_scope_id` is not a valid 26-character Crockford ULID. Code: `invalid_request`. |
+| `401 Unauthorized` | Missing, malformed, or unresolved API key. |
+| `404 Not Found` | The PolicyScope does not exist in the caller's Tenant. Code: `policy_scope_not_found`. |
+| `429 Too Many Requests` | Rate limit exceeded. Code: `rate_limited`. |
+
+## Examples
+
+```bash
+curl https://api.kovaserve.com/v1/ks/policies/01J8X9Y2Z3K4M5N6P7Q8R9S0P0 \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+```
+
+```python
+from kovaserve import KovaClient
+
+kova = KovaClient(api_key="ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b")
+
+scope = kova.policy_scopes.get("01J8X9Y2Z3K4M5N6P7Q8R9S0P0")
+
+print(f"{scope.name}: share={scope.context_share_scope} boundary={scope.data_boundary}")
+print(f"  models: {scope.model_acl}")
+if scope.degraded_mode_policy == "reject":
+    print("  DEGRADE admission decisions are rejected as HARD_STOP under this scope.")
+```
+
+## See also
+
+- [`POST /v1/ks/policies`](/docs/api/policy/policy-scopes/create) · [`GET /v1/ks/policies`](/docs/api/policy/policy-scopes/list)
+- [Policy scopes](/docs/concepts/policy/policy-scopes) — overlay rules and frozen-on-Run semantics
+- [Tenancy](/docs/concepts/tenancy) — Tenant → Project → Environment → Deployment
+- [Get a Run](/docs/api/runs/get) — surfaces `policy_scope_id` of the resolved scope
+- [Manifest-aware routing](/docs/concepts/routing/manifest-aware-routing) — the consumer of `context_share_scope`
+- [Authentication](/docs/api/using-the-api/authentication) · [IDs](/docs/api/using-the-api/ids) · [Errors](/docs/api/using-the-api/errors)

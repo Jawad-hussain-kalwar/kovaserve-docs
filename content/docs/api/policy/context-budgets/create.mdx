@@ -1,0 +1,177 @@
+---
+title: Create a ContextBudget
+description: POST /v1/ks/context/budgets — create a per-Run admission control object that bounds active context size and produces an explicit decision on every assembled ContextManifest.
+---
+
+`POST /v1/ks/context/budgets` creates a [ContextBudget](/docs/concepts/policy/context-budgets) and binds it to an existing [Run](/docs/concepts/run-hierarchy/runs). The ContextBudget is the **per-ModelCall admission gate** — it evaluates against every assembled [ContextManifest](/docs/concepts/context/context-manifests) **before** GPU dispatch and emits one of six decisions: `ALLOW`, `WARN`, `OFFLOAD_REQUIRED`, `COMPACT_REQUIRED`, `DEGRADE`, or `HARD_STOP`. Five of those six are transient advisories — the runtime applies the indicated transformation and the manifest is re-admitted.
+
+A Run carries at most one ContextBudget. The companion path is **implicit creation** — a Run created with `context_budget` in its [`POST /v1/ks/runs`](/docs/api/runs/create) body materializes its ContextBudget alongside the Run. This endpoint exists for the case where the runtime wants to attach a ContextBudget to an already-created Run, or to configure dimensions outside the Run-creation flow.
+
+ContextBudget complements the Run-level [Budget](/docs/concepts/policy/budgets): Budget governs cost, tokens, steps, time, and tool calls **across the whole Run**; ContextBudget governs the **active prompt itself** on each model call. Both must clear for a ModelCall to dispatch.
+
+## Endpoint
+
+```
+POST /v1/ks/context/budgets
+```
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_...` — see [Authentication](/docs/api/using-the-api/authentication). |
+| Content type | `application/json`. |
+| Idempotent | Yes, when `Idempotency-Key` is supplied — see [Idempotency](/docs/api/using-the-api/idempotency). |
+| Errors | Native envelope — see [Errors](/docs/api/using-the-api/errors). |
+
+## Request body
+
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `run_id` | string | yes | Bare 26-character Crockford ULID of the Run the ContextBudget binds to. The Run must be visible to the API key's Tenant and must not be in a terminal state. |
+| `active_token_limit` | integer \| null | no | Cap on `token_counts.active_tokens` on the assembled manifest. Crossing this cap drives `HARD_STOP`. `null` means unenforced. Must be `> 0` when set. |
+| `stable_token_limit` | integer \| null | no | Cap on `token_counts.stable_tokens` (tools, system, history-prefix, summary tiers). Useful when stable context is allowed to grow large but volatile context must stay tight. |
+| `volatile_token_limit` | integer \| null | no | Cap on `token_counts.volatile_tokens` (turn deltas, just-in-time content). |
+| `tool_result_token_limit` | integer \| null | no | Cap on the sum of tokens across `tool_output` segments. Crossing this cap typically drives `OFFLOAD_REQUIRED` for the offending segment. |
+| `artifact_byte_limit` | integer \| null | no | Cap on the bytes referenced as offloaded [artifacts](/docs/concepts/context/context-artifacts) on the manifest. Crossing this cap drives `HARD_STOP`. |
+| `compaction_required_threshold` | float \| null | no | Fraction `(0, 1)` of `active_token_limit` that triggers `COMPACT_REQUIRED` when reached. Typical value `0.85`. `null` disables the trigger. |
+| `offload_required_threshold` | integer \| null | no | Per-segment inline byte threshold that triggers `OFFLOAD_REQUIRED` for any segment whose `byte_count` exceeds it. Typical value `4096`. `null` disables the trigger. |
+
+At least one limit dimension must be configured — a ContextBudget with every limit `null` is rejected as `400 invalid_request`. Unknown top-level fields return `400 invalid_request` with `details.field_errors`.
+
+### Example
+
+```json
+{
+  "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+  "active_token_limit": 32000,
+  "tool_result_token_limit": 8000,
+  "artifact_byte_limit": 67108864,
+  "compaction_required_threshold": 0.85,
+  "offload_required_threshold": 4096
+}
+```
+
+## Response — `201 Created`
+
+The body is the new ContextBudget row.
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T5",
+  "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+  "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+  "active_token_limit": 32000,
+  "stable_token_limit": null,
+  "volatile_token_limit": null,
+  "tool_result_token_limit": 8000,
+  "artifact_byte_limit": 67108864,
+  "compaction_required_threshold": 0.85,
+  "offload_required_threshold": 4096,
+  "status": "ACTIVE",
+  "created_at": "2026-05-05T12:00:00Z",
+  "updated_at": "2026-05-05T12:00:00Z"
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | string | ContextBudget ID — bare 26-character Crockford ULID. |
+| `run_id` | string | The Run this ContextBudget governs. Immutable. |
+| `tenant_id` | string | Owning Tenant. |
+| `active_token_limit` / `stable_token_limit` / `volatile_token_limit` / `tool_result_token_limit` / `artifact_byte_limit` | integer \| null | Echo of the request limit fields. |
+| `compaction_required_threshold` / `offload_required_threshold` | float \| integer \| null | Trigger thresholds. |
+| `status` | string | One of the values in the [ContextBudget state machine](/docs/concepts/policy/context-budget-state-machine). New ContextBudgets return in `ACTIVE`. |
+| `created_at` / `updated_at` | string | ISO-8601 timestamps. |
+
+### Headers
+
+```http
+HTTP/1.1 201 Created
+Content-Type: application/json
+X-Request-Id:           01J8X9Y2Z3K4M5N6P7Q8R9S0XX
+X-KS-Context-Budget-Id: 01J8X9Y2Z3K4M5N6P7Q8R9S0T5
+```
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `201 Created` | The ContextBudget was created in `ACTIVE` and is enforced on the next ModelCall against the Run. |
+| `400 Bad Request` | Malformed JSON, unknown fields, malformed `run_id`, no dimensions configured, a limit `<= 0`, a threshold outside its valid range. Code: `invalid_request`. |
+| `401 Unauthorized` | Missing, malformed, or unresolved API key. |
+| `404 Not Found` | The supplied `run_id` does not resolve in the caller's Tenant. Code: `run_not_found`. |
+| `409 Conflict` | The Run is in a terminal state (`run_not_runnable`), a ContextBudget already exists for the Run (`context_budget_already_exists`), or `Idempotency-Key` was reused with a different request body. |
+| `429 Too Many Requests` | Rate limit exceeded. Code: `rate_limited`. |
+
+## Decision precedence
+
+Once a ContextBudget exists, the Context Admission Service runs every assembled manifest through these checks. The highest-precedence condition wins:
+
+```
+HARD_STOP        ← any limit dimension exhausted
+OFFLOAD_REQUIRED ← any segment.byte_count > offload_required_threshold
+COMPACT_REQUIRED ← active_token_ratio ≥ compaction_required_threshold
+DEGRADE          ← degrade-eligible AND no other transformation viable
+WARN             ← any limit ≥ 0.7 ratio (default warn threshold)
+ALLOW            ← otherwise
+```
+
+`OFFLOAD_REQUIRED`, `COMPACT_REQUIRED`, and `DEGRADE` are transient advisories. The runtime applies the indicated transformation and the admission service re-admits the resulting manifest. The chain is capped (typical default: three rounds); an unresolvable chain falls through to `HARD_STOP`. See [Admission](/docs/concepts/policy/admission) for the full evaluation flow, including `POST /v1/ks/context/admit` for preflight admission without dispatching a ModelCall.
+
+## Examples
+
+```bash
+# Tight per-call window with offload/compaction triggers
+curl -X POST https://api.kovaserve.com/v1/ks/context/budgets \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    "active_token_limit": 32000,
+    "tool_result_token_limit": 8000,
+    "artifact_byte_limit": 67108864,
+    "compaction_required_threshold": 0.85,
+    "offload_required_threshold": 4096
+  }'
+
+# Larger window for a document-heavy review workload, with idempotency
+curl -X POST https://api.kovaserve.com/v1/ks/context/budgets \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: 6c1f8a30-9b22-4f0e-9d6c-12c4f0a1b2c3" \
+  -d '{
+    "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    "active_token_limit": 128000,
+    "stable_token_limit": 96000,
+    "volatile_token_limit": 24000,
+    "compaction_required_threshold": 0.9,
+    "offload_required_threshold": 16384
+  }'
+```
+
+```python
+from kovaserve import KovaClient
+
+kova = KovaClient(api_key="ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b")
+
+cb = kova.context_budgets.create(
+    run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    active_token_limit=32_000,
+    tool_result_token_limit=8_000,
+    artifact_byte_limit=64 * 1024 * 1024,
+    compaction_required_threshold=0.85,
+    offload_required_threshold=4096,
+)
+
+print(f"ContextBudget {cb.id} bound to Run {cb.run_id}; status={cb.status}")
+```
+
+## See also
+
+- [`GET /v1/ks/context/budgets/{id}`](/docs/api/policy/context-budgets/get)
+- [Context budgets](/docs/concepts/policy/context-budgets) · [Context budget state machine](/docs/concepts/policy/context-budget-state-machine)
+- [Admission](/docs/concepts/policy/admission) — the evaluator
+- [Context manifests](/docs/concepts/context/context-manifests) — what admission scores
+- [Compaction records](/docs/concepts/context/compaction-records) — produced under `COMPACT_REQUIRED`
+- [Context artifacts](/docs/concepts/context/context-artifacts) — produced under `OFFLOAD_REQUIRED`
+- [Budgets](/docs/concepts/policy/budgets) — the Run-level sibling
+- [Authentication](/docs/api/using-the-api/authentication) · [Idempotency](/docs/api/using-the-api/idempotency) · [Errors](/docs/api/using-the-api/errors)

@@ -1,0 +1,127 @@
+---
+title: Get a Budget
+description: GET /v1/ks/budgets/{id} — fetch a Run-level Budget with live consumption counters, current state, and configured thresholds.
+---
+
+`GET /v1/ks/budgets/{id}` returns a single [Budget](/docs/concepts/policy/budgets) with its current consumption counters, configured limits, thresholds, and lifecycle state. The returned counters are atomically consistent with the most recent admitted Step — there is no observable window where a Step has admitted but its counters are not yet visible on the Budget.
+
+The Budget is resolved against the API key's Tenant. Cross-tenant fetches return `404 Not Found` — the same response as a genuinely missing Budget — so the surface leaks no information about Budgets the caller cannot see.
+
+To watch a Budget continuously, prefer the [`ks.budget.*`](/docs/concepts/events/budget) event stream (`ks.budget.warning`, `ks.budget.forecast_updated`, `ks.budget.hard_stop`) over polling — every state transition and forecast update emits an event with the same identifiers and counters.
+
+## Endpoint
+
+```
+GET /v1/ks/budgets/{budget_id}
+```
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_...` — see [Authentication](/docs/api/using-the-api/authentication). |
+| Path parameter | `budget_id` — bare 26-character Crockford ULID. |
+| Errors | Native envelope — see [Errors](/docs/api/using-the-api/errors). |
+
+## Response — `200 OK`
+
+The body is the Budget row. Cost values are decimal strings with four fractional digits.
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T4",
+  "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+  "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+  "token_limit": 1000000,
+  "step_limit": 100,
+  "time_limit_seconds": 1800,
+  "tool_limit": 50,
+  "cost_limit_cents": "5000.0000",
+  "tokens_used": 412840,
+  "steps_used": 23,
+  "time_used_seconds": 612,
+  "tools_used": 7,
+  "cost_used_cents": "1240.4180",
+  "status": "WARNING",
+  "warning_threshold": 0.7,
+  "degraded_threshold": 0.9,
+  "created_at": "2026-05-05T12:00:00Z",
+  "updated_at": "2026-05-05T12:08:14Z"
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | string | Budget ID. |
+| `run_id` | string | The Run this Budget governs. |
+| `tenant_id` | string | Owning Tenant. |
+| `token_limit` / `step_limit` / `time_limit_seconds` / `tool_limit` | integer \| null | Limit per dimension. `null` indicates the dimension is unenforced. |
+| `cost_limit_cents` | string \| null | Decimal string with four fractional digits, or `null`. |
+| `tokens_used` / `steps_used` / `time_used_seconds` / `tools_used` | integer | Live consumption counters. Read-only. |
+| `cost_used_cents` | string | Live cost counter as a decimal string with four fractional digits. |
+| `status` | string | One of the values in the [Budget state machine](/docs/concepts/policy/budget-state-machine). |
+| `warning_threshold` / `degraded_threshold` | float | Configured thresholds. |
+| `created_at` / `updated_at` | string | ISO-8601 timestamps. `updated_at` advances on every consumption update. |
+
+## Computing remaining headroom
+
+The smallest fractional headroom across configured dimensions is the figure that drives the [Budget state machine](/docs/concepts/policy/budget-state-machine). Compute it client-side from the response:
+
+```python
+configured = [
+    ("tokens",        budget.token_limit,        budget.tokens_used),
+    ("steps",         budget.step_limit,         budget.steps_used),
+    ("time_seconds",  budget.time_limit_seconds, budget.time_used_seconds),
+    ("tools",         budget.tool_limit,         budget.tools_used),
+    ("cost_cents",    budget.cost_limit_cents,   budget.cost_used_cents),
+]
+worst = min(
+    (1.0 - float(used) / float(limit), name)
+    for name, limit, used in configured
+    if limit is not None
+)
+remaining_pct, driving_dim = worst
+```
+
+The same calculation drives admission and is reported on [`/v1/ks/runs/{id}`](/docs/api/runs/get) and the `X-KS-Budget-Remaining-Pct` response header on every inference call against the Run.
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `200 OK` | The Budget was found and returned. |
+| `400 Bad Request` | `budget_id` is not a valid 26-character Crockford ULID. Code: `invalid_request`. |
+| `401 Unauthorized` | Missing, malformed, or unresolved API key. |
+| `404 Not Found` | The Budget does not exist in the caller's Tenant. Code: `budget_not_found`. |
+| `429 Too Many Requests` | Rate limit exceeded. Code: `rate_limited`. |
+
+## Examples
+
+```bash
+curl https://api.kovaserve.com/v1/ks/budgets/01J8X9Y2Z3K4M5N6P7Q8R9S0T4 \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+```
+
+```python
+from kovaserve import KovaClient
+
+kova = KovaClient(api_key="ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b")
+
+budget = kova.budgets.get("01J8X9Y2Z3K4M5N6P7Q8R9S0T4")
+
+print(
+    f"{budget.status}: "
+    f"{budget.cost_used_cents}/{budget.cost_limit_cents} cents, "
+    f"{budget.steps_used}/{budget.step_limit} steps"
+)
+
+if budget.status == "HARD_STOP":
+    raise SystemExit("Budget exhausted; the Run can no longer admit Steps.")
+```
+
+## See also
+
+- [`POST /v1/ks/budgets`](/docs/api/policy/budgets/create) · [`GET /v1/ks/budgets`](/docs/api/policy/budgets/list)
+- [Budgets](/docs/concepts/policy/budgets) · [Budget state machine](/docs/concepts/policy/budget-state-machine)
+- [Budget events](/docs/concepts/events/budget) — `ks.budget.warning`, `ks.budget.forecast_updated`, `ks.budget.hard_stop`
+- [Get a Run](/docs/api/runs/get) — embeds the Budget summary inline
+- [Cost headers](/docs/api/using-the-api/cost-headers) — per-call budget headroom on inference responses
+- [Authentication](/docs/api/using-the-api/authentication) · [IDs](/docs/api/using-the-api/ids) · [Errors](/docs/api/using-the-api/errors)

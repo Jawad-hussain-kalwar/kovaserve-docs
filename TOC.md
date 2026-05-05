@@ -262,14 +262,14 @@ Living roadmap for `docs.kovaserve.com`. Source of structure for `content/docs/`
 
 ### Policy & Budgets
 
-- [ ] `api/policy/budgets/create.mdx`
-- [ ] `api/policy/budgets/get.mdx`
-- [ ] `api/policy/budgets/list.mdx`
-- [ ] `api/policy/context-budgets/create.mdx`
-- [ ] `api/policy/context-budgets/get.mdx`
-- [ ] `api/policy/policy-scopes/create.mdx`
-- [ ] `api/policy/policy-scopes/get.mdx`
-- [ ] `api/policy/policy-scopes/list.mdx`
+- [x] `api/policy/budgets/create.mdx`
+- [x] `api/policy/budgets/get.mdx`
+- [x] `api/policy/budgets/list.mdx`
+- [x] `api/policy/context-budgets/create.mdx`
+- [x] `api/policy/context-budgets/get.mdx`
+- [x] `api/policy/policy-scopes/create.mdx`
+- [x] `api/policy/policy-scopes/get.mdx`
+- [x] `api/policy/policy-scopes/list.mdx`
 
 ### Metering
 

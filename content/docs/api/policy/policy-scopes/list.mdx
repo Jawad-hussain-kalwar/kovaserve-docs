@@ -1,0 +1,151 @@
+---
+title: List PolicyScopes
+description: GET /v1/ks/policies — page through PolicyScopes with cursor pagination, filtered by Project, name, share-scope, data boundary, or environment.
+---
+
+`GET /v1/ks/policies` lists [PolicyScopes](/docs/concepts/policy/policy-scopes) the caller owns, newest first. The response uses cursor pagination — the same shape as every other list endpoint in the API. Filters narrow the result set to a single Project, name prefix, `context_share_scope`, `data_boundary`, or environment restriction.
+
+The list response carries the same shape as [`GET /v1/ks/policies/{id}`](/docs/api/policy/policy-scopes/get) for each entry, so admin dashboards can render a fleet view of governance bindings without N+1 reads.
+
+## Endpoint
+
+```
+GET /v1/ks/policies
+```
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_...` — see [Authentication](/docs/api/using-the-api/authentication). |
+| Pagination | Cursor — see [Pagination](/docs/api/using-the-api/pagination). |
+| Errors | Native envelope — see [Errors](/docs/api/using-the-api/errors). |
+
+## Query parameters
+
+| Parameter | Type | Default | Meaning |
+|---|---|---|---|
+| `limit` | integer | `100` | Maximum PolicyScopes to return. Capped at `200`. Values outside `1..200` return `400 invalid_request`. |
+| `after` | string \| null | `null` | Cursor — return PolicyScopes strictly after it in descending creation order. |
+| `before` | string \| null | `null` | Cursor — return PolicyScopes strictly before it. Mutually exclusive with `after`. |
+| `project_id` | string \| null | `null` | Restrict to one Project. Pass `"none"` (literal) to list tenant-level scopes only. |
+| `name_prefix` | string \| null | `null` | Restrict to scopes whose `name` starts with the prefix. Case-sensitive. |
+| `context_share_scope` | string \| null | `null` | Restrict to one of `none` / `project` / `tenant`. |
+| `data_boundary` | string \| null | `null` | Restrict to one of `tenant_local` / `region_local` / `unrestricted`. |
+| `environment` | string \| null | `null` | Restrict to scopes whose `environment_restrictions` contains the value, or whose list is empty (unrestricted scopes match every environment). |
+| `created_after` | string \| null | `null` | ISO-8601 timestamp — scopes with `created_at >= created_after`. |
+| `created_before` | string \| null | `null` | ISO-8601 timestamp — scopes with `created_at < created_before`. |
+
+The Tenant filter is implicit — PolicyScopes from other Tenants never appear, regardless of any query parameter combination.
+
+## Response — `200 OK`
+
+Each entry in `data` is a PolicyScope row in the same shape as [`GET /v1/ks/policies/{id}`](/docs/api/policy/policy-scopes/get).
+
+```json
+{
+  "data": [
+    {
+      "id": "01J8X9Y2Z3K4M5N6P7Q8R9S0P0",
+      "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+      "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+      "name": "production",
+      "model_acl": ["qwen3-coder-30b", "qwen3-coder-7b"],
+      "rate_limits": {
+        "requests_per_second": 50,
+        "tokens_per_second": 1000000
+      },
+      "context_share_scope": "project",
+      "data_boundary": "tenant_local",
+      "tool_policy_ref": "01J8X9Y2Z3K4M5N6P7Q8R9TP01",
+      "deployment_restrictions": ["dep-prod-eu-west"],
+      "environment_restrictions": ["prod"],
+      "degraded_mode_policy": "warn",
+      "created_at": "2026-05-05T12:00:00Z",
+      "updated_at": "2026-05-05T12:00:00Z"
+    },
+    {
+      "id": "01J8X9Y2Z3K4M5N6P7Q8R9S0PJ",
+      "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+      "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+      "name": "regulated-eu",
+      "model_acl": ["qwen3-coder-30b"],
+      "rate_limits": null,
+      "context_share_scope": "none",
+      "data_boundary": "region_local",
+      "tool_policy_ref": null,
+      "deployment_restrictions": ["dep-prod-eu-west"],
+      "environment_restrictions": ["prod"],
+      "degraded_mode_policy": "reject",
+      "created_at": "2026-05-04T18:42:00Z",
+      "updated_at": "2026-05-04T18:42:00Z"
+    }
+  ],
+  "page": {
+    "next_cursor": "01J8X9Y2Z3K4M5N6P7Q8R9S0PJ",
+    "prev_cursor": "01J8X9Y2Z3K4M5N6P7Q8R9S0P0",
+    "has_more": true,
+    "limit": 100
+  }
+}
+```
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `200 OK` | Returns a page of PolicyScopes. Empty `data` is valid. |
+| `400 Bad Request` | Both `before` and `after` supplied, `limit` outside `1..200`, an unrecognized `context_share_scope` / `data_boundary` value, or a malformed timestamp. Code: `invalid_request`. |
+| `401 Unauthorized` | Missing or invalid bearer token. |
+| `404 Not Found` | A scoping ID (`project_id`) does not resolve in the caller's Tenant. Code: `project_not_found`. |
+| `429 Too Many Requests` | Rate limit exceeded. Code: `rate_limited`. |
+
+## Examples
+
+```bash
+# Newest 50 scopes across the Tenant
+curl "https://api.kovaserve.com/v1/ks/policies?limit=50" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# All production-environment scopes
+curl "https://api.kovaserve.com/v1/ks/policies?environment=prod" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# Region-pinned scopes only — sovereign / regulated workloads
+curl "https://api.kovaserve.com/v1/ks/policies?data_boundary=region_local" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# Tenant-level scopes only (no project_id set)
+curl "https://api.kovaserve.com/v1/ks/policies?project_id=none" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+```
+
+```python
+from kovaserve import KovaClient
+
+kova = KovaClient(api_key="ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b")
+
+# Walk every scope in one Project
+cursor = None
+while True:
+    page = kova.policy_scopes.list(
+        project_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+        limit=100,
+        after=cursor,
+    )
+    for s in page.data:
+        print(f"{s.name:24}  share={s.context_share_scope:8} boundary={s.data_boundary}")
+    if not page.has_more:
+        break
+    cursor = page.next_cursor
+
+# Built-in iterator — auto-paginates
+for s in kova.policy_scopes.iter(environment="prod"):
+    if s.degraded_mode_policy == "reject":
+        print(f"strict scope: {s.id}  {s.name}")
+```
+
+## See also
+
+- [`POST /v1/ks/policies`](/docs/api/policy/policy-scopes/create) · [`GET /v1/ks/policies/{id}`](/docs/api/policy/policy-scopes/get)
+- [Policy scopes](/docs/concepts/policy/policy-scopes) — overlay resolution and frozen-on-Run semantics
+- [Tenancy](/docs/concepts/tenancy) — Tenant → Project → Environment → Deployment
+- [Pagination](/docs/api/using-the-api/pagination) · [IDs](/docs/api/using-the-api/ids) · [Errors](/docs/api/using-the-api/errors)

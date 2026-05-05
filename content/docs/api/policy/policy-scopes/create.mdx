@@ -1,0 +1,212 @@
+---
+title: Create a PolicyScope
+description: POST /v1/ks/policies — register a normalized governance binding with model ACLs, rate limits, share-scope, data boundary, and tool policy enrichment, resolved on every Run.
+---
+
+`POST /v1/ks/policies` creates a [PolicyScope](/docs/concepts/policy/policy-scopes) — the normalized governance binding that attaches to every [Run](/docs/concepts/run-hierarchy/runs), [ModelCall](/docs/concepts/run-hierarchy/model-calls), and [Checkpoint](/docs/concepts/recovery/checkpoints). A PolicyScope carries model ACLs, rate limits, share-scope rules, data boundary constraints, environment and deployment restrictions, and tool policy enrichment fields. Every request resolves to exactly one PolicyScope through the tenant hierarchy at admission time, and the scope is then *frozen* on the resolved Run.
+
+The companion path is **lazy resolution** — a Run created without an explicit `policy_scope_ref` resolves a minimal `(tenant, project)` scope on first use. This endpoint exists for the cases where governance must be defined explicitly: production deployments, regulated workloads, partner-packaged offerings, and shared-tenant configurations.
+
+## Endpoint
+
+```
+POST /v1/ks/policies
+```
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_...` — see [Authentication](/docs/api/using-the-api/authentication). |
+| Content type | `application/json`. |
+| Idempotent | Yes, when `Idempotency-Key` is supplied — see [Idempotency](/docs/api/using-the-api/idempotency). |
+| Errors | Native envelope — see [Errors](/docs/api/using-the-api/errors). |
+
+## Request body
+
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `name` | string | yes | Human-readable label for the scope, unique within `(tenant_id, project_id)`. Example: `"production"`, `"regulated-eu"`. Length `1..128`, characters `[A-Za-z0-9_.\-]`. |
+| `project_id` | string \| null | no | Owning Project. When omitted, the scope is created at Tenant level and applies as the default for any Project that does not override it. |
+| `model_acl` | array of strings | yes | Allowed model ids and families. Requests for models not on the list reject with `403 model_access_denied`. An empty array denies every model. |
+| `rate_limits` | object \| null | no | Per-tenant / project / environment rate limits. See [Rate limit shape](#rate-limit-shape). |
+| `context_share_scope` | string | yes | Cache and manifest reuse boundary: `none`, `project`, or `tenant`. See [`context_share_scope`](/docs/concepts/policy/policy-scopes#contextsharescope) for the reuse semantics. |
+| `data_boundary` | string | yes | Artifact and context residency constraint: `tenant_local`, `region_local`, or `unrestricted`. See [`data_boundary`](/docs/concepts/policy/policy-scopes#databoundary). |
+| `tool_policy_ref` | string \| null | no | Reference to a tool policy applied at admission. Bare 26-character Crockford ULID. The tool policy gates which tools the resolved scope may invoke. |
+| `deployment_restrictions` | array of strings | no | Deployment ids the scope may execute against. Empty array (default) means all deployments in scope. |
+| `environment_restrictions` | array of strings | no | Environment ids — typically `prod` / `staging` / `dev`. Empty array means all environments. |
+| `degraded_mode_policy` | string | no | Whether `DEGRADE` admission decisions are accepted: `allow` (silent), `warn` (events emitted on every degraded admission), or `reject` (treat as `HARD_STOP`). Defaults to `warn`. |
+
+Unknown top-level fields return `400 invalid_request` with `details.field_errors`.
+
+### Rate limit shape
+
+```json
+{
+  "requests_per_second": 50,
+  "tokens_per_second": 1000000
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `requests_per_second` | integer \| null | Cap on inbound HTTP requests per second under the resolved scope. `null` means unenforced. |
+| `tokens_per_second` | integer \| null | Cap on token throughput per second under the resolved scope. `null` means unenforced. |
+
+Per-second windows are enforced as sliding windows on the gateway. Crossing a cap returns `429 rate_limited` with the matching dimension on `details.dimension`.
+
+### Example
+
+```json
+{
+  "name": "production",
+  "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+  "model_acl": ["qwen3-coder-30b", "qwen3-coder-7b"],
+  "rate_limits": {
+    "requests_per_second": 50,
+    "tokens_per_second": 1000000
+  },
+  "context_share_scope": "project",
+  "data_boundary": "tenant_local",
+  "tool_policy_ref": "01J8X9Y2Z3K4M5N6P7Q8R9TP01",
+  "deployment_restrictions": ["dep-prod-eu-west"],
+  "environment_restrictions": ["prod"],
+  "degraded_mode_policy": "warn"
+}
+```
+
+## Response — `201 Created`
+
+The body is the new PolicyScope row.
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9S0P0",
+  "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+  "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+  "name": "production",
+  "model_acl": ["qwen3-coder-30b", "qwen3-coder-7b"],
+  "rate_limits": {
+    "requests_per_second": 50,
+    "tokens_per_second": 1000000
+  },
+  "context_share_scope": "project",
+  "data_boundary": "tenant_local",
+  "tool_policy_ref": "01J8X9Y2Z3K4M5N6P7Q8R9TP01",
+  "deployment_restrictions": ["dep-prod-eu-west"],
+  "environment_restrictions": ["prod"],
+  "degraded_mode_policy": "warn",
+  "created_at": "2026-05-05T12:00:00Z",
+  "updated_at": "2026-05-05T12:00:00Z"
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | string | PolicyScope ID — bare 26-character Crockford ULID. |
+| `tenant_id` | string | Owning Tenant, inherited from the API key. Immutable. |
+| `project_id` | string \| null | Owning Project, or `null` for tenant-level scopes. |
+| `name` | string | Echo of the request field. |
+| `model_acl` | array of strings | Allowed models. |
+| `rate_limits` | object \| null | Echo of the request field. |
+| `context_share_scope` | string | One of `none` / `project` / `tenant`. |
+| `data_boundary` | string | One of `tenant_local` / `region_local` / `unrestricted`. |
+| `tool_policy_ref` | string \| null | Tool policy id, or `null`. |
+| `deployment_restrictions` / `environment_restrictions` | array of strings | Echo of the request fields. |
+| `degraded_mode_policy` | string | One of `allow` / `warn` / `reject`. |
+| `created_at` / `updated_at` | string | ISO-8601 timestamps. |
+
+### Headers
+
+```http
+HTTP/1.1 201 Created
+Content-Type: application/json
+X-Request-Id:         01J8X9Y2Z3K4M5N6P7Q8R9S0XX
+X-KS-Policy-Scope-Id: 01J8X9Y2Z3K4M5N6P7Q8R9S0P0
+```
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `201 Created` | The PolicyScope was created and is immediately resolvable on subsequent Run admission. |
+| `400 Bad Request` | Malformed JSON, unknown fields, invalid `name` characters, invalid `context_share_scope` / `data_boundary` / `degraded_mode_policy` enum, or a malformed `tool_policy_ref`. Code: `invalid_request`. |
+| `401 Unauthorized` | Missing, malformed, or unresolved API key. |
+| `403 Forbidden` | The API key's resolved scope does not permit creating a scope at the requested level (e.g., a project-bound key cannot create tenant-level scopes). Code: `forbidden`. |
+| `404 Not Found` | The supplied `project_id` or `tool_policy_ref` does not resolve in the caller's Tenant. Codes: `project_not_found`, `tool_policy_not_found`. |
+| `409 Conflict` | A PolicyScope with the same `(tenant_id, project_id, name)` already exists, or the supplied `Idempotency-Key` was reused with a different request body. Codes: `policy_scope_already_exists`, `idempotency_conflict`. |
+| `422 Unprocessable Entity` | The body parsed but failed schema validation. |
+| `429 Too Many Requests` | Rate limit exceeded. Code: `rate_limited`. |
+
+## Resolution semantics
+
+A scope created here participates in tenant-hierarchy resolution at admission time. More-specific layers (Project, Environment, Deployment) **narrow** the inherited scope — they can never widen it. A Project-level scope that lists `qwen3-coder-30b` in `model_acl` while the Tenant-level scope omits it has no effect; the Tenant exclusion wins.
+
+The resolved scope is recorded on the Run as `policy_scope_id` and is *frozen* — later edits to the source PolicyScope do not retroactively apply to live Runs. Edits affect newly admitted Runs only.
+
+## Examples
+
+```bash
+# Production scope at the Project level
+curl -X POST https://api.kovaserve.com/v1/ks/policies \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "production",
+    "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+    "model_acl": ["qwen3-coder-30b"],
+    "rate_limits": { "requests_per_second": 50, "tokens_per_second": 1000000 },
+    "context_share_scope": "project",
+    "data_boundary": "tenant_local",
+    "degraded_mode_policy": "warn"
+  }'
+
+# Sovereign workload — region-pinned, deployment-restricted, no degrade
+curl -X POST https://api.kovaserve.com/v1/ks/policies \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: 6c1f8a30-9b22-4f0e-9d6c-12c4f0a1b2c3" \
+  -d '{
+    "name": "regulated-eu",
+    "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+    "model_acl": ["qwen3-coder-30b"],
+    "context_share_scope": "none",
+    "data_boundary": "region_local",
+    "deployment_restrictions": ["dep-prod-eu-west"],
+    "environment_restrictions": ["prod"],
+    "degraded_mode_policy": "reject"
+  }'
+```
+
+```python
+from kovaserve import KovaClient
+
+kova = KovaClient(api_key="ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b")
+
+scope = kova.policy_scopes.create(
+    name="production",
+    project_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+    model_acl=["qwen3-coder-30b", "qwen3-coder-7b"],
+    rate_limits={"requests_per_second": 50, "tokens_per_second": 1_000_000},
+    context_share_scope="project",
+    data_boundary="tenant_local",
+    tool_policy_ref="01J8X9Y2Z3K4M5N6P7Q8R9TP01",
+    environment_restrictions=["prod"],
+    degraded_mode_policy="warn",
+)
+
+# Bind a new Run to the scope by reference
+run = kova.runs.create(
+    project_id=scope.project_id,
+    model="qwen3-coder-30b",
+    policy_scope_ref=scope.id,
+)
+```
+
+## See also
+
+- [`GET /v1/ks/policies/{id}`](/docs/api/policy/policy-scopes/get) · [`GET /v1/ks/policies`](/docs/api/policy/policy-scopes/list)
+- [Policy scopes](/docs/concepts/policy/policy-scopes) — what a scope binds and how it resolves
+- [Tenancy](/docs/concepts/tenancy) — Tenant → Project → Environment → Deployment
+- [Manifest-aware routing](/docs/concepts/routing/manifest-aware-routing) — the consumer of `context_share_scope`
+- [Context artifacts](/docs/concepts/context/context-artifacts) — the consumer of `data_boundary`
+- [Budgets](/docs/concepts/policy/budgets) · [Context budgets](/docs/concepts/policy/context-budgets) — the resource controls layered alongside policy
+- [Authentication](/docs/api/using-the-api/authentication) · [Idempotency](/docs/api/using-the-api/idempotency) · [Errors](/docs/api/using-the-api/errors)
