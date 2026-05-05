@@ -1,0 +1,286 @@
+---
+title: Routing plan
+description: POST /v1/ks/routing/plan — compute the Cache-Aware Router's placement plan for a given identity or manifest, or apply an operator override.
+---
+
+`POST /v1/ks/routing/plan` returns the placement decision the [Cache-Aware Router](/docs/concepts/routing/manifest-aware-routing) would make for a given request — a selected replica, ordered fallbacks, and a rationale payload. It runs the same scoring path the gateway uses on the hot path, in inspect-only mode. Operators use it to predict where a request would land, debug surprising routing decisions, and validate that scope filters and placement hints are taking effect.
+
+The endpoint also accepts an **operator override**. Supplying `force_node_id` and a `reason` causes the router to dispatch the next matching admission to the named node, recording an `ks.route.override_applied` event. Overrides are evacuation, canarying, and load-shedding tools — they bypass scoring but never bypass scope, model, or compatibility hard filters.
+
+## Endpoint
+
+```
+POST /v1/ks/routing/plan
+```
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_...` — see [Authentication](/docs/api/using-the-api/authentication). Cluster surfaces require an operator-scoped key; tenant-scoped keys receive `403 Forbidden`. Overrides require an operator key with the `routing:override` capability. |
+| Content-Type | `application/json` |
+| Errors | Native envelope — see [Errors](/docs/api/using-the-api/errors). |
+
+## Modes
+
+| Mode | Triggered by | Behavior |
+|---|---|---|
+| Inspect | `context_manifest_id` or `stable_context_id` or `stable_prefix_id` set; no `force_node_id` | Computes a plan against the current fleet and KV Index state and returns it. Emits `ks.route.planned` with `mode = "inspect"`. |
+| Override | `force_node_id` and `reason` set | Pins the next admission for the named identity to `force_node_id`. Emits `ks.route.override_applied`. |
+
+The two modes are mutually exclusive — supplying `force_node_id` alongside an inspect-only call produces `400 Bad Request` with code `invalid_request`.
+
+## Request body — inspect mode
+
+```json
+{
+  "context_manifest_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T6",
+  "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+  "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+  "policy_scope_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T3",
+  "placement_hint": {
+    "preferred_node_id": "01J8X9Y2Z3K4M5N6P7Q8R9N002",
+    "affinity": "soft"
+  }
+}
+```
+
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `context_manifest_id` | string | one of | Resolves the manifest and uses its `stable_context_id`, breakpoint digests, model, tokenizer, and renderer for scoring. The richest input. |
+| `stable_context_id` | string | one of | Manifest-tier identity. Used directly when no manifest row is available. |
+| `stable_prefix_id` | string | one of | Prefix-tier identity. Scores against the prefix lookup only — manifest-tier reuse weights collapse to zero. |
+| `run_id` | string | no | When set, the router applies Run-level [Budget](/docs/concepts/policy/budgets) pressure and Session affinity (if the Run is bound). |
+| `session_id` | string | no | When set, the router applies [Session](/docs/concepts/continuity/sessions) affinity. Ignored when `run_id` already implies a Session. |
+| `policy_scope_id` | string | no | When set, overrides the PolicyScope inferred from the bearer key. Operator-only. |
+| `placement_hint` | object | no | Runtime-supplied preference. See [Placement hints](/docs/concepts/routing/placement-hints) for the wire shape. |
+
+At least one of `context_manifest_id`, `stable_context_id`, or `stable_prefix_id` is required. Supplying `context_manifest_id` is preferred — it gives the router every signal a real dispatch would have.
+
+## Request body — override mode
+
+```json
+{
+  "context_manifest_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T6",
+  "force_node_id": "01J8X9Y2Z3K4M5N6P7Q8R9N005",
+  "reason": "evacuating node 002 for maintenance",
+  "ttl_seconds": 600
+}
+```
+
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `force_node_id` | string | yes | The replica to dispatch onto. Must be `SERVING` and pass model, tokenizer, renderer, and scope hard filters; otherwise the override is rejected with `409 Conflict` and code `route_override_infeasible`. |
+| `reason` | string | yes | Free-form explanation. Recorded on the `ks.route.override_applied` event and surfaced on dashboards. |
+| `ttl_seconds` | integer | no | How long the override remains in effect. Defaults to 300 seconds. The override automatically expires when no admission matches within the window. |
+
+## Response — `200 OK`
+
+```json
+{
+  "mode": "inspect",
+  "plan_id": "01J8X9Y2Z3K4M5N6P7Q8R9P010",
+  "selected": {
+    "node_id": "01J8X9Y2Z3K4M5N6P7Q8R9N002",
+    "replica_id": "01J8X9Y2Z3K4M5N6P7Q8R9R007",
+    "warmness": "warm",
+    "kv_match": "exact",
+    "expected_prefill_savings_tokens": 1840,
+    "score": 0.873421
+  },
+  "fallbacks": [
+    {
+      "node_id": "01J8X9Y2Z3K4M5N6P7Q8R9N003",
+      "replica_id": "01J8X9Y2Z3K4M5N6P7Q8R9R009",
+      "warmness": "cool",
+      "kv_match": "exact",
+      "expected_prefill_savings_tokens": 1840,
+      "score": 0.612008
+    },
+    {
+      "node_id": "01J8X9Y2Z3K4M5N6P7Q8R9N004",
+      "replica_id": "01J8X9Y2Z3K4M5N6P7Q8R9R012",
+      "warmness": "cold",
+      "kv_match": "none",
+      "expected_prefill_savings_tokens": 0,
+      "score": 0.184220
+    }
+  ],
+  "scores": [
+    {
+      "node_id": "01J8X9Y2Z3K4M5N6P7Q8R9N002",
+      "cache_hit_score": 0.951,
+      "manifest_reuse_score": 0.882,
+      "rehydrate_cost": 0.000,
+      "queue_cost": 0.142,
+      "isolation_penalty": 0.000,
+      "placement_hint_bonus": 0.050,
+      "session_affinity_bonus": 0.000,
+      "context_budget_pressure": 0.000,
+      "total_score": 0.873421,
+      "cache_tier": "HBM"
+    }
+  ],
+  "rationale": {
+    "manifest_reuse_estimate": "high",
+    "restore_cost_tokens": 0,
+    "scope_filter_applied": "project",
+    "queue_depth": 2,
+    "rejected_candidates": 4,
+    "reason": "01J8X9Y2Z3K4M5N6P7Q8R9N002 selected: manifest match in HBM, queue idle"
+  },
+  "resume_feasible": true,
+  "evaluated_at": "2026-05-05T12:00:00Z"
+}
+```
+
+### Top-level fields
+
+| Field | Type | Meaning |
+|---|---|---|
+| `mode` | string | `inspect` or `override`. |
+| `plan_id` | string | Stable identifier for this plan. Joinable on `ks.route.planned`, `ks.route.selected`, and `ks.route.fallback_used` events. |
+| `selected` | object | The chosen route. |
+| `fallbacks[]` | array | Ordered backup routes. The substrate falls through this list when the selected node rejects, times out, or the dispatch otherwise fails. |
+| `scores[]` | array | Per-candidate scoring breakdown — every node that passed hard filters appears here, sorted by `total_score` descending. |
+| `rationale` | object | Operator-readable explanation. |
+| `resume_feasible` | boolean | `true` when a referenced [Checkpoint](/docs/concepts/recovery/checkpoints)'s `kv_prefix` [StateHandle](/docs/concepts/recovery/state-handles) is restorable at the selected placement. `false` when no checkpoint is referenced or restore is unavailable. |
+| `evaluated_at` | string | ISO-8601 timestamp of the index read. |
+
+### `selected` and `fallbacks[]` fields
+
+| Field | Type | Meaning |
+|---|---|---|
+| `node_id` | string | Substrate node ID. Joinable on [`/v1/ks/nodes`](/docs/api/cluster/nodes). |
+| `replica_id` | string | The substrate replica within the node. |
+| `warmness` | string | `hot` (HBM), `warm` (RAM), `cool` (NVMe), `cold` (no relevant KV), or `partial` (some breakpoints match). |
+| `kv_match` | string | `exact`, `tokenizer_mismatch`, `renderer_mismatch`, or `none`. Only `exact` is restorable. |
+| `expected_prefill_savings_tokens` | integer | Prefill tokens the router expects to reuse if this placement is selected. |
+| `score` | number | Final weighted score. Higher is better. |
+
+### `scores[]` entry fields
+
+| Field | Type | Meaning |
+|---|---|---|
+| `cache_hit_score` | number | Prefix-tier reuse weight, on `[0.0, 1.0]`. |
+| `manifest_reuse_score` | number | Manifest-tier reuse weight across the four breakpoint digests. |
+| `rehydrate_cost` | number | Cost of promoting the residency to HBM. `0.0` when already in HBM. |
+| `queue_cost` | number | Combined queue-depth, GPU-utilization, and KV-occupancy cost on `[0.0, 1.0]`. |
+| `isolation_penalty` | number | Penalty applied when colocating violates isolation preferences. |
+| `placement_hint_bonus` | number | Bonus applied when the runtime-supplied [placement hint](/docs/concepts/routing/placement-hints) matches. |
+| `session_affinity_bonus` | number | Bonus applied when the candidate is the Session's most recently used replica. |
+| `context_budget_pressure` | number | Bonus applied to cache-reuse weight when the [ContextBudget](/docs/concepts/policy/context-budgets) is in `DEGRADE`. |
+| `total_score` | number | Weighted sum used for ranking. |
+| `cache_tier` | string \| null | Storage tier of any matching residency, when present. |
+
+### `rationale` fields
+
+| Field | Type | Meaning |
+|---|---|---|
+| `manifest_reuse_estimate` | string | `high`, `medium`, `low`, or `none`. Bucketed reuse classification surfaced on dashboards. |
+| `restore_cost_tokens` | integer | Tokens that would need to be re-prefilled at the selected placement. |
+| `scope_filter_applied` | string | The effective `context_share_scope`. |
+| `queue_depth` | integer | Selected node's queue depth at evaluation time. |
+| `rejected_candidates` | integer | Replicas excluded by hard filters (model, tokenizer, renderer, scope, data boundary). |
+| `reason` | string | Short human-readable summary. Stable across patches in shape but not in wording — log it, do not branch on it. |
+
+### Override-mode response differences
+
+When `mode = "override"`, the response carries:
+
+- `selected.node_id` set to `force_node_id`
+- `fallbacks[]` empty
+- `scores[]` containing the would-have-been computed plan, for after-the-fact comparison
+- `rationale.reason` echoing the operator-supplied `reason`
+- An additional `override` block: `{ "applied_at": "...", "expires_at": "...", "ttl_seconds": N }`
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `200 OK` | Plan computed (inspect) or override accepted. |
+| `400 Bad Request` | Body did not include any of `context_manifest_id`, `stable_context_id`, `stable_prefix_id`; or override mode lacked `reason`; or both modes were combined. Codes: `invalid_request`, `missing_parameter`. |
+| `401 Unauthorized` | Missing or invalid bearer token. |
+| `403 Forbidden` | Bearer key lacks operator scope, or override was attempted without `routing:override`. |
+| `404 Not Found` | `context_manifest_id` does not resolve, or override `force_node_id` is not registered. Codes: `not_found_error`, `node_not_found`. |
+| `409 Conflict` | Override target failed a hard filter — model mismatch, tokenizer mismatch, scope mismatch, or `NOT_SERVING`. Code: `route_override_infeasible`. The body's `details` carries the reason. |
+| `503 Service Unavailable` | The Cache-Aware Router or KV Index is temporarily unreachable. Codes: `router_unavailable`, `kv_index_unavailable`. Retry with backoff. |
+
+## Examples
+
+### Inspect a plan for a manifest
+
+```bash
+curl https://api.kovaserve.com/v1/ks/routing/plan \
+  -H "Authorization: Bearer ks_admin_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "context_manifest_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T6",
+    "run_id":              "01J8X9Y2Z3K4M5N6P7Q8R9S0T1"
+  }'
+```
+
+```python
+from kovaserve import KovaControlClient
+
+ctl = KovaControlClient(api_key="ks_admin_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b")
+
+plan = ctl.cluster.routing.plan(
+    context_manifest_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T6",
+    run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+)
+
+print(f"selected: {plan.selected.node_id} ({plan.selected.warmness})")
+print(f"reason: {plan.rationale.reason}")
+for fb in plan.fallbacks:
+    print(f"  fallback: {fb.node_id} ({fb.warmness})")
+```
+
+### Apply an evacuation override
+
+```bash
+curl https://api.kovaserve.com/v1/ks/routing/plan \
+  -H "Authorization: Bearer ks_admin_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "context_manifest_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T6",
+    "force_node_id":       "01J8X9Y2Z3K4M5N6P7Q8R9N005",
+    "reason":              "evacuating node 002 for maintenance",
+    "ttl_seconds":         600
+  }'
+```
+
+```python
+override = ctl.cluster.routing.plan(
+    context_manifest_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T6",
+    force_node_id="01J8X9Y2Z3K4M5N6P7Q8R9N005",
+    reason="evacuating node 002 for maintenance",
+    ttl_seconds=600,
+)
+
+print(f"override active until {override.override.expires_at}")
+print(f"would have selected {override.scores[0].node_id} (score {override.scores[0].total_score})")
+```
+
+### Diff inspect vs. live dispatch
+
+```python
+plan = ctl.cluster.routing.plan(context_manifest_id=manifest_id)
+
+# Some time later — the actual ks.route.selected event for the same manifest
+event = ctl.events.get(plan_id=plan.plan_id, event_type="ks.route.selected")
+
+if plan.selected.node_id != event.payload["node_id"]:
+    print(
+        f"plan diverged from live dispatch: "
+        f"planned={plan.selected.node_id}, dispatched={event.payload['node_id']}"
+    )
+```
+
+## See also
+
+- [Manifest-aware routing](/docs/concepts/routing/manifest-aware-routing) — what every score in `scores[]` means
+- [Cache lookup](/docs/api/cluster/cache-lookup) — the lookup the router consults
+- [Cluster nodes](/docs/api/cluster/nodes) — joining `node_id` to fleet status
+- [Placement hints](/docs/concepts/routing/placement-hints) — runtime-supplied preferences
+- [Routing events](/docs/concepts/events/routing) — `ks.route.planned`, `ks.route.selected`, `ks.route.fallback_used`, `ks.route.override_applied`
+- [Context manifests](/docs/concepts/context/context-manifests) — the source of `stable_context_id` and breakpoint digests
+- [Resume flow](/docs/concepts/recovery/resume-flow) — the consumer of `resume_feasible`

@@ -1,0 +1,178 @@
+---
+title: Cluster nodes
+description: GET /v1/ks/nodes and GET /v1/ks/nodes/{node_id} — list registered substrate nodes and inspect per-node status, GPU pressure, queue depth, and KV cache occupancy.
+---
+
+The Nodes surface exposes the substrate fleet that KovaServe routes against. Each entry is a registered node — an inference replica running the open execution substrate with a [Node Agent](/docs/concepts/runtime/workers) attached. The list endpoint returns every node the control plane currently tracks; the detail endpoint returns one node with the same field set. Both are the canonical input for operator dashboards, capacity planning, and node-health automation.
+
+Nodes are discovered from the deployment topology. The control plane polls each node's health and metrics on a fixed cadence; both endpoints trigger a fresh poll before responding so the returned state is current rather than stale-from-cache.
+
+## Endpoints
+
+```
+GET /v1/ks/nodes
+GET /v1/ks/nodes/{node_id}
+```
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_...` — see [Authentication](/docs/api/using-the-api/authentication). Cluster surfaces require an operator-scoped key; tenant-scoped keys receive `403 Forbidden`. |
+| Path parameter (detail) | `node_id` — the substrate node identifier as registered with the control plane. |
+| Errors | Native envelope — see [Errors](/docs/api/using-the-api/errors). |
+
+## List response — `200 OK`
+
+```json
+{
+  "nodes": [
+    {
+      "node_id": "01J8X9Y2Z3K4M5N6P7Q8R9N002",
+      "address": "10.42.0.18:5050",
+      "status": "SERVING",
+      "model_loaded": true,
+      "model_id": "qwen3-coder-30b",
+      "uptime_seconds": 184302.4,
+      "last_seen_at": "2026-05-05T12:00:00Z",
+      "gpu_utilization_percent": 42.6,
+      "gpu_memory_used_bytes": 53687091200,
+      "gpu_memory_total_bytes": 85899345920,
+      "pending_requests": 1,
+      "active_requests": 3,
+      "requests_completed_total": 18402,
+      "kv_cache_usage_percent": 61.2,
+      "kv_blocks_total": 8192,
+      "kv_blocks_used": 5014
+    },
+    {
+      "node_id": "01J8X9Y2Z3K4M5N6P7Q8R9N003",
+      "address": "10.42.0.19:5050",
+      "status": "NOT_SERVING",
+      "model_loaded": false,
+      "model_id": "",
+      "uptime_seconds": 12.0,
+      "last_seen_at": "2026-05-05T12:00:00Z",
+      "gpu_utilization_percent": 0.0,
+      "gpu_memory_used_bytes": 0,
+      "gpu_memory_total_bytes": 85899345920,
+      "pending_requests": 0,
+      "active_requests": 0,
+      "requests_completed_total": 0,
+      "kv_cache_usage_percent": 0.0,
+      "kv_blocks_total": 0,
+      "kv_blocks_used": 0
+    }
+  ],
+  "total": 2
+}
+```
+
+The list is unfiltered and unpaginated — the substrate fleet is small enough that a single response is the right shape. Sort order is `node_id` ascending.
+
+## Detail response — `200 OK`
+
+```json
+{
+  "node_id": "01J8X9Y2Z3K4M5N6P7Q8R9N002",
+  "address": "10.42.0.18:5050",
+  "status": "SERVING",
+  "model_loaded": true,
+  "model_id": "qwen3-coder-30b",
+  "uptime_seconds": 184302.4,
+  "last_seen_at": "2026-05-05T12:00:00Z",
+  "gpu_utilization_percent": 42.6,
+  "gpu_memory_used_bytes": 53687091200,
+  "gpu_memory_total_bytes": 85899345920,
+  "pending_requests": 1,
+  "active_requests": 3,
+  "requests_completed_total": 18402,
+  "kv_cache_usage_percent": 61.2,
+  "kv_blocks_total": 8192,
+  "kv_blocks_used": 5014
+}
+```
+
+The detail body is one element of the list array — same field set, same semantics.
+
+### Fields
+
+| Field | Type | Meaning |
+|---|---|---|
+| `node_id` | string | Stable substrate-node identifier. Used as the join key on [ModelCall](/docs/concepts/run-hierarchy/model-calls), [routing events](/docs/concepts/events/routing), and [state events](/docs/concepts/events/state). |
+| `address` | string | Network address (`host:port`) the control plane uses to reach the Node Agent. |
+| `status` | string | Liveness status — see the table below. |
+| `model_loaded` | boolean | Whether a model is currently loaded into HBM and ready to serve. |
+| `model_id` | string | The loaded model. Empty string when `model_loaded` is `false`. |
+| `uptime_seconds` | number | Seconds since the Node Agent last started, as reported by the node itself. |
+| `last_seen_at` | string | ISO-8601 timestamp of the most recent successful health or metrics poll. |
+| `gpu_utilization_percent` | number | GPU compute utilization on `[0.0, 100.0]`. |
+| `gpu_memory_used_bytes` / `gpu_memory_total_bytes` | integer | HBM occupancy and capacity. |
+| `pending_requests` | integer | Requests queued at the substrate, not yet executing. Drives the router's queue cost. |
+| `active_requests` | integer | Requests currently executing on the node. |
+| `requests_completed_total` | integer | Lifetime completed-request counter since process start. |
+| `kv_cache_usage_percent` | number | Fraction of KV blocks in use, on `[0.0, 100.0]`. |
+| `kv_blocks_total` / `kv_blocks_used` | integer | Capacity and current population of the KV block pool. |
+
+### Status values
+
+| Status | Meaning |
+|---|---|
+| `SERVING` | The Node Agent answered its last health probe and reported a model loaded. The node is in the routing pool. |
+| `NOT_SERVING` | The Node Agent is reachable but is not ready to serve — model is loading, draining, or the substrate is in maintenance. The node is excluded from routing. |
+| `UNAVAILABLE` | The last health or metrics poll failed. The node is excluded from routing until a subsequent poll succeeds. |
+| `UNKNOWN` | The node was just registered and has not yet been polled. Transient. |
+
+`status` is the [Cache-Aware Router](/docs/concepts/routing/manifest-aware-routing)'s hard liveness filter — only `SERVING` nodes are scored.
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `200 OK` | The fleet snapshot (list) or the requested node (detail). |
+| `401 Unauthorized` | Missing or invalid bearer token. Codes: `missing_token`, `invalid_token`, `token_revoked`. |
+| `403 Forbidden` | The bearer key does not carry an operator scope. |
+| `404 Not Found` | (Detail only) `node_id` is not registered with the control plane. Code: `node_not_found`. |
+
+## Examples
+
+### List
+
+```bash
+curl https://api.kovaserve.com/v1/ks/nodes \
+  -H "Authorization: Bearer ks_admin_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+```
+
+```python
+from kovaserve import KovaControlClient
+
+ctl = KovaControlClient(api_key="ks_admin_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b")
+
+snapshot = ctl.cluster.nodes.list()
+for node in snapshot.nodes:
+    pressure = node.kv_cache_usage_percent
+    print(f"{node.node_id} {node.status} kv={pressure:.0f}% queue={node.pending_requests}")
+```
+
+### Detail
+
+```bash
+curl https://api.kovaserve.com/v1/ks/nodes/01J8X9Y2Z3K4M5N6P7Q8R9N002 \
+  -H "Authorization: Bearer ks_admin_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+```
+
+```python
+node = ctl.cluster.nodes.get("01J8X9Y2Z3K4M5N6P7Q8R9N002")
+
+if node.status != "SERVING":
+    raise RuntimeError(f"node {node.node_id} is {node.status}")
+
+if node.kv_cache_usage_percent > 90.0:
+    print(f"node {node.node_id} is under KV pressure — expect demotion soon")
+```
+
+## See also
+
+- [Cache lookup](/docs/api/cluster/cache-lookup) — find which nodes hold a given stable identity
+- [Routing plan](/docs/api/cluster/routing-plan) — see how the router scores these nodes
+- [Manifest-aware routing](/docs/concepts/routing/manifest-aware-routing) — how `status`, queue, and KV occupancy feed scoring
+- [State events](/docs/concepts/events/state) — the `kv_events` stream that drives KV-cache fields
+- [Workers](/docs/concepts/runtime/workers) — the runtime workers that dispatch onto these nodes

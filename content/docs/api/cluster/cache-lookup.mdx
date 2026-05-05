@@ -1,0 +1,232 @@
+---
+title: Cache lookup
+description: POST /v1/ks/cache/lookup — resolve a stable_prefix_id or stable_context_id to the substrate replicas that hold it, with tier, warmness, completeness, compatibility, and freshness for each location.
+---
+
+`POST /v1/ks/cache/lookup` resolves a stable identity — `stable_prefix_id`, `stable_context_id`, or both — against the [KV Index](/docs/concepts/routing/kv-index) and returns every replica-tier-residency tuple that holds it. It is the read API of the index. The [Cache-Aware Router](/docs/concepts/routing/manifest-aware-routing) calls it on every request to score candidate placements; operator dashboards call it to inspect cache topology and verify reuse.
+
+The endpoint is **scope-filtered**. Locations warmed under a foreign `context_share_scope`, a different tenant, or an incompatible data boundary are excluded from the response — cross-tenant probing returns no locations even when the identity matches resident bytes.
+
+The endpoint is also a **read against projected event state**. It does not contact replicas. Operator confidence comes from event-lag dashboards on the [state event stream](/docs/concepts/events/state).
+
+## Endpoint
+
+```
+POST /v1/ks/cache/lookup
+```
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_...` — see [Authentication](/docs/api/using-the-api/authentication). |
+| Content-Type | `application/json` |
+| Errors | Native envelope — see [Errors](/docs/api/using-the-api/errors). |
+
+## Request body
+
+```json
+{
+  "stable_context_id": "sha256:7e44a02f5b1c4f8e9d7a3b6c2e1d0f8a5c4b3e2d1f0a9b8c7d6e5f4a3b2c1d0e",
+  "stable_prefix_id": "sha256:9a1cdb4e2f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c",
+  "scope": {
+    "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+    "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+    "context_share_scope": "project"
+  },
+  "model_id": "qwen3-coder-30b",
+  "tokenizer_fingerprint": "qwen3-bpe-152064-v1",
+  "renderer_version": "v3"
+}
+```
+
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `stable_context_id` | string | one of | The compatibility-aware identity from a [ContextManifest](/docs/concepts/context/context-manifests). Resolves at the manifest level. |
+| `stable_prefix_id` | string | one of | The legacy prefix identity. Resolves at the prefix level. Useful for prefix-tier matches when no manifest exists. |
+| `scope.tenant_id` | string | yes | Caller's Tenant. The endpoint refuses lookups outside the bearer key's Tenant. |
+| `scope.project_id` | string | no | Caller's Project. Required when `context_share_scope = project`. |
+| `scope.context_share_scope` | string | yes | One of `tenant`, `project`, `run`. Filters the location set as defined by [PolicyScopes](/docs/concepts/policy/policy-scopes). |
+| `model_id` | string | no | When set, locations whose loaded model differs are excluded from `locations[]` and surfaced under `excluded[]`. |
+| `tokenizer_fingerprint` | string | no | When set, locations with a different tokenizer are excluded; the response carries `compatibility = "tokenizer_mismatch"` on the excluded entries. |
+| `renderer_version` | string | no | When set, locations with a different renderer are excluded; non-allow-listed pairs surface as `compatibility = "renderer_mismatch"`. |
+
+At least one of `stable_context_id` or `stable_prefix_id` must be supplied. Supplying both performs a multi-tier lookup — the response carries an entry per identity.
+
+## Response — `200 OK`
+
+```json
+{
+  "queries": [
+    {
+      "stable_context_id": "sha256:7e44a02f5b1c4f8e9d7a3b6c2e1d0f8a5c4b3e2d1f0a9b8c7d6e5f4a3b2c1d0e",
+      "stable_prefix_id": null,
+      "locations": [
+        {
+          "node_id": "01J8X9Y2Z3K4M5N6P7Q8R9N002",
+          "replica_id": "01J8X9Y2Z3K4M5N6P7Q8R9R007",
+          "tier": "HBM",
+          "warmness": "hot",
+          "block_count": 184,
+          "completeness": "exact",
+          "compatibility": "exact",
+          "freshness_seconds": 12,
+          "last_accessed_at": "2026-05-05T11:59:48Z",
+          "last_event_id": "01J8X9Y2Z3K4M5N6P7Q8R9E0A1"
+        },
+        {
+          "node_id": "01J8X9Y2Z3K4M5N6P7Q8R9N003",
+          "replica_id": "01J8X9Y2Z3K4M5N6P7Q8R9R009",
+          "tier": "NVMe",
+          "warmness": "cool",
+          "block_count": 184,
+          "completeness": "exact",
+          "compatibility": "exact",
+          "freshness_seconds": 380,
+          "last_accessed_at": "2026-05-05T11:53:40Z",
+          "last_event_id": "01J8X9Y2Z3K4M5N6P7Q8R9E089"
+        }
+      ],
+      "excluded": []
+    },
+    {
+      "stable_context_id": null,
+      "stable_prefix_id": "sha256:9a1cdb4e2f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c",
+      "locations": [
+        {
+          "node_id": "01J8X9Y2Z3K4M5N6P7Q8R9N002",
+          "replica_id": "01J8X9Y2Z3K4M5N6P7Q8R9R007",
+          "tier": "HBM",
+          "warmness": "hot",
+          "block_count": 64,
+          "completeness": "exact",
+          "compatibility": "exact",
+          "freshness_seconds": 12,
+          "last_accessed_at": "2026-05-05T11:59:48Z",
+          "last_event_id": "01J8X9Y2Z3K4M5N6P7Q8R9E0A1"
+        }
+      ],
+      "excluded": []
+    }
+  ],
+  "scope_filter_applied": "project",
+  "evaluated_at": "2026-05-05T12:00:00Z"
+}
+```
+
+### Top-level fields
+
+| Field | Type | Meaning |
+|---|---|---|
+| `queries[]` | array | One entry per identity supplied in the request. Order matches request order: context query first, prefix query second. |
+| `scope_filter_applied` | string | The effective `context_share_scope` used to filter `locations[]`. Echoed for audit. |
+| `evaluated_at` | string | ISO-8601 timestamp of the index read. |
+
+### `queries[]` entry fields
+
+| Field | Type | Meaning |
+|---|---|---|
+| `stable_context_id` / `stable_prefix_id` | string \| null | Exactly one of these is set — the identity this entry resolves. |
+| `locations[]` | array | Replicas that hold the identity and pass every scope and compatibility filter. |
+| `excluded[]` | array | Replicas that hold the identity but were filtered out, with the reason. Useful for explaining a colder routing decision than expected. |
+
+### `locations[]` entry fields
+
+| Field | Type | Meaning |
+|---|---|---|
+| `node_id` | string | The node that holds this residency. Joinable on [`/v1/ks/nodes`](/docs/api/cluster/nodes). |
+| `replica_id` | string | The substrate replica within the node. Distinct from `node_id` because a node may host multiple replicas. |
+| `tier` | string | Storage tier — one of `HBM`, `RAM`, `NVMe`, `OBJECT`. |
+| `warmness` | string | One of `hot` (HBM), `warm` (RAM), `cool` (NVMe), `cold` (OBJECT), `partial` (some breakpoints match, others don't). |
+| `block_count` | integer | KV blocks resident at this location. |
+| `completeness` | string | `exact` when the full identity is present, `partial` when only some breakpoints match. |
+| `compatibility` | string | `exact`, `tokenizer_mismatch`, or `renderer_mismatch`. Only `exact` is eligible for KV restore; others are still scoreable for manifest replay. |
+| `freshness_seconds` | integer | Seconds since the most recent `kv.state.accessed` event for this location. Lower is fresher. |
+| `last_accessed_at` | string | ISO-8601 timestamp of the most recent access. |
+| `last_event_id` | string | The state event that last mutated this row. Joinable on the [state event stream](/docs/concepts/events/state). |
+
+### `excluded[]` entry fields
+
+| Field | Type | Meaning |
+|---|---|---|
+| `node_id` / `replica_id` / `tier` | string | Same identity as in `locations[]`. |
+| `reason` | string | One of `tokenizer_mismatch`, `renderer_mismatch`, `model_mismatch`, `scope_mismatch`, `data_boundary`, `node_unavailable`. |
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `200 OK` | Lookup completed. `queries[*].locations` may be empty when nothing is cached. |
+| `400 Bad Request` | Body did not include at least one identity; or `scope.context_share_scope` is not in `{tenant, project, run}`. Codes: `invalid_request`, `missing_parameter`. |
+| `401 Unauthorized` | Missing or invalid bearer token. |
+| `403 Forbidden` | Requested `scope.tenant_id` does not match the bearer key's Tenant. Code: `model_access_denied`. |
+| `503 Service Unavailable` | The KV Index is temporarily unreachable. Code: `kv_index_unavailable`. Retry with backoff. |
+
+## Examples
+
+### Multi-tier lookup
+
+```bash
+curl https://api.kovaserve.com/v1/ks/cache/lookup \
+  -H "Authorization: Bearer ks_admin_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "stable_context_id": "sha256:7e44a02f5b1c4f8e9d7a3b6c2e1d0f8a5c4b3e2d1f0a9b8c7d6e5f4a3b2c1d0e",
+    "scope": {
+      "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+      "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+      "context_share_scope": "project"
+    }
+  }'
+```
+
+```python
+from kovaserve import KovaControlClient
+
+ctl = KovaControlClient(api_key="ks_admin_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b")
+
+result = ctl.cluster.cache.lookup(
+    stable_context_id="sha256:7e44a02f5b1c4f8e9d7a3b6c2e1d0f8a5c4b3e2d1f0a9b8c7d6e5f4a3b2c1d0e",
+    scope={
+        "tenant_id":           "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+        "project_id":          "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+        "context_share_scope": "project",
+    },
+)
+
+for query in result.queries:
+    locations = query.locations
+    if not locations:
+        print(f"{query.stable_context_id or query.stable_prefix_id}: cold")
+        continue
+    hottest = min(locations, key=lambda loc: loc.freshness_seconds)
+    print(
+        f"hottest replica for {query.stable_context_id}: "
+        f"{hottest.node_id} ({hottest.tier}, {hottest.warmness}, "
+        f"freshness {hottest.freshness_seconds}s)"
+    )
+```
+
+### Inspecting why a location was excluded
+
+```python
+result = ctl.cluster.cache.lookup(
+    stable_context_id=manifest.stable_context_id,
+    scope={"tenant_id": tenant_id, "context_share_scope": "tenant"},
+    model_id="qwen3-coder-30b",
+    tokenizer_fingerprint="qwen3-bpe-152064-v1",
+    renderer_version="v3",
+)
+
+for entry in result.queries[0].excluded:
+    print(f"excluded {entry.node_id}/{entry.replica_id}: {entry.reason}")
+```
+
+## See also
+
+- [KV index](/docs/concepts/routing/kv-index) — the projection this endpoint reads
+- [Manifest-aware routing](/docs/concepts/routing/manifest-aware-routing) — the primary consumer
+- [Routing plan](/docs/api/cluster/routing-plan) — the planner that scores `locations[]`
+- [Cluster nodes](/docs/api/cluster/nodes) — joining `node_id` to fleet status
+- [Context manifests](/docs/concepts/context/context-manifests) — the source of `stable_context_id`
+- [Renderer versions](/docs/concepts/context/renderer-versions) — drives `compatibility` tagging
+- [Policy scopes](/docs/concepts/policy/policy-scopes) — `context_share_scope` and `data_boundary` filters
+- [State events](/docs/concepts/events/state) — `last_event_id` correlation

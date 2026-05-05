@@ -314,9 +314,9 @@ Living roadmap for `docs.kovaserve.com`. Source of structure for `content/docs/`
 
 ### Cluster
 
-- [ ] `api/cluster/nodes.mdx` — `/v1/ks/nodes`
-- [ ] `api/cluster/cache-lookup.mdx` — `/v1/ks/cache/lookup`
-- [ ] `api/cluster/routing-plan.mdx` — `/v1/ks/routing/plan`
+- [x] `api/cluster/nodes.mdx` — `/v1/ks/nodes`
+- [x] `api/cluster/cache-lookup.mdx` — `/v1/ks/cache/lookup`
+- [x] `api/cluster/routing-plan.mdx` — `/v1/ks/routing/plan`
 
 ### Health & Metrics
 
