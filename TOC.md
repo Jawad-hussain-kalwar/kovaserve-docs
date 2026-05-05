@@ -243,11 +243,11 @@ Living roadmap for `docs.kovaserve.com`. Source of structure for `content/docs/`
 
 ### Handles
 
-- [ ] `api/handles/create.mdx` — `POST /v1/ks/handles`
-- [ ] `api/handles/get.mdx` — `GET /v1/ks/handles/{id}`
-- [ ] `api/handles/list.mdx`
-- [ ] `api/handles/delete.mdx` — `DELETE /v1/ks/handles/{id}`
-- [ ] `api/handles/share.mdx` — promote a private handle to a shareable scope
+- [x] `api/handles/create.mdx` — `POST /v1/ks/handles`
+- [x] `api/handles/get.mdx` — `GET /v1/ks/handles/{id}`
+- [x] `api/handles/list.mdx`
+- [x] `api/handles/delete.mdx` — `DELETE /v1/ks/handles/{id}`
+- [x] `api/handles/share.mdx` — promote a private handle to a shareable scope
 
 ### Context
 

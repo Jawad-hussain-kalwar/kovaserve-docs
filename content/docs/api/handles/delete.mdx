@@ -1,0 +1,96 @@
+---
+title: Revoke a StateHandle
+description: DELETE /v1/ks/handles/{id} — explicitly retire a StateHandle so future resolutions return 410 instead of resolving against the underlying state.
+---
+
+`DELETE /v1/ks/handles/{id}` retires a [StateHandle](/docs/concepts/recovery/state-handles). The handle row is preserved for audit — it is not physically removed — and future calls to [`GET /v1/ks/handles/{id}`](/docs/api/handles/get) return `410 Gone` instead of resolving against the underlying state. The underlying state itself is **not** affected: revoking a `kv_prefix` handle does not evict the KV cache, and revoking a `context_manifest` handle does not delete the manifest. Only the registered reference is retired.
+
+Revocation is the right call when a handle was issued to a consumer that should no longer be allowed to use it — credential rotation, project hand-off, retention closeout, or because a sharing decision is being walked back. For ordinary expiry, set `expires_at` at creation time and let the registry sweep the row when the window elapses.
+
+Revocation is **terminal**. There is no un-revoke. Once a handle is `410 Gone`, downstream consumers must register a fresh handle to refer to the same underlying state.
+
+## Endpoint
+
+```
+DELETE /v1/ks/handles/{handle_id}
+```
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_...` — see [Authentication](/docs/api/using-the-api/authentication). |
+| Path parameter | `handle_id` — bare 26-character Crockford ULID. |
+| Idempotent | Yes — repeated `DELETE` against an already-revoked handle returns `204 No Content`. |
+| Errors | Native envelope — see [Errors](/docs/api/using-the-api/errors). |
+
+## What revocation does
+
+1. **Pins the row to revoked.** The handle's `revoked` flag is set and `revoked_at` is timestamped. The row remains in the registry indefinitely (subject to tenant retention) so audits can still answer "what was this pointing at?"
+2. **Stops resolving.** Subsequent [`GET /v1/ks/handles/{id}`](/docs/api/handles/get) requests return `410 Gone` and skip the resolution roundtrip entirely. Listings hide the handle by default; pass `include_revoked=true` to include it.
+3. **Notifies consumers.** A `ks.state_handle.revoked` event is emitted on the runtime stream so dashboards and audit tooling can react.
+4. **Cascades to dependents.** Checkpoints whose `state_handles` include the revoked entry resolve their dependent handle as `not_found` at restore time. The Checkpoint itself is not invalidated — manifest replay still runs as the always-available restore path. KV warmness is the only thing lost.
+5. **Leaves underlying state untouched.** The KV prefix, manifest row, artifact bundle, or runtime snapshot the handle pointed at is unaffected. To remove the underlying state, delete it through its own resource API ([`DELETE /v1/ks/context/artifacts/{id}`](/docs/api/context/artifacts/get), tenant retention sweeps, etc.).
+
+## Response — `204 No Content`
+
+The response body is empty. The handle was revoked or was already revoked; either way the registry now refuses to resolve it.
+
+```http
+HTTP/1.1 204 No Content
+X-Request-Id:           01J8X9Y2Z3K4M5N6P7Q8R9S0XX
+X-KS-State-Handle-Id:   01J8X9Y2Z3K4M5N6P7Q8R9S0H1
+```
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `204 No Content` | The handle was revoked, or was already revoked. |
+| `400 Bad Request` | Malformed `handle_id`. Code: `invalid_id`. |
+| `401 Unauthorized` | Missing, malformed, or unresolved API key. |
+| `403 Forbidden` | The caller can resolve the handle but does not own it — revocation requires the producing API key, the project owner, or a Tenant-level role. The body includes `details.required_role`. Code: `revoke_not_permitted`. |
+| `404 Not Found` | The handle does not exist *or* belongs to another Tenant. Code: `state_handle_not_found`. |
+
+`DELETE` is intentionally idempotent — the registry collapses repeated revocations to the first `revoked_at` timestamp. This makes retention sweeps and replay-safe automation easy to write.
+
+## Examples
+
+```bash
+# Revoke a single handle
+curl -X DELETE https://api.kovaserve.com/v1/ks/handles/01J8X9Y2Z3K4M5N6P7Q8R9S0H1 \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# Repeated revocation — same response, no error
+curl -X DELETE https://api.kovaserve.com/v1/ks/handles/01J8X9Y2Z3K4M5N6P7Q8R9S0H1 \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+```
+
+```python
+from kovaserve import KovaClient
+
+kova = KovaClient(api_key="ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b")
+
+# Project hand-off — revoke every shareable handle for the outgoing API key
+shared = kova.handles.iter(
+    project_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+    sharing="shareable_within_project",
+)
+for handle in shared:
+    kova.handles.delete(handle.id)
+    print(f"revoked {handle.id}  ({handle.type} -> {handle.ref})")
+
+# Audit access still works after revocation — the row persists with revoked=true
+archived = kova.handles.list(
+    project_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+    include_revoked=True,
+)
+for handle in archived.data:
+    if handle.revoked:
+        print(f"{handle.id}  retired  ({handle.type} -> {handle.ref})")
+```
+
+## See also
+
+- [`POST /v1/ks/handles`](/docs/api/handles/create) · [`GET /v1/ks/handles/{id}`](/docs/api/handles/get) · [`GET /v1/ks/handles`](/docs/api/handles/list) · [`POST /v1/ks/handles/{id}?action=share`](/docs/api/handles/share)
+- [State handles](/docs/concepts/recovery/state-handles) — lifetime, sharing, revocation semantics
+- [Resume flow](/docs/concepts/recovery/resume-flow) — how Checkpoint restore handles a revoked dependent
+- [IDs](/docs/api/using-the-api/ids) · [Errors](/docs/api/using-the-api/errors)

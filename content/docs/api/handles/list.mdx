@@ -1,0 +1,163 @@
+---
+title: List StateHandles
+description: GET /v1/ks/handles — page through StateHandles with cursor pagination, filtered by type, session, run, project, sharing scope, or expiry window.
+---
+
+`GET /v1/ks/handles` lists [StateHandles](/docs/concepts/recovery/state-handles) the caller owns, newest first. The response uses cursor pagination — the same shape as every other list endpoint in the API. Filters narrow the result set to a single discriminator, Session, Run, Project, sharing scope, or expiry window.
+
+The list response carries the handle row but **does not** resolve handles against the underlying state. Each row is metadata only — to check current availability, fetch the handle individually with [`GET /v1/ks/handles/{id}`](/docs/api/handles/get). This keeps list latency bounded and predictable; resolving N handles against the substrate is an N+1 the caller decides whether to pay.
+
+## Endpoint
+
+```
+GET /v1/ks/handles
+```
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_...` — see [Authentication](/docs/api/using-the-api/authentication). |
+| Pagination | Cursor — see [Pagination](/docs/api/using-the-api/pagination). |
+| Errors | Native envelope — see [Errors](/docs/api/using-the-api/errors). |
+
+## Query parameters
+
+| Parameter | Type | Default | Meaning |
+|---|---|---|---|
+| `limit` | integer | `100` | Maximum handles to return. Capped at `200`. Values outside `1..200` return `400 invalid_request`. |
+| `after` | string \| null | `null` | Cursor — return handles strictly after it in descending creation order. |
+| `before` | string \| null | `null` | Cursor — return handles strictly before it. Mutually exclusive with `after`. |
+| `type` | string \| null | `null` | Restrict to one discriminator — `kv_prefix`, `context_manifest`, `checkpoint`, `artifact_bundle`, or `runtime_state`. |
+| `session_id` | string \| null | `null` | Restrict to handles produced by one Session. Format `ses_<24hex>`. |
+| `run_id` | string \| null | `null` | Restrict to handles produced by one Run. |
+| `project_id` | string \| null | `null` | Restrict to one Project. The Tenant filter is always implicit. |
+| `sharing` | string \| null | `null` | Restrict to handles with the given current sharing scope — `private`, `shareable_within_project`, or `shareable_within_tenant`. |
+| `include_revoked` | boolean | `false` | Include handles that were explicitly revoked via [`DELETE /v1/ks/handles/{id}`](/docs/api/handles/delete). Off by default so triage queries skip retired rows. |
+| `expires_before` | string \| null | `null` | ISO-8601 timestamp — handles with `expires_at < expires_before`. Useful for retention sweeps. |
+| `created_after` | string \| null | `null` | ISO-8601 timestamp — handles with `created_at >= created_after`. |
+| `created_before` | string \| null | `null` | ISO-8601 timestamp — handles with `created_at < created_before`. |
+
+The Tenant filter is implicit — handles from other Tenants never appear in the result, regardless of any query parameter combination.
+
+## Response — `200 OK`
+
+```json
+{
+  "data": [
+    {
+      "id": "01J8X9Y2Z3K4M5N6P7Q8R9S0H1",
+      "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+      "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+      "type": "context_manifest",
+      "ref": "01J8X9Y2Z3K4M5N6P7Q8R9S0M7",
+      "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+      "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+      "sharing": "shareable_within_project",
+      "revoked": false,
+      "created_at": "2026-05-05T12:11:42Z",
+      "expires_at": "2026-06-04T12:00:00Z"
+    },
+    {
+      "id": "01J8X9Y2Z3K4M5N6P7Q8R9S0H0",
+      "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+      "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+      "type": "kv_prefix",
+      "ref": "kv://gpu-node-2/01J8X9Y2Z3K4M5N6P7Q8R9S0CK",
+      "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+      "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+      "sharing": "private",
+      "revoked": false,
+      "created_at": "2026-05-05T12:04:19Z",
+      "expires_at": null
+    }
+  ],
+  "page": {
+    "next_cursor": "01J8X9Y2Z3K4M5N6P7Q8R9S0H0",
+    "prev_cursor": "01J8X9Y2Z3K4M5N6P7Q8R9S0H1",
+    "has_more": true,
+    "limit": 100
+  }
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | string | Handle ID. |
+| `tenant_id` / `project_id` | string | Owning tenancy pair. |
+| `type` | string | Discriminator. |
+| `ref` | string | Type-specific reference. |
+| `session_id` / `run_id` | string \| null | Producing Session and Run when one applies. |
+| `sharing` | string | Current sharing scope — `private`, `shareable_within_project`, or `shareable_within_tenant`. |
+| `revoked` | boolean | `true` when the handle was explicitly revoked. Always `false` unless `include_revoked=true` was supplied. |
+| `created_at` | string | ISO-8601 creation timestamp. |
+| `expires_at` | string \| null | ISO-8601 expiry, or `null` when the handle inherits the underlying entity's retention. |
+
+The list response intentionally omits the `compatibility` vector and `metadata` to keep the page small. Fetch [`GET /v1/ks/handles/{id}`](/docs/api/handles/get) for the full row plus a fresh resolution.
+
+The pagination envelope is documented at [Pagination](/docs/api/using-the-api/pagination). Empty `data` is valid — it means no handles match the supplied filters.
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `200 OK` | Returns a page of handles. Empty `data` is valid. |
+| `400 Bad Request` | Both `before` and `after` supplied; an unrecognized `type`, `sharing`, or timestamp; or `limit` outside `1..200`. Code: `invalid_request`. |
+| `401 Unauthorized` | Missing or invalid bearer token. |
+| `404 Not Found` | A scoping ID (`session_id`, `run_id`, `project_id`) does not resolve in the caller's Tenant. Codes: `session_not_found`, `run_not_found`, `project_not_found`. |
+
+## Examples
+
+```bash
+# Newest 50 handles across the Tenant
+curl "https://api.kovaserve.com/v1/ks/handles?limit=50" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# Every kv_prefix handle for a Session — pick a warm-cache reuse target
+curl "https://api.kovaserve.com/v1/ks/handles?session_id=ses_a7f3c2b8d4e1f0925a1b6c3d&type=kv_prefix" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# All shareable handles in a Project — find what's exposed cross-Run
+curl "https://api.kovaserve.com/v1/ks/handles?project_id=01J8X9Y2Z3K4M5N6P7Q8R9S0T0&sharing=shareable_within_project" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# Retention sweep — handles expiring in the next 24h
+curl "https://api.kovaserve.com/v1/ks/handles?expires_before=2026-05-06T12:00:00Z&limit=200" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+```
+
+```python
+from kovaserve import KovaClient
+
+kova = KovaClient(api_key="ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b")
+
+# Find a sharable manifest handle for a downstream Run on the same Session
+candidates = kova.handles.list(
+    session_id="ses_a7f3c2b8d4e1f0925a1b6c3d",
+    type="context_manifest",
+    sharing="shareable_within_project",
+    limit=5,
+)
+if candidates.data:
+    handle = candidates.data[0]
+    print(f"reusing manifest {handle.ref} via handle {handle.id}")
+
+# Iterate every handle for a Run
+cursor = None
+while True:
+    page = kova.handles.list(run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1", limit=100, after=cursor)
+    for h in page.data:
+        print(f"  {h.type:18}  {h.id}  -> {h.ref}")
+    if not page.has_more:
+        break
+    cursor = page.next_cursor
+
+# Built-in iterator helper — auto-paginates
+for h in kova.handles.iter(project_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T0", type="kv_prefix"):
+    if h.expires_at:
+        print(f"{h.id} expires {h.expires_at}")
+```
+
+## See also
+
+- [`POST /v1/ks/handles`](/docs/api/handles/create) · [`GET /v1/ks/handles/{id}`](/docs/api/handles/get) · [`DELETE /v1/ks/handles/{id}`](/docs/api/handles/delete) · [`POST /v1/ks/handles/{id}?action=share`](/docs/api/handles/share)
+- [State handles](/docs/concepts/recovery/state-handles) — discriminator, lifetime, sharing
+- [Pagination](/docs/api/using-the-api/pagination) · [IDs](/docs/api/using-the-api/ids) · [Errors](/docs/api/using-the-api/errors)

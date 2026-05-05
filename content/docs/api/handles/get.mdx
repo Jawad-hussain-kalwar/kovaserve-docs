@@ -1,0 +1,161 @@
+---
+title: Resolve a StateHandle
+description: GET /v1/ks/handles/{id} — fetch a typed StateHandle and resolve it against the underlying state, returning availability, warmness, and compatibility.
+---
+
+`GET /v1/ks/handles/{id}` returns a [StateHandle](/docs/concepts/recovery/state-handles) and **resolves** it — the registry validates the underlying state exists, checks compatibility against the caller's scope, and reports current availability. The response carries both the handle row (type, `ref`, sharing, compatibility vector, lifecycle timestamps) and a `resolution` block that consumers use to decide whether to act on the handle.
+
+Resolution runs synchronously on the request path and is the canonical contract: a handle that resolves with `status: "available"` is safe to use; any other status means the consumer must fall back to the always-available path (manifest replay for KV, full restore for Checkpoints, fresh assembly for artifact bundles).
+
+The handle is resolved against the API key's Tenant. Cross-tenant fetches return `404 Not Found` — the same response as a genuinely missing handle — so the surface leaks no information about handles the caller cannot see.
+
+## Endpoint
+
+```
+GET /v1/ks/handles/{handle_id}
+```
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_...` — see [Authentication](/docs/api/using-the-api/authentication). |
+| Path parameter | `handle_id` — bare 26-character Crockford ULID. |
+| Errors | Native envelope — see [Errors](/docs/api/using-the-api/errors). |
+
+### Query parameters
+
+| Parameter | Type | Default | Meaning |
+|---|---|---|---|
+| `resolve` | boolean | `true` | When `false`, return the handle row without contacting the underlying state — fast path for audit and listing UIs that just need metadata. The `resolution` block is omitted. |
+| `target_node_id` | string \| null | `null` | Soft hint for `kv_prefix` resolution — prefer reporting warmness against the named node when the prefix is replicated across the fleet. The hint does not change the handle's `ref`; only the `resolution.node_id` and `resolution.warmness` reflect it. |
+
+## Response — `200 OK`
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9S0H1",
+  "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+  "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+  "type": "kv_prefix",
+  "ref": "kv://gpu-node-2/01J8X9Y2Z3K4M5N6P7Q8R9S0CK",
+  "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+  "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+  "sharing": "private",
+  "compatibility": {
+    "model_family": "qwen3-coder",
+    "tokenizer_fingerprint": "sha256:9f2c4e1f0925a1b6c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f70",
+    "renderer_version": "v3",
+    "residency_tier": "hbm"
+  },
+  "retention_policy": null,
+  "metadata": null,
+  "created_at": "2026-05-05T12:04:19Z",
+  "expires_at": null,
+  "resolution": {
+    "status": "available",
+    "warmness": "warm",
+    "node_id": "01J8X9Y2Z3K4M5N6P7Q8R9N002",
+    "compatibility": "exact",
+    "checked_at": "2026-05-05T12:11:42Z"
+  }
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | string | Handle ID. |
+| `tenant_id` / `project_id` | string | Owning tenancy pair. |
+| `type` | string | Discriminator — `kv_prefix`, `context_manifest`, `checkpoint`, `artifact_bundle`, or `runtime_state`. |
+| `ref` | string | Type-specific reference the registry resolved. For `kv_prefix` this is the substrate-side prefix locator; for entity-backed types this is the bare ULID of the target row. |
+| `session_id` / `run_id` | string \| null | Producing Session and Run when one applies. |
+| `sharing` | string | One of `private`, `shareable_within_project`, `shareable_within_tenant`. The handle's current scope; promote with [`POST /v1/ks/handles/{id}?action=share`](/docs/api/handles/share). |
+| `compatibility` | object | The vector recorded at creation. The shape depends on `type` — see [State handles › The discriminator](/docs/concepts/recovery/state-handles). |
+| `retention_policy` | string \| null | Tenant-defined retention label. |
+| `metadata` | object \| null | Free-form metadata recorded at creation. |
+| `created_at` | string | ISO-8601 creation timestamp. |
+| `expires_at` | string \| null | ISO-8601 expiry. After this point `resolution.status` is `expired` until the handle is bulk-evicted by tenant retention. |
+| `resolution` | object | Synchronous resolution result. Present when `resolve=true`; omitted when `resolve=false`. |
+
+### `resolution`
+
+| Field | Type | Meaning |
+|---|---|---|
+| `status` | string | One of `available`, `incompatible`, `expired`, `not_found`. The contract is uniform across discriminators — there are no partial-success resolutions. |
+| `warmness` | string \| null | One of `hot`, `warm`, `cool`, `cold`, `partial`, `null`. Populated for `kv_prefix` handles; `null` for the other discriminators since warmness is a substrate concept. |
+| `node_id` | string \| null | Substrate node currently holding the state, when `type=kv_prefix` and `status=available`. `null` for entity-backed types and unresolvable handles. |
+| `compatibility` | string \| null | One of `exact`, `partial`, `mismatch`, `null`. `exact` and `partial` are reported alongside `status=available`; `mismatch` is reported alongside `status=incompatible`. The `partial` and `mismatch` distinction tells consumers whether to attempt KV restore against this handle. |
+| `checked_at` | string | ISO-8601 timestamp when resolution ran. The check is fresh — there is no per-handle resolution cache. |
+
+### Resolution status meanings
+
+| `status` | What happened | What to do |
+|---|---|---|
+| `available` | Target exists, compatibility checks pass against the caller's scope, and the handle is within its `expires_at` window. | Use it. |
+| `incompatible` | Target exists but the compatibility vector does not agree with the request — model family, renderer version, scope, or hash mismatch. | Skip this handle. For `kv_prefix` handles the consumer falls through to manifest replay; for `context_manifest` and `checkpoint` handles restore is rejected outright. |
+| `expired` | The handle's `expires_at` has elapsed or the underlying retention has reclaimed the state. | Treat as unrecoverable. |
+| `not_found` | The underlying entity is gone — KV prefix evicted, manifest deleted, artifact bundle removed, runtime snapshot pruned. | Treat as unrecoverable. The handle row persists with `status: "not_found"` so audit queries can still answer "what was this pointing at?" — see [State handles › Lifetime](/docs/concepts/recovery/state-handles). |
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `200 OK` | The handle exists and is visible to the caller. The `resolution.status` field tells you whether it is currently usable. |
+| `400 Bad Request` | Malformed `handle_id`. Code: `invalid_id`. |
+| `401 Unauthorized` | Missing, malformed, or unresolved API key. |
+| `403 Forbidden` | The handle exists but the caller's scope does not satisfy the handle's `sharing` policy — typical when a `private` handle is fetched from a different API key inside the same Tenant, or when a `shareable_within_project` handle is fetched from a sibling Project. The body includes `details.required_sharing`. Code: `sharing_violation`. |
+| `404 Not Found` | The handle does not exist *or* belongs to another Tenant. Code: `state_handle_not_found`. |
+| `410 Gone` | The handle exists, is visible, and has been explicitly revoked via [`DELETE /v1/ks/handles/{id}`](/docs/api/handles/delete) or invalidated by tenant retention. The response body still carries the metadata so audits can read the revoked row. Code: `state_handle_revoked`. |
+
+A handle whose underlying state has been evicted does **not** return `410` — that case is reported via `resolution.status = "not_found"` on a `200 OK`. `410` is reserved for handles that were explicitly retired.
+
+## Examples
+
+```bash
+# Resolve a handle and act on the result
+curl https://api.kovaserve.com/v1/ks/handles/01J8X9Y2Z3K4M5N6P7Q8R9S0H1 \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# Audit fetch — metadata only, skip the resolve roundtrip
+curl "https://api.kovaserve.com/v1/ks/handles/01J8X9Y2Z3K4M5N6P7Q8R9S0H1?resolve=false" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# Resolve with a node hint for a kv_prefix handle — useful when planning placement
+curl "https://api.kovaserve.com/v1/ks/handles/01J8X9Y2Z3K4M5N6P7Q8R9S0H1?target_node_id=01J8X9Y2Z3K4M5N6P7Q8R9N002" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+```
+
+```python
+from kovaserve import KovaClient
+
+kova = KovaClient(api_key="ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b")
+
+handle = kova.handles.get("01J8X9Y2Z3K4M5N6P7Q8R9S0H1")
+
+if handle.resolution.status != "available":
+    # Fall through to the always-available path — manifest replay for KV,
+    # fresh assembly for artifact bundles.
+    print(f"unusable: {handle.resolution.status}")
+else:
+    print(f"target:        {handle.ref}")
+    print(f"warmness:      {handle.resolution.warmness}")
+    print(f"node:          {handle.resolution.node_id}")
+    print(f"compatibility: {handle.resolution.compatibility}")
+
+# Audit fetch on a revoked or expired handle still returns the row, just gated
+# behind a 410 (revoked) or a 200 with resolution.status = "not_found" (evicted).
+try:
+    archived = kova.handles.get("01J8X9Y2Z3K4M5N6P7Q8R9S0H0", resolve=False)
+    print(f"row {archived.id} created at {archived.created_at}")
+except kova.errors.KovaError as exc:
+    if exc.status == 410:
+        print("handle was revoked — see DELETE /v1/ks/handles/{id}")
+    else:
+        raise
+```
+
+## See also
+
+- [`POST /v1/ks/handles`](/docs/api/handles/create) · [`GET /v1/ks/handles`](/docs/api/handles/list) · [`DELETE /v1/ks/handles/{id}`](/docs/api/handles/delete) · [`POST /v1/ks/handles/{id}?action=share`](/docs/api/handles/share)
+- [State handles](/docs/concepts/recovery/state-handles) — discriminator semantics, resolution rules, sharing
+- [Resume flow](/docs/concepts/recovery/resume-flow) — how restore validates each handle independently before reading state
+- [Manifest-aware routing](/docs/concepts/routing/manifest-aware-routing) — how the router consumes `kv_prefix` and `context_manifest` resolutions
+- [IDs](/docs/api/using-the-api/ids) · [Errors](/docs/api/using-the-api/errors)

@@ -1,0 +1,10 @@
+{
+  "title": "Handles",
+  "pages": [
+    "create",
+    "get",
+    "list",
+    "delete",
+    "share"
+  ]
+}

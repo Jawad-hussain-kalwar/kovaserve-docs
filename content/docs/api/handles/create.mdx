@@ -1,0 +1,213 @@
+---
+title: Create a StateHandle
+description: POST /v1/ks/handles — register a typed reference to reusable execution state — kv_prefix, context_manifest, checkpoint, artifact_bundle, or runtime_state.
+---
+
+`POST /v1/ks/handles` registers a typed [StateHandle](/docs/concepts/recovery/state-handles) in the State Handle Registry. The handle is a stable, sharable reference to reusable execution state — a KV cache prefix, a frozen [ContextManifest](/docs/concepts/context/context-manifests), another [Checkpoint](/docs/concepts/recovery/checkpoints), a bundle of [ContextArtifacts](/docs/concepts/context/context-artifacts), or runtime-local state — that consumers can resolve later without knowing where the underlying state physically lives.
+
+Most handles are produced implicitly: the [Global Context Manager](/docs/concepts/context/context-manifests) emits a `context_manifest` handle on every manifest assembly, [Checkpoint capture](/docs/api/checkpoints/create) emits a bundle of handles per Checkpoint, and the [Cache-Aware Router](/docs/concepts/routing/manifest-aware-routing) reads `kv_prefix` handles when scoring candidate replicas. This endpoint is for **explicit** registration — the cases where a runtime wants to pin reusable state outside the normal lifecycle, or carry a reference across a Session boundary on its own terms.
+
+## When to call this endpoint
+
+| Use case | Handle type |
+|---|---|
+| Pin a warm KV prefix from the current Run so a sibling Run on the same Session can reuse it. | `kv_prefix` |
+| Snapshot a manifest from a finished Run and resolve it later from a fresh Run. | `context_manifest` |
+| Reference another Checkpoint as a composition point — chained restore, branch source. | `checkpoint` |
+| Group a set of artifacts so consumers can fetch them as one unit. | `artifact_bundle` |
+| Pin a runtime workspace snapshot — sandbox FS, process tree, scratchpad — for restore. | `runtime_state` |
+
+When the handle would have been created automatically anyway, prefer reading it off the producer's response (`X-KS-Context-Manifest-Id` on inference responses, `state_handles` on Checkpoints) over registering a parallel one.
+
+## Endpoint
+
+```
+POST /v1/ks/handles
+```
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_...` — see [Authentication](/docs/api/using-the-api/authentication). |
+| Content type | `application/json`. |
+| Idempotent | Yes, when `Idempotency-Key` is supplied — see [Idempotency](/docs/api/using-the-api/idempotency). |
+| Errors | Native envelope — see [Errors](/docs/api/using-the-api/errors). |
+
+## Request body
+
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `type` | string | yes | Discriminator. One of `kv_prefix`, `context_manifest`, `checkpoint`, `artifact_bundle`, `runtime_state`. The discriminator is closed; unknown values are rejected. |
+| `ref` | string | yes | Type-specific reference the registry knows how to resolve. For `context_manifest` and `checkpoint` the `ref` is the entity's bare ULID. For `kv_prefix` it is the substrate-side prefix locator (`kv://<node>/<prefix_id>`). For `artifact_bundle` it is a bare ULID identifying the bundle. For `runtime_state` it is the runtime-supplied snapshot ID. |
+| `session_id` | string \| null | no | Producing Session, when one applies. Format `ses_<24hex>`. Set on `kv_prefix`, `context_manifest`, and `runtime_state` handles produced inside a Session; absent on Tenant- or Project-scoped registrations. |
+| `run_id` | string \| null | no | Producing Run, when one applies. |
+| `sharing` | string | no | Initial sharing scope. One of `private`, `shareable_within_project`, `shareable_within_tenant`. Defaults to `private`. Promote later with [`POST /v1/ks/handles/{id}?action=share`](/docs/api/handles/share). Demotion is not supported. |
+| `compatibility` | object \| null | no | Compatibility vector for type-aware revalidation at resolve time. The required keys depend on `type` — see the table below. When omitted, the registry derives the vector from `ref` for types whose backing entity carries one (`context_manifest`, `checkpoint`); other types reject the request without an explicit vector. |
+| `expires_at` | string \| null | no | ISO-8601 timestamp at which the handle stops resolving as `available`. Defaults to the underlying entity's retention. The handle row persists past expiry so audits can answer "what was this pointing at?" |
+| `retention_policy` | string \| null | no | Tenant-defined retention label (e.g., `"audit-90d"`, `"ephemeral"`). The registry stores the label; the actual retention is enforced by the Tenant's lifecycle policy. |
+| `metadata` | object \| null | no | Free-form JSON recorded on the handle row. Reserved keys are namespaced under `_ks`. |
+
+### Compatibility vector by `type`
+
+| `type` | Required keys |
+|---|---|
+| `kv_prefix` | `model_family`, `tokenizer_fingerprint`, `renderer_version`, `residency_tier`. |
+| `context_manifest` | `renderer_version`, `model_id`, `policy_scope`. |
+| `checkpoint` | `model_family`, `policy_scope`. The full vector is read from the target Checkpoint at resolve time. |
+| `artifact_bundle` | `content_hashes` — array of per-artifact SHA-256 hashes the registry verifies against object storage at resolve time. |
+| `runtime_state` | `sandbox_image`, `workspace_layout_version`. |
+
+```json
+{
+  "type": "context_manifest",
+  "ref": "01J8X9Y2Z3K4M5N6P7Q8R9S0M7",
+  "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+  "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+  "sharing": "shareable_within_project",
+  "compatibility": {
+    "renderer_version": "v3",
+    "model_id": "qwen3-coder-30b",
+    "policy_scope": "01J8X9Y2Z3K4M5N6P7Q8R9S0T3"
+  },
+  "expires_at": "2026-06-04T12:00:00Z",
+  "metadata": {
+    "purpose": "shared planner manifest for downstream review run"
+  }
+}
+```
+
+## Response — `201 Created`
+
+The body is the new handle row. The handle is created in the registry but not yet resolved — call [`GET /v1/ks/handles/{id}`](/docs/api/handles/get) to validate it against the underlying state.
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9S0H1",
+  "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+  "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+  "type": "context_manifest",
+  "ref": "01J8X9Y2Z3K4M5N6P7Q8R9S0M7",
+  "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+  "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+  "sharing": "shareable_within_project",
+  "compatibility": {
+    "renderer_version": "v3",
+    "model_id": "qwen3-coder-30b",
+    "policy_scope": "01J8X9Y2Z3K4M5N6P7Q8R9S0T3"
+  },
+  "retention_policy": null,
+  "metadata": {
+    "purpose": "shared planner manifest for downstream review run"
+  },
+  "created_at": "2026-05-05T12:11:42Z",
+  "expires_at": "2026-06-04T12:00:00Z"
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | string | Handle ID — bare 26-character Crockford ULID. |
+| `tenant_id` / `project_id` | string | Owning tenancy pair. Inherited from the API key, not from the request. |
+| `type` | string | Discriminator. |
+| `ref` | string | Type-specific reference the registry resolves at fetch time. |
+| `session_id` | string \| null | Producing Session, when supplied at creation. |
+| `run_id` | string \| null | Producing Run, when supplied at creation. |
+| `sharing` | string | One of `private`, `shareable_within_project`, `shareable_within_tenant`. |
+| `compatibility` | object | Type-aware vector, validated on every resolve. |
+| `retention_policy` | string \| null | Echo of the request field. |
+| `metadata` | object \| null | Echo of the request field. |
+| `created_at` | string | ISO-8601 creation timestamp. |
+| `expires_at` | string \| null | ISO-8601 expiry. After this point the handle resolves with `resolution.status = "expired"` until it is bulk-evicted by tenant retention. |
+
+### Headers
+
+```http
+HTTP/1.1 201 Created
+Content-Type: application/json
+X-Request-Id:        01J8X9Y2Z3K4M5N6P7Q8R9S0XX
+X-KS-State-Handle-Id: 01J8X9Y2Z3K4M5N6P7Q8R9S0H1
+```
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `201 Created` | The handle was registered. |
+| `400 Bad Request` | Malformed JSON, unknown fields, an unsupported `type`, a `ref` whose shape does not match `type`, or a missing required compatibility key. Codes: `invalid_request`, `invalid_id`, `unsupported_handle_type`, `invalid_ref_shape`, `missing_compatibility`. |
+| `401 Unauthorized` | Missing, malformed, or unresolved API key. |
+| `403 Forbidden` | The resolved [PolicyScope](/docs/concepts/policy/policy-scopes) blocks producing a handle of the requested `sharing` scope — typical when `data_boundary` restricts cross-project visibility. Code: `sharing_not_permitted`. |
+| `404 Not Found` | The supplied `ref` does not resolve in the caller's Tenant — the target manifest, Checkpoint, artifact bundle, or runtime snapshot does not exist or is not visible. Codes: `manifest_not_found`, `checkpoint_not_found`, `artifact_bundle_not_found`, `runtime_state_not_found`, `kv_prefix_not_found`. |
+| `409 Conflict` | The supplied `Idempotency-Key` was reused with a different request body. Code: `idempotency_conflict`. |
+| `422 Unprocessable Entity` | The body parsed but failed schema validation. |
+| `429 Too Many Requests` | Rate limit exceeded. Code: `rate_limited`. |
+
+A handle whose underlying state has already been evicted at creation time is rejected with `404` rather than created in an `expired` state — registration always validates the target exists before persisting the handle row.
+
+## Examples
+
+```bash
+# Pin a manifest produced by an earlier Run for cross-Run reuse within the Project
+curl -X POST https://api.kovaserve.com/v1/ks/handles \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type": "context_manifest",
+    "ref": "01J8X9Y2Z3K4M5N6P7Q8R9S0M7",
+    "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+    "sharing": "shareable_within_project"
+  }'
+
+# Bundle three artifacts and pin them as a unit, idempotent
+curl -X POST https://api.kovaserve.com/v1/ks/handles \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: 6c1f8a30-9b22-4f0e-9d6c-12c4f0a1b2c3" \
+  -d '{
+    "type": "artifact_bundle",
+    "ref": "01J8X9Y2Z3K4M5N6P7Q8R9S0AR",
+    "compatibility": {
+      "content_hashes": [
+        "sha256:9f2c4e1f0925a1b6c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f70",
+        "sha256:8e1b3d0e0814b0a5b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f",
+        "sha256:7d0a2c0d0703a094a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e"
+      ]
+    }
+  }'
+```
+
+```python
+from kovaserve import KovaClient
+
+kova = KovaClient(api_key="ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b")
+
+# Capture the manifest from a finished planner Run and share it with a downstream review Run
+planner_run = kova.runs.get("01J8X9Y2Z3K4M5N6P7Q8R9S0T1")
+
+handle = kova.handles.create(
+    type="context_manifest",
+    ref=planner_run.context_manifest_id,
+    session_id=planner_run.session_id,
+    run_id=planner_run.id,
+    sharing="shareable_within_project",
+    metadata={"purpose": "planner output for review run"},
+)
+
+print(f"handle {handle.id} resolves to {handle.ref} ({handle.sharing})")
+
+# Hand the handle to the review Run via the inference extension envelope
+review = kova.chat.completions.create(
+    model="qwen3-coder-30b",
+    messages=[{"role": "user", "content": "Review the planner output."}],
+    kovaserve={
+        "session_id": planner_run.session_id,
+        "context_manifest_id": handle.ref,
+    },
+)
+```
+
+## See also
+
+- [`GET /v1/ks/handles/{id}`](/docs/api/handles/get) · [`GET /v1/ks/handles`](/docs/api/handles/list) · [`DELETE /v1/ks/handles/{id}`](/docs/api/handles/delete) · [`POST /v1/ks/handles/{id}?action=share`](/docs/api/handles/share)
+- [State handles](/docs/concepts/recovery/state-handles) — discriminator, lifetime, sharing
+- [Checkpoints](/docs/concepts/recovery/checkpoints) — the most prolific producer of handles
+- [Context manifests](/docs/concepts/context/context-manifests) · [Context artifacts](/docs/concepts/context/context-artifacts) · [Manifest-aware routing](/docs/concepts/routing/manifest-aware-routing)
+- [Idempotency](/docs/api/using-the-api/idempotency) · [IDs](/docs/api/using-the-api/ids) · [Errors](/docs/api/using-the-api/errors)

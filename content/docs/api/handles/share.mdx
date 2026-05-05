@@ -1,0 +1,163 @@
+---
+title: Share a StateHandle
+description: POST /v1/ks/handles/{id}?action=share — promote a handle from a narrower sharing scope to a broader one. Promotion only — demotion is not supported.
+---
+
+`POST /v1/ks/handles/{id}?action=share` promotes a [StateHandle](/docs/concepts/recovery/state-handles) from a narrower sharing scope to a broader one. The handle's `ref`, compatibility vector, and underlying state are unchanged — only the set of callers permitted to resolve it grows.
+
+The sharing ladder is one-directional:
+
+```
+private  →  shareable_within_project  →  shareable_within_tenant
+```
+
+Promotion is allowed in the direction of the arrows; demotion is not. The constraint exists because consumers may already hold cached references to a broadly-scoped handle — silently narrowing visibility could surface as `403 sharing_violation` on consumers that previously resolved cleanly. To narrow, [revoke the handle](/docs/api/handles/delete) and issue a fresh one with the smaller scope.
+
+Cross-tenant resolution is **not** a sharing scope. The Tenant boundary is hard regardless of `sharing` — every cross-Tenant resolution returns `404` and there is no API to promote past it.
+
+## Endpoint
+
+```
+POST /v1/ks/handles/{handle_id}?action=share
+```
+
+The query parameter `action=share` selects this operation. Other values of `action` are reserved.
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_...` — see [Authentication](/docs/api/using-the-api/authentication). |
+| Path parameter | `handle_id` — bare 26-character Crockford ULID. |
+| Content type | `application/json`. |
+| Idempotent | Yes, when `Idempotency-Key` is supplied — see [Idempotency](/docs/api/using-the-api/idempotency). Repeated promotion to the same scope is also idempotent without a key. |
+| Errors | Native envelope — see [Errors](/docs/api/using-the-api/errors). |
+
+## Request body
+
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `sharing` | string | yes | Target sharing scope — `shareable_within_project` or `shareable_within_tenant`. Setting `sharing` to `private` is rejected with `409`; revoke the handle instead. |
+| `reason` | string \| null | no | Free-form note recorded on the handle's audit log and on the `ks.state_handle.shared` event. Useful for explaining why a previously-private handle was promoted. |
+
+```json
+{
+  "sharing": "shareable_within_tenant",
+  "reason": "promoted for cross-project review pipeline"
+}
+```
+
+## Response — `200 OK`
+
+The body is the updated handle row. The `sharing` field reflects the new scope; `created_at` is preserved (promotion does not reset the handle's creation time).
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9S0H1",
+  "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+  "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+  "type": "context_manifest",
+  "ref": "01J8X9Y2Z3K4M5N6P7Q8R9S0M7",
+  "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+  "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+  "sharing": "shareable_within_tenant",
+  "compatibility": {
+    "renderer_version": "v3",
+    "model_id": "qwen3-coder-30b",
+    "policy_scope": "01J8X9Y2Z3K4M5N6P7Q8R9S0T3"
+  },
+  "retention_policy": null,
+  "metadata": null,
+  "created_at": "2026-05-05T12:11:42Z",
+  "expires_at": "2026-06-04T12:00:00Z",
+  "shared_at": "2026-05-05T12:18:09Z"
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `sharing` | string | The new sharing scope after promotion. |
+| `shared_at` | string | ISO-8601 timestamp of the most recent promotion. Only the latest promotion is recorded; earlier promotions are visible via the audit event stream. |
+
+All other fields match the shape returned by [`GET /v1/ks/handles/{id}`](/docs/api/handles/get). The `resolution` block is **not** included — fetch the handle again to resolve it under the new scope.
+
+## Promotion rules
+
+| Current `sharing` | Allowed targets |
+|---|---|
+| `private` | `shareable_within_project`, `shareable_within_tenant`. |
+| `shareable_within_project` | `shareable_within_tenant`. |
+| `shareable_within_tenant` | None — already at the broadest scope. |
+
+A request whose target is already the current scope is a no-op and returns `200 OK` with `shared_at` unchanged.
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `200 OK` | Promotion succeeded, or the handle was already at the requested scope. |
+| `400 Bad Request` | Malformed `handle_id`, malformed JSON, an unknown `action`, or an unrecognized `sharing` value. Codes: `invalid_id`, `invalid_request`, `unknown_action`. |
+| `401 Unauthorized` | Missing, malformed, or unresolved API key. |
+| `403 Forbidden` | The resolved [PolicyScope](/docs/concepts/policy/policy-scopes) blocks promotion to the requested scope — typical when `data_boundary` restricts cross-project visibility. The body includes `details.policy_scope_id`. Code: `sharing_not_permitted`. |
+| `404 Not Found` | The handle does not exist *or* belongs to another Tenant. Code: `state_handle_not_found`. |
+| `409 Conflict` | The requested `sharing` is narrower than the handle's current scope (demotion is not supported); the handle has been revoked; or the supplied `Idempotency-Key` was reused with a different request body. Codes: `sharing_demotion_not_supported`, `state_handle_revoked`, `idempotency_conflict`. |
+| `410 Gone` | The handle was revoked via [`DELETE /v1/ks/handles/{id}`](/docs/api/handles/delete) before promotion was attempted. Code: `state_handle_revoked`. |
+| `422 Unprocessable Entity` | The body parsed but failed schema validation. |
+| `429 Too Many Requests` | Rate limit exceeded. Code: `rate_limited`. |
+
+## Examples
+
+```bash
+# Promote a private handle to project scope
+curl -X POST "https://api.kovaserve.com/v1/ks/handles/01J8X9Y2Z3K4M5N6P7Q8R9S0H1?action=share" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "sharing": "shareable_within_project"
+  }'
+
+# Promote further to Tenant scope, with a reason and idempotency key
+curl -X POST "https://api.kovaserve.com/v1/ks/handles/01J8X9Y2Z3K4M5N6P7Q8R9S0H1?action=share" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: 6c1f8a30-9b22-4f0e-9d6c-12c4f0a1b2c3" \
+  -d '{
+    "sharing": "shareable_within_tenant",
+    "reason": "promoted for cross-project review pipeline"
+  }'
+```
+
+```python
+from kovaserve import KovaClient, KovaError
+
+kova = KovaClient(api_key="ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b")
+
+# Promote a planner manifest handle for a downstream review pipeline
+try:
+    handle = kova.handles.share(
+        "01J8X9Y2Z3K4M5N6P7Q8R9S0H1",
+        sharing="shareable_within_project",
+        reason="planner output for review run",
+    )
+    print(f"{handle.id} now {handle.sharing} as of {handle.shared_at}")
+except KovaError as exc:
+    if exc.code == "sharing_demotion_not_supported":
+        # The handle is already broader than the request — revoke + reissue
+        # if a narrower scope is required.
+        print("revoke and reissue to narrow scope")
+    else:
+        raise
+
+# Discover what's already broadly shared in a Project
+shared_in_project = kova.handles.list(
+    project_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+    sharing="shareable_within_project",
+)
+for h in shared_in_project.data:
+    print(f"{h.id}  {h.type:18}  -> {h.ref}")
+```
+
+## See also
+
+- [`POST /v1/ks/handles`](/docs/api/handles/create) · [`GET /v1/ks/handles/{id}`](/docs/api/handles/get) · [`GET /v1/ks/handles`](/docs/api/handles/list) · [`DELETE /v1/ks/handles/{id}`](/docs/api/handles/delete)
+- [State handles › Sharing](/docs/concepts/recovery/state-handles) — the sharing ladder, resolution rules
+- [Policy scopes](/docs/concepts/policy/policy-scopes) — `data_boundary` and `context_share_scope` enrichment
+- [Idempotency](/docs/api/using-the-api/idempotency) · [IDs](/docs/api/using-the-api/ids) · [Errors](/docs/api/using-the-api/errors)
