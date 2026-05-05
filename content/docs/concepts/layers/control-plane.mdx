@@ -62,7 +62,7 @@ The Gateway is the canonical entry point into the control plane. It hosts both t
 | Tenancy resolution | Resolves `(tenant_id, project_id, environment_id)` from the key on every call. |
 | Request normalization | Strips the [`kovaserve` extension envelope](/docs/api/index#extension-envelope) before forwarding to the substrate; surfaces it as canonical metadata. |
 | Runtime metadata ingestion | Accepts the 16-field runtime metadata set used by [BYO runtime](/docs/concepts/deployment/byo-runtime) integrations. |
-| Idempotency handling | Honors the [idempotency contract](/docs/api/idempotency) per `(tenant_id, idempotency_key)`. |
+| Idempotency handling | Honors the [idempotency contract](/docs/api/using-the-api/idempotency) per `(tenant_id, idempotency_key)`. |
 | Streaming | SSE conventions, including final-chunk cost delivery. |
 | Front-door policy checks | Coarse `PolicyScope` checks before deeper subsystems are invoked. |
 | Tracing | OpenTelemetry trace correlation across the entire control plane. |
@@ -264,7 +264,7 @@ The Gateway exposes three families of endpoints. All wire shapes are stable acro
 | **Events (pulled)** | `GET /v1/ks/events/...` | The event streams as a polled API. |
 | **Health** | `GET /health`, `GET /metrics` | Liveness, readiness, Prometheus metrics. |
 
-The native APIs share the [error envelope](/docs/api/errors), [pagination](/docs/api/pagination), [idempotency](/docs/api/idempotency), [cost headers](/docs/api/cost-headers), and [SSE streaming](/docs/api/streaming) conventions.
+The native APIs share the [error envelope](/docs/api/using-the-api/errors), [pagination](/docs/api/using-the-api/pagination), [idempotency](/docs/api/using-the-api/idempotency), [cost headers](/docs/api/using-the-api/cost-headers), and [SSE streaming](/docs/api/using-the-api/streaming) conventions.
 
 ## Event taxonomy
 

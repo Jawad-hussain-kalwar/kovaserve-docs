@@ -95,7 +95,7 @@ Only safe and idempotent runtime steps retry in place. The default rules:
 
 | Step type | Retry policy |
 |---|---|
-| `MODEL_CALL` | Retried automatically on transient substrate failures (timeouts, transient routing failures). The same [ContextManifest](/docs/concepts/context/context-manifests) is reused; idempotency keys at the [API level](/docs/api/idempotency) prevent double-billing on retried success. |
+| `MODEL_CALL` | Retried automatically on transient substrate failures (timeouts, transient routing failures). The same [ContextManifest](/docs/concepts/context/context-manifests) is reused; idempotency keys at the [API level](/docs/api/using-the-api/idempotency) prevent double-billing on retried success. |
 | `TOOL_EXECUTE` against an idempotent tool | Retried in place. The runtime marks tools as idempotent at registration time. |
 | `TOOL_EXECUTE` against a non-idempotent tool | Escalates rather than retrying in place — the runtime [resumes](/docs/concepts/recovery/resume-flow) from the previous Checkpoint or fails the Run. |
 | `FILE_WRITE` | Escalates rather than retrying in place — resumes from the last Checkpoint that preceded the write. |

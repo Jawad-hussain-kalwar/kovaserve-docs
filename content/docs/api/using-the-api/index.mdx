@@ -1,6 +1,6 @@
 ---
-title: API Reference
-description: KovaServe exposes two API families on a single base URL — an OpenAI-compatible inference surface and a native control-plane surface. This page is the entry point.
+title: Using the API
+description: Cross-cutting conventions every KovaServe API endpoint shares — base URL, two API families, authentication, errors, pagination, idempotency, IDs, cost headers, and streaming.
 ---
 
 KovaServe's HTTP API is the public interface to the [control plane](/docs/concepts/layers/control-plane). It exposes two coexistent families on the same base URL:
@@ -8,7 +8,7 @@ KovaServe's HTTP API is the public interface to the [control plane](/docs/concep
 - **OpenAI-compatible inference** — `/v1/chat/completions` and `/v1/models`. Drop-in usage from any OpenAI SDK works without code changes; the `kovaserve` extension envelope opts into native features when you want them.
 - **Native control plane** — `/v1/ks/*` for [Runs](/docs/concepts/run-hierarchy/runs), [Sessions](/docs/concepts/continuity/sessions), [Checkpoints](/docs/concepts/recovery/checkpoints), context engineering, budgets, policy, metering, tenancy, runtime, events, and cluster operations. These endpoints use KovaServe's native vocabulary.
 
-Both families share authentication, idempotency, ID conventions, and cost accounting. Where they diverge is the error envelope and the streaming convention — see [Errors](/docs/api/errors) and [Streaming](/docs/api/streaming).
+Both families share authentication, idempotency, ID conventions, and cost accounting. Where they diverge is the error envelope and the streaming convention — see [Errors](/docs/api/using-the-api/errors) and [Streaming](/docs/api/using-the-api/streaming).
 
 ## Base URL
 
@@ -74,13 +74,13 @@ Eight cross-cutting concerns are documented once and referenced everywhere else:
 
 | Page | What it covers |
 |---|---|
-| [Authentication](/docs/api/authentication) | Bearer keys, scope hierarchy, the `AuthContext` every endpoint resolves. |
-| [Errors](/docs/api/errors) | The OpenAI-style envelope on `/v1/*` and the native envelope on `/v1/ks/*`. |
-| [Pagination](/docs/api/pagination) | Cursor pagination (`before`, `after`, `limit`) for every list endpoint. |
-| [Idempotency](/docs/api/idempotency) | The `Idempotency-Key` header for safe retries on mutating operations. |
-| [IDs](/docs/api/ids) | Bare 26-character Crockford ULIDs across the surface; `ses_<24hex>` for Sessions. |
-| [Cost headers](/docs/api/cost-headers) | `X-KS-Cost-Cents`, `X-KS-Cache-Savings-Cents`, and the budget headers on every native response. |
-| [Streaming](/docs/api/streaming) | SSE conventions and how cost is delivered on the final chunk. |
+| [Authentication](/docs/api/using-the-api/authentication) | Bearer keys, scope hierarchy, the `AuthContext` every endpoint resolves. |
+| [Errors](/docs/api/using-the-api/errors) | The OpenAI-style envelope on `/v1/*` and the native envelope on `/v1/ks/*`. |
+| [Pagination](/docs/api/using-the-api/pagination) | Cursor pagination (`before`, `after`, `limit`) for every list endpoint. |
+| [Idempotency](/docs/api/using-the-api/idempotency) | The `Idempotency-Key` header for safe retries on mutating operations. |
+| [IDs](/docs/api/using-the-api/ids) | Bare 26-character Crockford ULIDs across the surface; `ses_<24hex>` for Sessions. |
+| [Cost headers](/docs/api/using-the-api/cost-headers) | `X-KS-Cost-Cents`, `X-KS-Cache-Savings-Cents`, and the budget headers on every native response. |
+| [Streaming](/docs/api/using-the-api/streaming) | SSE conventions and how cost is delivered on the final chunk. |
 
 Read these once and the rest of the API reference reads as a thin layer over them.
 
@@ -93,6 +93,6 @@ The `kovaserve` extension envelope on `/v1/chat/completions` is the seam for nat
 ## See also
 
 - [Layers — control plane](/docs/concepts/layers/control-plane) — what the control plane is responsible for
-- [Authentication](/docs/api/authentication) — start here before any other API page
+- [Authentication](/docs/api/using-the-api/authentication) — start here before any other API page
 - [`POST /v1/chat/completions`](/docs/api/inference/chat-completions) — the highest-traffic endpoint
 - [`POST /v1/ks/runs`](/docs/api/runs/create) — the canonical entry into the native control plane

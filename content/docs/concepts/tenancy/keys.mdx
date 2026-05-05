@@ -156,7 +156,7 @@ Authorization: Bearer ks_live_3f2a...e1f2
    resolved scope → admission, routing, metering
 ```
 
-Resolution is the first step on every request; nothing else runs until the AuthContext is produced. See [authentication](/docs/api/authentication) for the full request-side contract.
+Resolution is the first step on every request; nothing else runs until the AuthContext is produced. See [authentication](/docs/api/using-the-api/authentication) for the full request-side contract.
 
 ## Audit and visibility
 
@@ -182,6 +182,6 @@ A Key is a service credential — KovaServe records `key_id` on every request, a
 - [Tenancy](/docs/concepts/tenancy) — the four-level hierarchy
 - [Environments](/docs/concepts/tenancy/environments) — the parent
 - [PolicyScope](/docs/concepts/policy/policy-scopes) — the governance binding the Key resolves to
-- [Authentication](/docs/api/authentication) — the request-side contract
+- [Authentication](/docs/api/using-the-api/authentication) — the request-side contract
 - [Identity and IDs](/docs/concepts/run-hierarchy/identity-and-ids) — `key_id` ULID format
 - [`POST /v1/ks/keys`](/docs/api/keys/create) · [`POST /v1/ks/keys/{id}/rotate`](/docs/api/keys/rotate) · [`POST /v1/ks/keys/{id}/revoke`](/docs/api/keys/revoke)

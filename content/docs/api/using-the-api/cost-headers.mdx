@@ -97,7 +97,7 @@ data: {
 data: [DONE]
 ```
 
-The streaming `usage` block uses JSON numbers (not strings) for cost fields, with up to four fractional digits. Identity and budget headers (`X-KS-Run-Id`, `X-KS-Budget-State`, etc.) are still present on the response head — only the cost-amount headers are omitted from streaming. See [Streaming](/docs/api/streaming) for the full final-chunk shape.
+The streaming `usage` block uses JSON numbers (not strings) for cost fields, with up to four fractional digits. Identity and budget headers (`X-KS-Run-Id`, `X-KS-Budget-State`, etc.) are still present on the response head — only the cost-amount headers are omitted from streaming. See [Streaming](/docs/api/using-the-api/streaming) for the full final-chunk shape.
 
 ## Reading cost in client code
 
@@ -128,6 +128,6 @@ The headers are per-call. For aggregations across many calls — per Run, per Pr
 - [Cost model](/docs/concepts/cost/cost-model) — how `gross`, `net`, and cache savings relate
 - [Pricing snapshots](/docs/concepts/cost/pricing-snapshots) — how a usage row stays self-contained for audit
 - [Cost per completed run](/docs/concepts/cost/cost-per-completed-run) — the unit of value
-- [Streaming](/docs/api/streaming) — the final-chunk cost convention
-- [Errors](/docs/api/errors) — `budget_exceeded` and `context_budget_exceeded` envelopes
+- [Streaming](/docs/api/using-the-api/streaming) — the final-chunk cost convention
+- [Errors](/docs/api/using-the-api/errors) — `budget_exceeded` and `context_budget_exceeded` envelopes
 - [`GET /v1/ks/metering/usage`](/docs/api/metering/usage) · [`GET /v1/ks/metering/export`](/docs/api/metering/export)

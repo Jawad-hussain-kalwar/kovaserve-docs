@@ -117,7 +117,7 @@ The KovaServe SDK and CLI generate idempotency keys automatically when one is no
 
 ## What `Idempotency-Key` is not
 
-`Idempotency-Key` and the canonical [entity ID conventions](/docs/api/ids) serve different purposes:
+`Idempotency-Key` and the canonical [entity ID conventions](/docs/api/using-the-api/ids) serve different purposes:
 
 | | `Idempotency-Key` | Entity ID (`run_id`, etc.) |
 |---|---|---|
@@ -130,7 +130,7 @@ The KovaServe SDK and CLI generate idempotency keys automatically when one is no
 
 ## See also
 
-- [IDs](/docs/api/ids) — the difference between idempotency keys and entity IDs
-- [Errors](/docs/api/errors) — the `idempotency_conflict` envelope
+- [IDs](/docs/api/using-the-api/ids) — the difference between idempotency keys and entity IDs
+- [Errors](/docs/api/using-the-api/errors) — the `idempotency_conflict` envelope
 - [Runs — `external_run_id`](/docs/concepts/run-hierarchy/runs#how-a-run-is-created) — the long-lived alternative for runtime correlation
 - [`POST /v1/ks/runs`](/docs/api/runs/create) — the canonical idempotent create

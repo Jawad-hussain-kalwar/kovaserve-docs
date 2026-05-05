@@ -13,7 +13,7 @@ Every request to `/v1/*` and `/v1/ks/*` carries:
 Authorization: Bearer ks_live_<32 hex characters>
 ```
 
-A request without the header, with a non-`Bearer` scheme, or with a key the gateway cannot resolve fails before any tenancy or scope logic runs. The error envelope follows the family of the path — OpenAI-style on `/v1/*`, native on `/v1/ks/*`. See [Errors](/docs/api/errors).
+A request without the header, with a non-`Bearer` scheme, or with a key the gateway cannot resolve fails before any tenancy or scope logic runs. The error envelope follows the family of the path — OpenAI-style on `/v1/*`, native on `/v1/ks/*`. See [Errors](/docs/api/using-the-api/errors).
 
 ## Key format
 
@@ -76,7 +76,7 @@ Authentication answers *who is calling*. Authorization answers *what they may do
 2. **Rate limit** — is the key within its requests-per-second and tokens-per-minute quotas?
 3. **Run-level admission** — does the [Budget](/docs/concepts/policy/budgets) and [ContextBudget](/docs/concepts/policy/context-budgets) admit the call?
 
-Each layer can independently reject a request. Failures carry distinct error codes — `model_access_denied`, `rate_limited`, `budget_exceeded`, `context_budget_exceeded` — so clients can distinguish them. See [Errors](/docs/api/errors) for the full list.
+Each layer can independently reject a request. Failures carry distinct error codes — `model_access_denied`, `rate_limited`, `budget_exceeded`, `context_budget_exceeded` — so clients can distinguish them. See [Errors](/docs/api/using-the-api/errors) for the full list.
 
 ## Failure modes
 
@@ -142,8 +142,8 @@ Content-Type: application/json
 
 ## See also
 
-- [Errors](/docs/api/errors) — the two error envelopes and the full code list
-- [IDs](/docs/api/ids) — what a `key_id` looks like and how IDs propagate
+- [Errors](/docs/api/using-the-api/errors) — the two error envelopes and the full code list
+- [IDs](/docs/api/using-the-api/ids) — what a `key_id` looks like and how IDs propagate
 - [Tenants](/docs/concepts/tenancy/tenants) · [Projects](/docs/concepts/tenancy/projects) · [Environments](/docs/concepts/tenancy/environments) · [Keys](/docs/concepts/tenancy/keys) — the four-level hierarchy
 - [PolicyScopes](/docs/concepts/policy/policy-scopes) — what a key's scope governs
 - [`POST /v1/ks/keys`](/docs/api/keys/create) · [`POST /v1/ks/keys/{id}/rotate`](/docs/api/keys/rotate) · [`POST /v1/ks/keys/{id}/revoke`](/docs/api/keys/revoke)

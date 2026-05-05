@@ -142,7 +142,7 @@ There is no resume from a disconnected stream — the produced tokens have been 
 
 ## Errors during a stream
 
-Errors that occur **before** the first SSE frame return a normal HTTP error response with a status code and an [error envelope](/docs/api/errors) — the connection never enters SSE mode.
+Errors that occur **before** the first SSE frame return a normal HTTP error response with a status code and an [error envelope](/docs/api/using-the-api/errors) — the connection never enters SSE mode.
 
 Errors **after** streaming has begun deliver an error frame and close the stream:
 
@@ -195,8 +195,8 @@ curl -N \
 
 ## See also
 
-- [Cost headers](/docs/api/cost-headers) — the non-streaming counterpart and the budget headers (which streaming responses also carry)
-- [Errors](/docs/api/errors) — error envelopes and mid-stream error frames
+- [Cost headers](/docs/api/using-the-api/cost-headers) — the non-streaming counterpart and the budget headers (which streaming responses also carry)
+- [Errors](/docs/api/using-the-api/errors) — error envelopes and mid-stream error frames
 - [`POST /v1/chat/completions`](/docs/api/inference/chat-completions) — the only endpoint that streams
-- [Idempotency](/docs/api/idempotency) — replay semantics when the connection drops
+- [Idempotency](/docs/api/using-the-api/idempotency) — replay semantics when the connection drops
 - [Checkpoints](/docs/concepts/recovery/checkpoints) — durable resume across long generations

@@ -83,7 +83,7 @@ Content-Type: application/json
 }
 ```
 
-The response is an OpenAI-shape `chat.completion` augmented with cost headers — see [cost headers](/docs/api/cost-headers). The created [ContextManifest](/docs/concepts/context/context-manifests), [ModelCall](/docs/concepts/run-hierarchy/model-calls), [admission](/docs/concepts/policy/admission) decision, and [`cached_tokens`](/docs/concepts/routing/cached-tokens) usage are addressable through the native control-plane and metering APIs against the `run_id` and `step_id` the runtime supplied.
+The response is an OpenAI-shape `chat.completion` augmented with cost headers — see [cost headers](/docs/api/using-the-api/cost-headers). The created [ContextManifest](/docs/concepts/context/context-manifests), [ModelCall](/docs/concepts/run-hierarchy/model-calls), [admission](/docs/concepts/policy/admission) decision, and [`cached_tokens`](/docs/concepts/routing/cached-tokens) usage are addressable through the native control-plane and metering APIs against the `run_id` and `step_id` the runtime supplied.
 
 ## Runtime Integration Adapters
 

@@ -107,7 +107,7 @@ Semantics:
 - Keys are retained for 24 hours from first use, after which the key is forgettable and re-using it starts a fresh request.
 - Keys are opaque strings, 1–255 characters, any UTF-8 characters except control bytes. UUIDs are conventional but not required.
 
-Idempotency keys are distinct from ULIDs — they exist on the request, not on any persistent entity, and they are not addressable. See [Idempotency](/docs/api/idempotency) for the full API contract.
+Idempotency keys are distinct from ULIDs — they exist on the request, not on any persistent entity, and they are not addressable. See [Idempotency](/docs/api/using-the-api/idempotency) for the full API contract.
 
 ## `external_run_id` for runtime correlation
 
@@ -150,7 +150,7 @@ The two consequences:
 ## See also
 
 - [Sessions](/docs/concepts/continuity/sessions#id-format) — the `ses_<24hex>` exception
-- [Idempotency](/docs/api/idempotency) — the `Idempotency-Key` header contract
+- [Idempotency](/docs/api/using-the-api/idempotency) — the `Idempotency-Key` header contract
 - [Runs](/docs/concepts/run-hierarchy/runs) — `external_run_id` and runtime correlation
-- [Authentication](/docs/api/authentication) — API keys and the tenant scope IDs resolve under
-- [Errors](/docs/api/errors) — the error envelope returned for `invalid_id`, `not_found`, and idempotency conflicts
+- [Authentication](/docs/api/using-the-api/authentication) — API keys and the tenant scope IDs resolve under
+- [Errors](/docs/api/using-the-api/errors) — the error envelope returned for `invalid_id`, `not_found`, and idempotency conflicts
