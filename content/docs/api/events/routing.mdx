@@ -1,0 +1,235 @@
+---
+title: Routing events
+description: GET /v1/ks/events/routing — pull Cache-Aware Router decisions under ks.route.* covering planned, selected, fallback_used, and override_applied events.
+---
+
+Read routing events — placement decisions made by the [Cache-Aware Router](/docs/concepts/routing/manifest-aware-routing). Every routing decision emits a sequence of events that records the candidates considered, the chosen route, and any fallback or override applied.
+
+```http
+GET /v1/ks/events/routing
+Authorization: Bearer ks_...
+```
+
+## Authorization scope
+
+Bearer key bound to a `(tenant, project, environment)` triple. Returns events whose `tenant_id` matches the resolved AuthContext.
+
+## Query parameters
+
+| Parameter | Type | Default | Meaning |
+|---|---|---|---|
+| `after` | string \| null | `null` | Opaque cursor — return events strictly after this position. |
+| `before` | string \| null | `null` | Opaque cursor — return events strictly before this position. |
+| `limit` | integer | `100` | Maximum events per page. Capped at `500`. |
+| `run_id` | ULID | `null` | Restrict to events for a single Run. |
+| `step_id` | ULID | `null` | Restrict to events for a single Step. |
+| `model_call_id` | ULID | `null` | Restrict to events for a single ModelCall. |
+| `node_id` | string | `null` | Restrict to events whose selected node matches. |
+| `event_type[]` | string | `null` | Filter to specific subjects. Repeat for multiple values. |
+| `since` | RFC 3339 | `null` | Include only events with `timestamp >= since`. |
+| `until` | RFC 3339 | `null` | Include only events with `timestamp < until`. |
+
+## Event types
+
+| `event_type` | Trigger |
+|---|---|
+| `ks.route.planned` | Router has scored candidates and produced a ranked plan. Emitted before dispatch. |
+| `ks.route.selected` | A specific node has been selected and dispatch is committed. |
+| `ks.route.fallback_used` | Primary route failed; a ranked fallback took over. |
+| `ks.route.override_applied` | An operator-supplied override redirected the route. |
+
+## Request
+
+```http
+GET /v1/ks/events/routing?run_id=01J8X9Y2Z3K4M5N6P7Q8R9S0T1
+Authorization: Bearer ks_...
+```
+
+```bash
+curl -s -G "https://api.kovaserve.com/v1/ks/events/routing" \
+  -H "Authorization: Bearer ks_..." \
+  --data-urlencode "run_id=01J8X9Y2Z3K4M5N6P7Q8R9S0T1"
+```
+
+```python
+import requests
+
+r = requests.get(
+    "https://api.kovaserve.com/v1/ks/events/routing",
+    headers={"Authorization": f"Bearer {api_key}"},
+    params={"run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1"},
+)
+events = r.json()["data"]
+```
+
+## Response
+
+```json
+{
+  "data": [
+    {
+      "event_id": "01J8X9Y2Z3K4M5N6P7Q8R9RTS1",
+      "event_type": "ks.route.selected",
+      "timestamp": "2026-04-30T12:00:00.012Z",
+      "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9ORG1",
+      "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9PRJ1",
+      "environment_id": "01J8X9Y2Z3K4M5N6P7Q8R9ENV1",
+      "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+      "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+      "step_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+      "model_call_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T3",
+      "context_manifest_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T7",
+      "checkpoint_id": null,
+      "state_handle_id": null,
+      "node_id": "node-gpu-2",
+      "model_id": "qwen3-coder-30b",
+      "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+      "payload": {
+        "node_id": "node-gpu-2",
+        "score": 0.91,
+        "warmness": "hot",
+        "rationale": {
+          "manifest_reuse_estimate_tokens": 3640,
+          "restore_cost_ms": 0,
+          "queue_depth": 2,
+          "scope_filter": "project",
+          "session_affinity": false
+        },
+        "resume_feasible": true
+      }
+    }
+  ],
+  "page": {
+    "next_cursor": "01J8X9Y2Z3K4M5N6P7Q8R9RTS0",
+    "prev_cursor": "01J8X9Y2Z3K4M5N6P7Q8R9RTS1",
+    "has_more": true,
+    "limit": 100
+  }
+}
+```
+
+## Payload shapes
+
+### `ks.route.planned`
+
+```json
+{
+  "candidates": [
+    {
+      "node_id": "node-gpu-2",
+      "score": 0.91,
+      "warmness": "hot",
+      "expected_cached_tokens": 3640,
+      "expected_restore_cost_ms": 0
+    },
+    {
+      "node_id": "node-gpu-3",
+      "score": 0.62,
+      "warmness": "warm",
+      "expected_cached_tokens": 1842,
+      "expected_restore_cost_ms": 84
+    }
+  ],
+  "context_share_scope": "project",
+  "stable_context_id": "ctx_v1:9c2e...",
+  "context_budget_state": "ACTIVE"
+}
+```
+
+### `ks.route.selected`
+
+```json
+{
+  "node_id": "node-gpu-2",
+  "score": 0.91,
+  "warmness": "hot",
+  "rationale": {
+    "manifest_reuse_estimate_tokens": 3640,
+    "restore_cost_ms": 0,
+    "queue_depth": 2,
+    "scope_filter": "project",
+    "session_affinity": false
+  },
+  "resume_feasible": true
+}
+```
+
+`rationale` is the structured explanation of the decision — a consumer can reconstruct why this node won over alternatives without re-running the scorer.
+
+### `ks.route.fallback_used`
+
+```json
+{
+  "primary_node_id": "node-gpu-2",
+  "fallback_node_id": "node-gpu-3",
+  "reason": "primary_unavailable",
+  "primary_failure": {
+    "code": "node_overloaded",
+    "message": "queue depth exceeded threshold"
+  }
+}
+```
+
+`reason` ∈ `primary_unavailable`, `primary_rejected`, `primary_admission_failed`.
+
+### `ks.route.override_applied`
+
+```json
+{
+  "override_source": "placement_hint",
+  "override_value": {
+    "preferred_node_id": "node-gpu-4"
+  },
+  "selected_node_id": "node-gpu-4",
+  "would_have_selected": "node-gpu-2"
+}
+```
+
+`override_source` ∈ `placement_hint` (runtime-supplied), `operator_pin` (admin), `policy_constraint` (PolicyScope-driven).
+
+## Identity fields
+
+`run_id`, `step_id`, `model_call_id`, and `context_manifest_id` are populated on every routing event. The envelope's `node_id` is populated to the *selected* node on `selected` and `fallback_used`; on `planned` it is `null` because no node has been picked yet. The full candidate list for `planned` lives in `payload.candidates`.
+
+## Sequence
+
+A typical ModelCall produces:
+
+```
+ks.route.planned        (candidates scored)
+[optional] ks.route.override_applied  (if override fired)
+ks.route.selected       (final pick)
+[optional] ks.route.fallback_used     (if primary failed)
+```
+
+`ks.route.override_applied` is emitted *before* `ks.route.selected` when the override decided the pick. `event_id` lexicographic order matches transition order within the request.
+
+## Status codes
+
+| Status | Meaning |
+|---|---|
+| `200 OK` | Page returned. Empty `data` is valid. |
+| `400 invalid_request` | Malformed cursor, both `after` and `before` set, `limit` outside `[1, 500]`, unknown `event_type`, or invalid timestamp. |
+| `401 invalid_api_key` | Bearer token missing, malformed, or revoked. |
+| `403 forbidden` | Filter targets a Run, Project, or node outside the key's scope. |
+| `429 rate_limit_exceeded` | Per-key request rate limit reached. |
+
+## Common usage
+
+**Routing-quality audit.** Compare `ks.route.selected.payload.rationale.manifest_reuse_estimate_tokens` against realized `kv.state.accessed.payload.cached_tokens` for the same `model_call_id`. Persistent divergence is a routing-quality signal.
+
+**Override audit.** `ks.route.override_applied` events are the binding audit trail for operator overrides. Filter by `event_type[]=ks.route.override_applied` for compliance reporting.
+
+**Fallback monitoring.** `ks.route.fallback_used` rate is a primary substrate-health signal. Aggregate `since=...` per node to surface flaky GPUs.
+
+**Per-Run timeline.** Routing events sit between `ks.step.started` and `ks.model_call.started`. Merge by `timestamp` and `model_call_id` against execution events to draw the full timeline.
+
+## See also
+
+- [Routing events](/docs/concepts/events/routing) — the conceptual coverage
+- [Manifest-aware routing](/docs/concepts/routing/manifest-aware-routing) — the subsystem these events project
+- [KV index](/docs/concepts/routing/kv-index) — the lookup feeding scorer inputs
+- [Placement hints](/docs/concepts/routing/placement-hints) — runtime-supplied overrides
+- [`GET /v1/ks/events/state`](/docs/api/events/state) — the substrate-side counterpart that confirms predictions
+- [Event envelope](/docs/concepts/events/event-envelope)
+- [Pagination](/docs/api/using-the-api/pagination)

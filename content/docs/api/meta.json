@@ -12,6 +12,7 @@
     "policy",
     "metering",
     "tenancy",
-    "runtime"
+    "runtime",
+    "events"
   ]
 }

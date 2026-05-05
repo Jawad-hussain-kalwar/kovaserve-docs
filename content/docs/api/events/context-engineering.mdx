@@ -1,0 +1,321 @@
+---
+title: Context engineering events
+description: GET /v1/ks/events/context-engineering — pull manifest, segment, artifact, compaction, and ContextBudget admission events under ks.context.*.
+---
+
+Read context engineering events — the lifecycle of every context-engineering primitive: [manifests](/docs/concepts/context/context-manifests), [segments](/docs/concepts/context/context-segments), [artifacts](/docs/concepts/context/context-artifacts), [compaction records](/docs/concepts/context/compaction-records), and [ContextBudget](/docs/concepts/policy/context-budgets) admission decisions.
+
+```http
+GET /v1/ks/events/context-engineering
+Authorization: Bearer ks_...
+```
+
+## Authorization scope
+
+Bearer key bound to a `(tenant, project, environment)` triple. Returns events whose `tenant_id` matches the resolved AuthContext.
+
+## Query parameters
+
+| Parameter | Type | Default | Meaning |
+|---|---|---|---|
+| `after` | string \| null | `null` | Opaque cursor — return events strictly after this position. |
+| `before` | string \| null | `null` | Opaque cursor — return events strictly before this position. |
+| `limit` | integer | `100` | Maximum events per page. Capped at `500`. |
+| `run_id` | ULID | `null` | Restrict to events for a single Run. |
+| `step_id` | ULID | `null` | Restrict to events for a single Step. |
+| `model_call_id` | ULID | `null` | Restrict to events for a single ModelCall. |
+| `context_manifest_id` | ULID | `null` | Restrict to events for a single ContextManifest. |
+| `context_budget_id` | ULID | `null` | Restrict to events for a single ContextBudget. |
+| `decision` | string | `null` | Filter ContextBudget events by admission decision (`WARN`, `OFFLOAD_REQUIRED`, `COMPACT_REQUIRED`, `DEGRADE`, `HARD_STOP`, `ALLOW`). |
+| `event_type[]` | string | `null` | Filter to specific subjects. Repeat for multiple values. |
+| `since` | RFC 3339 | `null` | Include only events with `timestamp >= since`. |
+| `until` | RFC 3339 | `null` | Include only events with `timestamp < until`. |
+
+## Event types
+
+Manifests:
+
+| `event_type` | Trigger |
+|---|---|
+| `ks.context.manifest.created` | A new ContextManifest row is inserted. |
+| `ks.context.manifest.admitted` | Admission settles with `ALLOW` or `WARN`. The admitted manifest is the one that proceeds to dispatch. |
+
+Segments:
+
+| `event_type` | Trigger |
+|---|---|
+| `ks.context.segment.created` | A ContextSegment row is inserted. |
+| `ks.context.segment.evicted` | A segment is removed under retention or compaction. |
+
+Artifacts:
+
+| `event_type` | Trigger |
+|---|---|
+| `ks.context.artifact.created` | A ContextArtifact row is inserted (object-storage upload completed). |
+| `ks.context.artifact.offloaded` | An inline segment was rewritten as an artifact reference under `OFFLOAD_REQUIRED`. |
+
+Compaction:
+
+| `event_type` | Trigger |
+|---|---|
+| `ks.context.compaction.started` | A CompactionRecord is opened. |
+| `ks.context.compaction.completed` | Compaction finished; output segments are usable. |
+
+ContextBudget:
+
+| `event_type` | Trigger |
+|---|---|
+| `ks.context.budget.warning` | Admission produced `WARN`. |
+| `ks.context.budget.offload_required` | Admission produced `OFFLOAD_REQUIRED`. |
+| `ks.context.budget.compact_required` | Admission produced `COMPACT_REQUIRED`. |
+| `ks.context.budget.degraded` | Admission produced `DEGRADE`. |
+| `ks.context.budget.hard_stop` | Admission produced `HARD_STOP`. |
+
+## Request
+
+```http
+GET /v1/ks/events/context-engineering?run_id=01J8X9Y2Z3K4M5N6P7Q8R9S0T1
+Authorization: Bearer ks_...
+```
+
+```bash
+curl -s -G "https://api.kovaserve.com/v1/ks/events/context-engineering" \
+  -H "Authorization: Bearer ks_..." \
+  --data-urlencode "run_id=01J8X9Y2Z3K4M5N6P7Q8R9S0T1"
+```
+
+```python
+import requests
+
+r = requests.get(
+    "https://api.kovaserve.com/v1/ks/events/context-engineering",
+    headers={"Authorization": f"Bearer {api_key}"},
+    params={"run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1"},
+)
+events = r.json()["data"]
+```
+
+## Response
+
+```json
+{
+  "data": [
+    {
+      "event_id": "01J8X9Y2Z3K4M5N6P7Q8R9CTX1",
+      "event_type": "ks.context.manifest.admitted",
+      "timestamp": "2026-04-30T12:00:00.014Z",
+      "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9ORG1",
+      "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9PRJ1",
+      "environment_id": "01J8X9Y2Z3K4M5N6P7Q8R9ENV1",
+      "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+      "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+      "step_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+      "model_call_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T3",
+      "context_manifest_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T7",
+      "checkpoint_id": null,
+      "state_handle_id": null,
+      "node_id": null,
+      "model_id": "qwen3-coder-30b",
+      "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+      "payload": {
+        "context_manifest_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T7",
+        "decision": "ALLOW",
+        "transformations": [
+          {
+            "type": "artifact_offload",
+            "segment_ids": ["01J8X9Y2Z3K4M5N6P7Q8R9SG07"]
+          }
+        ],
+        "token_counts": {
+          "stable_tokens": 3640,
+          "volatile_tokens": 412,
+          "active_tokens": 4218,
+          "offloaded_tokens": 9412
+        },
+        "stable_context_id": "ctx_v1:9c2e..."
+      }
+    }
+  ],
+  "page": {
+    "next_cursor": "01J8X9Y2Z3K4M5N6P7Q8R9CTX0",
+    "prev_cursor": "01J8X9Y2Z3K4M5N6P7Q8R9CTX1",
+    "has_more": true,
+    "limit": 100
+  }
+}
+```
+
+## Payload shapes
+
+### `ks.context.manifest.created`
+
+```json
+{
+  "context_manifest_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T7",
+  "stable_prefix_id": "sha256:a7f3...",
+  "stable_context_id": "ctx_v1:9c2e...",
+  "renderer_version": "v1.4",
+  "tokenizer_fingerprint": "qwen3-bpe-v2",
+  "segment_count": 7,
+  "token_counts": {
+    "stable_tokens": 3640,
+    "volatile_tokens": 412,
+    "active_tokens": 4218,
+    "offloaded_tokens": 0
+  }
+}
+```
+
+### `ks.context.manifest.admitted`
+
+```json
+{
+  "context_manifest_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T7",
+  "decision": "ALLOW",
+  "transformations": [
+    {
+      "type": "artifact_offload",
+      "segment_ids": ["01J8X9Y2Z3K4M5N6P7Q8R9SG07"]
+    }
+  ],
+  "token_counts": {
+    "stable_tokens": 3640,
+    "volatile_tokens": 412,
+    "active_tokens": 4218,
+    "offloaded_tokens": 9412
+  },
+  "stable_context_id": "ctx_v1:9c2e..."
+}
+```
+
+`decision` ∈ `ALLOW`, `WARN`. The admitted manifest is the one that proceeds to dispatch; non-admitting decisions land on `ks.context.budget.*` events instead.
+
+### `ks.context.segment.created` and `ks.context.segment.evicted`
+
+```json
+{
+  "segment_id": "01J8X9Y2Z3K4M5N6P7Q8R9SG07",
+  "context_type": "tool_result",
+  "memory_class": "ephemeral",
+  "token_count": 9412,
+  "byte_count": 412384,
+  "artifact_ref_id": "01J8X9Y2Z3K4M5N6P7Q8R9AR01",
+  "checkpoint_relevant": false
+}
+```
+
+`evicted` adds a `reason` field — `retention`, `compaction_input`, `manual`.
+
+### `ks.context.artifact.created`
+
+```json
+{
+  "artifact_id": "01J8X9Y2Z3K4M5N6P7Q8R9AR01",
+  "name": "tool_output_pytest.txt",
+  "version": "1",
+  "mime_type": "text/plain",
+  "byte_count": 412384,
+  "preview_token_count": 124
+}
+```
+
+### `ks.context.artifact.offloaded`
+
+```json
+{
+  "artifact_id": "01J8X9Y2Z3K4M5N6P7Q8R9AR01",
+  "from_segment_id": "01J8X9Y2Z3K4M5N6P7Q8R9SG07",
+  "byte_count": 412384,
+  "preview_token_count": 124,
+  "trigger": "context_budget_offload_required"
+}
+```
+
+### `ks.context.compaction.started` and `ks.context.compaction.completed`
+
+```json
+{
+  "compaction_record_id": "01J8X9Y2Z3K4M5N6P7Q8R9CR01",
+  "source_manifest_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T7",
+  "source_segment_ids": ["01J8X9Y2Z3K4M5N6P7Q8R9SG02", "01J8X9Y2Z3K4M5N6P7Q8R9SG03"],
+  "output_segment_ids": ["01J8X9Y2Z3K4M5N6P7Q8R9SG09"],
+  "method": "runtime_summarize",
+  "model_id": "qwen3-coder-7b",
+  "token_counts": {
+    "before": 18420,
+    "after": 1284
+  },
+  "tokens_saved": 17136
+}
+```
+
+`method` ∈ `runtime_summarize` (runtime-supplied summary), `runtime_dropped` (runtime dropped without summary), `kovaserve_managed` (managed compactor). `started` carries `source_segment_ids` only; `completed` adds `output_segment_ids`, `tokens_saved`, and `method`.
+
+### `ks.context.budget.*`
+
+All ContextBudget events share a payload shape:
+
+```json
+{
+  "context_budget_id": "01J8X9Y2Z3K4M5N6P7Q8R9CB01",
+  "decision": "OFFLOAD_REQUIRED",
+  "dimension": "active_tokens",
+  "limit": 16384,
+  "consumed": 18420,
+  "consumed_pct": 112.43,
+  "transformation_planned": "artifact_offload"
+}
+```
+
+`decision` matches the event type's suffix. `dimension` ∈ `active_tokens`, `stable_tokens`, `volatile_tokens`, `tool_result_tokens`, `artifact_bytes`. `transformation_planned` is the action the [admission](/docs/concepts/policy/admission) service is about to apply.
+
+## Identity fields
+
+`context_manifest_id` is populated on every event tied to a specific manifest. `run_id`, `step_id`, and `model_call_id` are populated for events fired in the per-call hot path (manifest assembly, admission, compaction triggered during the call). Standalone artifact events may have `run_id` and `model_call_id` `null` when the write is not call-bound.
+
+## Sequence around a single ModelCall
+
+```
+ks.context.segment.created                  (per inbound segment)
+ks.context.manifest.created                 (the Global Context Manager produces the initial manifest)
+[optional] ks.context.budget.offload_required
+ks.context.artifact.offloaded               (one per offloaded segment)
+[optional] ks.context.budget.compact_required
+ks.context.compaction.started
+ks.context.compaction.completed
+ks.context.manifest.admitted                (final admitted shape)
+```
+
+The sequence may include zero, one, or multiple admission round-trips depending on transformations applied. The `ks.context.manifest.admitted` event always lands last for the call, with the final decision (`ALLOW` or `WARN`).
+
+## Status codes
+
+| Status | Meaning |
+|---|---|
+| `200 OK` | Page returned. Empty `data` is valid. |
+| `400 invalid_request` | Malformed cursor, both `after` and `before` set, `limit` outside `[1, 500]`, unknown `event_type` or `decision`. |
+| `401 invalid_api_key` | Bearer token missing, malformed, or revoked. |
+| `403 forbidden` | Filter targets a Run, Manifest, or ContextBudget outside the key's scope. |
+| `429 rate_limit_exceeded` | Per-key request rate limit reached. |
+
+## Common usage
+
+**Context timeline UI.** Per-Run timeline of segment composition, manifest evolution, and admission decisions. Filter by `run_id` and merge by `timestamp`.
+
+**Compaction lineage view.** Filter `event_type[]=ks.context.compaction.completed` and walk by `payload.source_manifest_id` to draw the lineage tree.
+
+**ContextBudget dashboards.** Aggregate `ks.context.budget.*` decisions per Project to surface budget-tuning needs.
+
+**Cache reuse audit.** Join `ks.context.manifest.admitted.payload.stable_context_id` against the [state events](/docs/api/events/state) `kv.state.accessed.payload.stable_context_id` to verify reuse predictions.
+
+**Offload accounting.** Sum `ks.context.artifact.offloaded.payload.byte_count` per Run to attribute offload usage against [ContextBudget](/docs/concepts/policy/context-budgets) limits.
+
+## See also
+
+- [Context engineering events](/docs/concepts/events/context-engineering) — the conceptual coverage
+- [Context manifests](/docs/concepts/context/context-manifests) · [Context segments](/docs/concepts/context/context-segments) · [Context artifacts](/docs/concepts/context/context-artifacts)
+- [Compaction records](/docs/concepts/context/compaction-records) · [Compaction lineage](/docs/concepts/context/compaction-lineage)
+- [Context budgets](/docs/concepts/policy/context-budgets) · [Admission](/docs/concepts/policy/admission)
+- [`GET /v1/ks/events/budget`](/docs/api/events/budget) — the run-level Budget counterpart
+- [Event envelope](/docs/concepts/events/event-envelope)
+- [Pagination](/docs/api/using-the-api/pagination)

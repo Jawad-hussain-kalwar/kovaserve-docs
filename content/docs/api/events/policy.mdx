@@ -1,0 +1,221 @@
+---
+title: Policy events
+description: GET /v1/ks/events/policy — pull PolicyScope evaluation outcomes under ks.policy.* covering evaluated, denied, and degraded_mode_applied events.
+---
+
+Read policy events — evaluation outcomes from the [Policy / Governance Layer](/docs/concepts/policy/policy-scopes). Every admission produces at least one `ks.policy.evaluated` event; denied or degraded outcomes produce additional events that surface the rationale for audit.
+
+```http
+GET /v1/ks/events/policy
+Authorization: Bearer ks_...
+```
+
+## Authorization scope
+
+Bearer key bound to a `(tenant, project, environment)` triple. Returns events whose `tenant_id` matches the resolved AuthContext.
+
+## Query parameters
+
+| Parameter | Type | Default | Meaning |
+|---|---|---|---|
+| `after` | string \| null | `null` | Opaque cursor — return events strictly after this position. |
+| `before` | string \| null | `null` | Opaque cursor — return events strictly before this position. |
+| `limit` | integer | `100` | Maximum events per page. Capped at `500`. |
+| `run_id` | ULID | `null` | Restrict to events for a single Run. |
+| `step_id` | ULID | `null` | Restrict to events for a single Step. |
+| `model_call_id` | ULID | `null` | Restrict to events for a single ModelCall. |
+| `policy_scope_id` | ULID | `null` | Restrict to events under a single PolicyScope. |
+| `decision` | string | `null` | `ALLOW`, `DENY`, or `DEGRADED_ALLOW`. |
+| `denial_reason` | string | `null` | Filter denials by reason — see the enum below. |
+| `event_type[]` | string | `null` | Filter to specific subjects. Repeat for multiple values. |
+| `since` | RFC 3339 | `null` | Include only events with `timestamp >= since`. |
+| `until` | RFC 3339 | `null` | Include only events with `timestamp < until`. |
+
+## Event types
+
+| `event_type` | Trigger |
+|---|---|
+| `ks.policy.evaluated` | PolicyScope evaluated for a request. Emitted on every admission. |
+| `ks.policy.denied` | Evaluation produced `DENY`. Emitted in addition to `evaluated`. |
+| `ks.policy.degraded_mode_applied` | Evaluation produced `DEGRADED_ALLOW` and the degraded path took over. |
+
+## Request
+
+```http
+GET /v1/ks/events/policy?event_type[]=ks.policy.denied&since=2026-04-30T00:00:00Z
+Authorization: Bearer ks_...
+```
+
+```bash
+curl -s -G "https://api.kovaserve.com/v1/ks/events/policy" \
+  -H "Authorization: Bearer ks_..." \
+  --data-urlencode "event_type=ks.policy.denied" \
+  --data-urlencode "since=2026-04-30T00:00:00Z"
+```
+
+```python
+import requests
+
+r = requests.get(
+    "https://api.kovaserve.com/v1/ks/events/policy",
+    headers={"Authorization": f"Bearer {api_key}"},
+    params={
+        "event_type": ["ks.policy.denied"],
+        "since": "2026-04-30T00:00:00Z",
+    },
+)
+denials = r.json()["data"]
+```
+
+## Response
+
+```json
+{
+  "data": [
+    {
+      "event_id": "01J8X9Y2Z3K4M5N6P7Q8R9PE01",
+      "event_type": "ks.policy.denied",
+      "timestamp": "2026-04-30T12:00:00.001Z",
+      "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9ORG1",
+      "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9PRJ1",
+      "environment_id": "01J8X9Y2Z3K4M5N6P7Q8R9ENV1",
+      "run_id": null,
+      "session_id": null,
+      "step_id": null,
+      "model_call_id": null,
+      "context_manifest_id": null,
+      "checkpoint_id": null,
+      "state_handle_id": null,
+      "node_id": null,
+      "model_id": "qwen3-ultra-405b",
+      "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+      "payload": {
+        "policy_scope_id": "01J8X9Y2Z3K4M5N6P7Q8R9P0K0",
+        "denial_reason": "model_not_in_acl",
+        "matched_rule": "tenant.model_acl",
+        "details": {
+          "requested_model": "qwen3-ultra-405b",
+          "allowed_models": ["qwen3-coder-30b", "qwen3-coder-7b"]
+        },
+        "http_status": 403
+      }
+    }
+  ],
+  "page": {
+    "next_cursor": "01J8X9Y2Z3K4M5N6P7Q8R9PE00",
+    "prev_cursor": "01J8X9Y2Z3K4M5N6P7Q8R9PE01",
+    "has_more": true,
+    "limit": 100
+  }
+}
+```
+
+## Payload shapes
+
+### `ks.policy.evaluated`
+
+```json
+{
+  "policy_scope_id": "01J8X9Y2Z3K4M5N6P7Q8R9P0K0",
+  "decision": "ALLOW",
+  "checks": {
+    "model_acl": "allow",
+    "rate_limit": "allow",
+    "context_share_scope": "project",
+    "data_boundary": "tenant_local",
+    "deployment_restriction": "allow"
+  }
+}
+```
+
+`decision` ∈ `ALLOW`, `DENY`, `DEGRADED_ALLOW`. Every check is enumerated in `checks` so a consumer can see which dimensions passed.
+
+### `ks.policy.denied`
+
+```json
+{
+  "policy_scope_id": "01J8X9Y2Z3K4M5N6P7Q8R9P0K0",
+  "denial_reason": "model_not_in_acl",
+  "matched_rule": "tenant.model_acl",
+  "details": { "...": "reason-specific" },
+  "http_status": 403
+}
+```
+
+`denial_reason` enum:
+
+| Value | Meaning |
+|---|---|
+| `model_not_in_acl` | Requested model is not in the resolved PolicyScope's allowed list. |
+| `rate_limit_exceeded` | Request rate limit reached. |
+| `tokens_per_second_exceeded` | Per-key tokens-per-second budget reached. |
+| `deployment_not_allowed` | Deployment is not in the PolicyScope's allowed deployments. |
+| `environment_restricted` | Environment is restricted for this caller. |
+| `data_boundary_violation` | Data boundary check failed (region or residency). |
+| `key_revoked` | API key was revoked. |
+| `key_expired` | API key passed its expiration timestamp. |
+| `tenant_suspended` | Tenant is suspended. |
+| `project_archived` | Project is archived. |
+| `environment_archived` | Environment is archived. |
+| `key_mode_environment_mismatch` | Key mode (`live` / `test`) does not match Environment mode. |
+
+`matched_rule` identifies which overlay layer produced the denial — `tenant.<field>`, `project.<field>`, `environment.<field>`, or `key.<field>`. This is the audit anchor for policy disputes: it identifies which policy edit would change the outcome.
+
+### `ks.policy.degraded_mode_applied`
+
+```json
+{
+  "policy_scope_id": "01J8X9Y2Z3K4M5N6P7Q8R9P0K0",
+  "degraded_dimension": "model_size",
+  "from_value": "qwen3-coder-30b",
+  "to_value": "qwen3-coder-7b",
+  "reason": "context_budget_degrade"
+}
+```
+
+`degraded_dimension` ∈ `model_size`, `max_tokens`, `optional_segments_dropped`, `context_window`. `reason` identifies which subsystem requested the degrade — typically `context_budget_degrade` from [admission](/docs/concepts/policy/admission), or `budget_warning` from the run-level [Budget](/docs/concepts/policy/budgets).
+
+## Identity fields
+
+`run_id`, `step_id`, and `model_call_id` are populated when the policy evaluation is tied to a specific Step or ModelCall. For per-request rate-limit checks (gateway-level, before Run resolution), `run_id` is `null` — the event ties only to the tenancy triple, the resolved `policy_scope_id`, and the API key on the `payload`.
+
+## Sequence
+
+```
+ks.policy.evaluated                          (always)
+[optional] ks.policy.denied                   (decision = DENY)
+[optional] ks.policy.degraded_mode_applied    (decision = DEGRADED_ALLOW)
+```
+
+`ks.policy.denied` is emitted *in addition to* `ks.policy.evaluated` rather than replacing it. A `DENY` short-circuits the rest of admission — no manifest admission, no routing, no model call.
+
+## Status codes
+
+| Status | Meaning |
+|---|---|
+| `200 OK` | Page returned. Empty `data` is valid. |
+| `400 invalid_request` | Malformed cursor, both `after` and `before` set, `limit` outside `[1, 500]`, unknown `event_type`, `decision`, or `denial_reason`. |
+| `401 invalid_api_key` | Bearer token missing, malformed, or revoked. |
+| `403 forbidden` | Filter targets a PolicyScope outside the caller's visibility. |
+| `429 rate_limit_exceeded` | Per-key request rate limit reached. |
+
+## Common usage
+
+**Compliance audit.** `ks.policy.denied` events are the binding audit trail for "why was this request denied" disputes. The `matched_rule` field is the citation pointing to the rule that fired.
+
+**Operator dashboards.** Aggregate `ks.policy.evaluated.payload.decision` over time to surface tenants that frequently hit limits.
+
+**Degraded-mode tracking.** `ks.policy.degraded_mode_applied` rate is a signal that PolicyScope or [ContextBudget](/docs/concepts/policy/context-budgets) limits need to be revisited.
+
+**SDK error mapping.** Map `denial_reason` to actionable error messages without scraping HTTP-level error bodies.
+
+## See also
+
+- [Policy events](/docs/concepts/events/policy) — the conceptual coverage
+- [Policy scopes](/docs/concepts/policy/policy-scopes) — the entity these events project
+- [Admission](/docs/concepts/policy/admission) — the next gate after policy evaluation
+- [Tenancy](/docs/concepts/tenancy) — the hierarchy PolicyScopes resolve through
+- [`GET /v1/ks/events/budget`](/docs/api/events/budget) — the run-level counterpart
+- [`GET /v1/ks/events/context-engineering`](/docs/api/events/context-engineering) — context budget admission events
+- [Event envelope](/docs/concepts/events/event-envelope)
+- [Pagination](/docs/api/using-the-api/pagination)

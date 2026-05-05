@@ -1,0 +1,270 @@
+---
+title: State events
+description: GET /v1/ks/events/state — pull KV substrate cache lifecycle events under kv.state.* covering store, access, partial match, demote, promote, restore, transfer, evict, and invalidate transitions.
+---
+
+Read state events — the lifecycle of reusable KV state on the open inference substrate. Every meaningful KV transition emits an event under `kv.state.*` on the dedicated `kv_events` JetStream stream.
+
+```http
+GET /v1/ks/events/state
+Authorization: Bearer ks_...
+```
+
+State events are operationally separate from `ks.*` events: substrate volume is high and retention semantics differ. The endpoint shape is the same — uniform envelope, cursor pagination, identical filter set — so a consumer querying state events does not need a special client.
+
+## Authorization scope
+
+Bearer key bound to a `(tenant, project, environment)` triple. Visibility is filtered by the key's `context_share_scope` (`tenant`, `project`, or `private`) — see [PolicyScope](/docs/concepts/policy/policy-scopes). State events for cache rows outside the caller's share scope are not returned.
+
+## Query parameters
+
+| Parameter | Type | Default | Meaning |
+|---|---|---|---|
+| `after` | string \| null | `null` | Opaque cursor — return events strictly after this position. |
+| `before` | string \| null | `null` | Opaque cursor — return events strictly before this position. |
+| `limit` | integer | `100` | Maximum events per page. Capped at `500`. |
+| `node_id` | string | `null` | Restrict to events from a single substrate node. |
+| `stable_prefix_id` | string | `null` | Restrict to events touching a single legacy stable prefix. |
+| `stable_context_id` | string | `null` | Restrict to events touching a single compatibility-aware context identity. |
+| `tier` | string | `null` | Restrict to events at a specific tier (`hbm`, `host_ram`, `nvme`, `object_store`). |
+| `event_type[]` | string | `null` | Filter to specific subjects. Repeat for multiple values. |
+| `since` | RFC 3339 | `null` | Include only events with `timestamp >= since`. |
+| `until` | RFC 3339 | `null` | Include only events with `timestamp < until`. |
+
+`run_id`, `step_id`, and `model_call_id` filters are also accepted but apply only to events fired during a specific request — eviction and tier movement carry no Run linkage.
+
+## Event types
+
+| `event_type` | Trigger |
+|---|---|
+| `kv.state.stored` | Substrate created a new reusable state entry (cold prefill landed). |
+| `kv.state.accessed` | Substrate served a request from cache; full or partial reuse. |
+| `kv.state.partial_match` | Substrate matched a prefix up to N tokens before divergence. |
+| `kv.state.demoted` | Tier movement: state moved from a hotter tier to a cooler one. |
+| `kv.state.promoted` | Tier movement: state moved to a hotter tier. |
+| `kv.state.restored` | Restore from durable export completed; state is live in HBM. |
+| `kv.state.transferred` | State copied or moved between nodes. |
+| `kv.state.evicted` | State removed under tier pressure or TTL. |
+| `kv.state.invalidated` | State invalidated because its compatibility key changed. |
+
+Tier values: `hbm`, `host_ram`, `nvme`, `object_store`.
+
+## Request
+
+```http
+GET /v1/ks/events/state?stable_context_id=ctx_v1:9c2e&limit=100
+Authorization: Bearer ks_...
+```
+
+```bash
+curl -s -G "https://api.kovaserve.com/v1/ks/events/state" \
+  -H "Authorization: Bearer ks_..." \
+  --data-urlencode "stable_context_id=ctx_v1:9c2e..." \
+  --data-urlencode "limit=100"
+```
+
+```python
+import requests
+
+r = requests.get(
+    "https://api.kovaserve.com/v1/ks/events/state",
+    headers={"Authorization": f"Bearer {api_key}"},
+    params={
+        "stable_context_id": "ctx_v1:9c2e...",
+        "event_type": ["kv.state.accessed", "kv.state.evicted"],
+        "limit": 100,
+    },
+)
+events = r.json()["data"]
+```
+
+## Response
+
+```json
+{
+  "data": [
+    {
+      "event_id": "01J8X9Y2Z3K4M5N6P7Q8R9KVA1",
+      "event_type": "kv.state.accessed",
+      "timestamp": "2026-04-30T12:00:00.402Z",
+      "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9ORG1",
+      "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9PRJ1",
+      "environment_id": "01J8X9Y2Z3K4M5N6P7Q8R9ENV1",
+      "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+      "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+      "step_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+      "model_call_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T3",
+      "context_manifest_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T7",
+      "checkpoint_id": null,
+      "state_handle_id": null,
+      "node_id": "node-gpu-2",
+      "model_id": "qwen3-coder-30b",
+      "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+      "payload": {
+        "stable_prefix_id": "sha256:a7f3...",
+        "stable_context_id": "ctx_v1:9c2e...",
+        "cached_tokens": 3640,
+        "match": "exact",
+        "warmness": "hot",
+        "tier": "hbm"
+      }
+    }
+  ],
+  "page": {
+    "next_cursor": "01J8X9Y2Z3K4M5N6P7Q8R9KVA0",
+    "prev_cursor": "01J8X9Y2Z3K4M5N6P7Q8R9KVA1",
+    "has_more": true,
+    "limit": 100
+  }
+}
+```
+
+## Payload shapes
+
+### `kv.state.stored`
+
+```json
+{
+  "stable_prefix_id": "sha256:a7f3...",
+  "stable_context_id": "ctx_v1:9c2e...",
+  "token_count": 4218,
+  "byte_count": 1856732,
+  "tier": "hbm",
+  "compatibility": {
+    "model_id": "qwen3-coder-30b",
+    "tokenizer_fingerprint": "qwen3-bpe-v2",
+    "renderer_version": "v1.4"
+  }
+}
+```
+
+### `kv.state.accessed`
+
+```json
+{
+  "stable_prefix_id": "sha256:a7f3...",
+  "stable_context_id": "ctx_v1:9c2e...",
+  "cached_tokens": 3640,
+  "match": "exact",
+  "warmness": "hot",
+  "tier": "hbm"
+}
+```
+
+`match` ∈ `exact`, `partial`. A `partial` match is paired with a `kv.state.partial_match` event carrying divergence detail. `warmness` ∈ `hot`, `warm`, `cool`, `cold`.
+
+### `kv.state.partial_match`
+
+```json
+{
+  "stable_prefix_id": "sha256:a7f3...",
+  "matched_tokens": 1842,
+  "total_input_tokens": 4218,
+  "divergence_offset": 1842
+}
+```
+
+### `kv.state.demoted` and `kv.state.promoted`
+
+```json
+{
+  "stable_prefix_id": "sha256:a7f3...",
+  "from_tier": "hbm",
+  "to_tier": "host_ram",
+  "duration_ms": 84,
+  "byte_count": 1856732
+}
+```
+
+### `kv.state.restored`
+
+```json
+{
+  "stable_prefix_id": "sha256:a7f3...",
+  "from_tier": "object_store",
+  "to_tier": "hbm",
+  "duration_ms": 412,
+  "byte_count": 1856732,
+  "outcome": "succeeded"
+}
+```
+
+A failed restore replaces `outcome: "succeeded"` with `outcome: "failed"` and adds `error.code` and `error.message`.
+
+### `kv.state.transferred`
+
+```json
+{
+  "stable_prefix_id": "sha256:a7f3...",
+  "from_node_id": "node-gpu-2",
+  "to_node_id": "node-gpu-3",
+  "byte_count": 1856732,
+  "duration_ms": 124
+}
+```
+
+### `kv.state.evicted`
+
+```json
+{
+  "stable_prefix_id": "sha256:a7f3...",
+  "tier": "host_ram",
+  "reason": "pressure",
+  "byte_count": 1856732
+}
+```
+
+`reason` ∈ `pressure`, `ttl`, `manual`, `compatibility`.
+
+### `kv.state.invalidated`
+
+```json
+{
+  "stable_prefix_id": "sha256:a7f3...",
+  "reason": "model_version_change",
+  "previous_compatibility": {
+    "model_id": "qwen3-coder-30b",
+    "renderer_version": "v1.3"
+  }
+}
+```
+
+## Identity fields
+
+The envelope's `node_id` is always populated — every KV transition is local to a single substrate node. The `model_id` is populated when the transition is model-bound. `run_id` and `model_call_id` are populated only on `kv.state.accessed` events fired during a specific request — eviction and tier movement carry no Run linkage because they happen independently of the request that originally stored the state.
+
+The `stable_prefix_id` and `stable_context_id` payload fields tie events to the [manifest identity](/docs/concepts/context/context-manifests) that produced them. A consumer reconstructing "what happened to this manifest's cache" filters by these payload fields, not by `run_id`.
+
+## Status codes
+
+| Status | Meaning |
+|---|---|
+| `200 OK` | Page returned. Empty `data` is valid. |
+| `400 invalid_request` | Malformed cursor, both `after` and `before` set, `limit` outside `[1, 500]`, unknown `event_type` or `tier`, or invalid timestamp. |
+| `401 invalid_api_key` | Bearer token missing, malformed, or revoked. |
+| `403 forbidden` | Filter targets a node or scope outside the caller's visibility. |
+| `429 rate_limit_exceeded` | Per-key request rate limit reached. |
+
+## Common usage
+
+**Cache hit-rate dashboards.** Aggregate `kv.state.accessed.payload.cached_tokens` against the input token count from the matching `ks.model_call.completed` event. Join by `model_call_id`.
+
+**Routing-prediction audit.** Join `ks.route.selected.payload.expected_cached_tokens` against the realized `kv.state.accessed.payload.cached_tokens` for the same `model_call_id`. Persistent divergence is a routing-quality signal.
+
+**Tier-movement monitoring.** Filter `event_type[]=kv.state.demoted&event_type[]=kv.state.promoted` to surface tiering pressure in real time.
+
+**Eviction tracking.** Filter `event_type[]=kv.state.evicted&since=...` to compute eviction rate per Project — a leading indicator that a `context_share_scope` or retention setting needs adjustment.
+
+## Retention
+
+State events default to 24 hours retention in JetStream — substrate volume makes longer JetStream retention impractical. The PostgreSQL projection that backs the API endpoint persists for the configured event retention window (7 days default in managed cloud), so the API remains queryable for the same window as `ks.*` streams; the JetStream subscription is for low-latency consumers.
+
+## See also
+
+- [State events](/docs/concepts/events/state) — the conceptual coverage
+- [KV cache](/docs/concepts/routing/kv-cache) — the substrate mechanism
+- [KV index](/docs/concepts/routing/kv-index) — the across-time projection consuming this stream
+- [Cached tokens](/docs/concepts/routing/cached-tokens) — the per-call accounting
+- [Event envelope](/docs/concepts/events/event-envelope)
+- [`GET /v1/ks/events/routing`](/docs/api/events/routing) — the routing-side counterpart
+- [Pagination](/docs/api/using-the-api/pagination)

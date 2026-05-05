@@ -1,0 +1,276 @@
+---
+title: Execution events
+description: GET /v1/ks/events/execution — pull Run, Step, and ModelCall lifecycle events under ks.run.*, ks.step.*, ks.model_call.* with cursor pagination and a uniform envelope.
+---
+
+Read execution events — the lifecycle of [Runs](/docs/concepts/run-hierarchy/runs), [Steps](/docs/concepts/run-hierarchy/steps), and [ModelCalls](/docs/concepts/run-hierarchy/model-calls). Every Run state transition, every Step, and every ModelCall produces an event under `ks.run.*`, `ks.step.*`, or `ks.model_call.*`.
+
+```http
+GET /v1/ks/events/execution
+Authorization: Bearer ks_...
+```
+
+## Authorization scope
+
+Bearer key bound to a `(tenant, project, environment)` triple. Returns events whose `tenant_id` matches the resolved AuthContext. A Project-scoped key sees only events for its Project; a Tenant-scoped key sees events across all Projects in the Tenant.
+
+## Query parameters
+
+| Parameter | Type | Default | Meaning |
+|---|---|---|---|
+| `after` | string \| null | `null` | Opaque cursor — return events strictly after this position. |
+| `before` | string \| null | `null` | Opaque cursor — return events strictly before this position. |
+| `limit` | integer | `100` | Maximum events per page. Capped at `500`. |
+| `run_id` | ULID | `null` | Restrict to events for a single Run. |
+| `session_id` | `ses_<24hex>` | `null` | Restrict to events for Runs bound to this Session. |
+| `step_id` | ULID | `null` | Restrict to events for a single Step. |
+| `model_call_id` | ULID | `null` | Restrict to events for a single ModelCall. |
+| `event_type[]` | string | `null` | Filter to specific subjects. Repeat the parameter for multiple values. |
+| `since` | RFC 3339 | `null` | Include only events with `timestamp >= since`. |
+| `until` | RFC 3339 | `null` | Include only events with `timestamp < until`. |
+
+`after` and `before` are mutually exclusive. Supplying both returns `400 invalid_request`. The default page returns the most recent `limit` events in descending order.
+
+## Event types
+
+| `event_type` | Trigger | Resulting Run state |
+|---|---|---|
+| `ks.run.created` | Run row inserted. | `CREATED` |
+| `ks.run.started` | Run admitted; transitions to `RUNNING`. | `RUNNING` |
+| `ks.run.paused` | Run transitions to `PAUSED`. | `PAUSED` |
+| `ks.run.recovering` | Run enters `RECOVERING` after failure or operator-triggered resume. | `RECOVERING` |
+| `ks.run.resumed` | Run transitions from `RESUMING` back to `RUNNING`. | `RUNNING` |
+| `ks.run.completed` | Run transitions to `COMPLETED`. | `COMPLETED` |
+| `ks.run.failed` | Run transitions to `FAILED`. | `FAILED` |
+| `ks.step.created` | Step row inserted. | (owning Run) |
+| `ks.step.started` | Step transitions to `STARTED`. | (owning Run) |
+| `ks.step.completed` | Step transitions to `SUCCEEDED`, `FAILED`, `SKIPPED`, or `CANCELED`. | (owning Run) |
+| `ks.model_call.started` | ModelCall row inserted; substrate dispatch begins. | (owning Run) |
+| `ks.model_call.completed` | ModelCall finishes — success, failure, or cancellation. | (owning Run) |
+
+The full state machines are documented at [Run state machine](/docs/concepts/run-hierarchy/run-state-machine) and [Step state machine](/docs/concepts/run-hierarchy/step-state-machine). The conceptual coverage of payload shapes lives at [Execution events](/docs/concepts/events/execution); the wire shape is reproduced below.
+
+## Request
+
+```http
+GET /v1/ks/events/execution?run_id=01J8X9Y2Z3K4M5N6P7Q8R9S0T1&limit=100
+Authorization: Bearer ks_...
+```
+
+```bash
+curl -s -G "https://api.kovaserve.com/v1/ks/events/execution" \
+  -H "Authorization: Bearer ks_..." \
+  --data-urlencode "run_id=01J8X9Y2Z3K4M5N6P7Q8R9S0T1" \
+  --data-urlencode "limit=100"
+```
+
+```python
+import requests
+
+r = requests.get(
+    "https://api.kovaserve.com/v1/ks/events/execution",
+    headers={"Authorization": f"Bearer {api_key}"},
+    params={"run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1", "limit": 100},
+)
+events = r.json()["data"]
+```
+
+## Response
+
+```json
+{
+  "data": [
+    {
+      "event_id": "01J8X9Y2Z3K4M5N6P7Q8R9EVT3",
+      "event_type": "ks.model_call.completed",
+      "timestamp": "2026-04-30T12:00:00.412Z",
+      "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9ORG1",
+      "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9PRJ1",
+      "environment_id": "01J8X9Y2Z3K4M5N6P7Q8R9ENV1",
+      "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+      "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+      "step_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+      "model_call_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T3",
+      "context_manifest_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T7",
+      "checkpoint_id": null,
+      "state_handle_id": null,
+      "node_id": "node-gpu-2",
+      "model_id": "qwen3-coder-30b",
+      "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+      "payload": {
+        "duration_ms": 412,
+        "prompt_tokens": 4218,
+        "completion_tokens": 312,
+        "total_tokens": 4530,
+        "cached_tokens": 3640,
+        "cost_cents": "0.0420",
+        "gross_cost_cents": "0.0680",
+        "cache_savings_cents": "0.0260",
+        "cost_status": "ok",
+        "outcome": "SUCCEEDED"
+      }
+    },
+    {
+      "event_id": "01J8X9Y2Z3K4M5N6P7Q8R9EVT2",
+      "event_type": "ks.step.started",
+      "timestamp": "2026-04-30T12:00:00.001Z",
+      "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9ORG1",
+      "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9PRJ1",
+      "environment_id": "01J8X9Y2Z3K4M5N6P7Q8R9ENV1",
+      "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+      "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+      "step_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+      "model_call_id": null,
+      "context_manifest_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T7",
+      "checkpoint_id": null,
+      "state_handle_id": null,
+      "node_id": null,
+      "model_id": null,
+      "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+      "payload": {
+        "step_type": "MODEL_CALL",
+        "context_manifest_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T7"
+      }
+    }
+  ],
+  "page": {
+    "next_cursor": "01J8X9Y2Z3K4M5N6P7Q8R9EVT1",
+    "prev_cursor": "01J8X9Y2Z3K4M5N6P7Q8R9EVT3",
+    "has_more": true,
+    "limit": 100
+  }
+}
+```
+
+## Payload shapes
+
+### `ks.run.created`
+
+```json
+{
+  "external_run_id": "lg-task-9821",
+  "external_runtime": "langgraph",
+  "policy_scope_id": "01J8X9Y2Z3K4M5N6P7Q8R9P0K0",
+  "budget_id": "01J8X9Y2Z3K4M5N6P7Q8R9BG01",
+  "context_budget_id": "01J8X9Y2Z3K4M5N6P7Q8R9CB01"
+}
+```
+
+### `ks.run.started`
+
+```json
+{ "started_at": "2026-04-30T12:00:01.214Z" }
+```
+
+### `ks.run.recovering` and `ks.run.resumed`
+
+```json
+{
+  "from_state": "FAILED",
+  "checkpoint_id": "01J8X9Y2Z3K4M5N6P7Q8R9CK01",
+  "kv_restore_feasible": true
+}
+```
+
+`ks.run.resumed` adds `resumed_at`.
+
+### `ks.run.completed`
+
+```json
+{
+  "outcome": "SUCCEEDED",
+  "completed_at": "2026-04-30T12:14:32.001Z",
+  "step_count": 23,
+  "model_call_count": 41,
+  "cost_cents": "1.4280",
+  "cache_savings_cents": "0.5860"
+}
+```
+
+### `ks.run.failed`
+
+Replaces `outcome` with `error.code` and `error.message`; the rest of the shape matches `ks.run.completed`.
+
+### `ks.step.created` and `ks.step.started`
+
+```json
+{
+  "step_type": "MODEL_CALL",
+  "context_manifest_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T7"
+}
+```
+
+### `ks.step.completed`
+
+```json
+{
+  "outcome": "SUCCEEDED",
+  "duration_ms": 612,
+  "model_call_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T3"
+}
+```
+
+`outcome` ∈ `SUCCEEDED`, `FAILED`, `SKIPPED`, `CANCELED`.
+
+### `ks.model_call.started`
+
+```json
+{
+  "model_id": "qwen3-coder-30b",
+  "context_manifest_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T7",
+  "node_id": "node-gpu-2",
+  "stream": false
+}
+```
+
+### `ks.model_call.completed`
+
+```json
+{
+  "duration_ms": 412,
+  "prompt_tokens": 4218,
+  "completion_tokens": 312,
+  "total_tokens": 4530,
+  "cached_tokens": 3640,
+  "cost_cents": "0.0420",
+  "gross_cost_cents": "0.0680",
+  "cache_savings_cents": "0.0260",
+  "cost_status": "ok",
+  "outcome": "SUCCEEDED"
+}
+```
+
+A failed ModelCall replaces `outcome: "SUCCEEDED"` with `outcome: "FAILED"` and adds `error.code` and `error.message`. Cost values are decimal strings with four fractional digits.
+
+## Ordering
+
+Within a single Run, events are emitted in transition order — the `event_id` lexicographic order matches the transition order. Cross-Run ordering is not guaranteed. Two Runs running concurrently produce interleaved events on the wire and on the API endpoint.
+
+The default response is **descending** by `timestamp` (newest first). Walking with `after` traverses toward older events. To stream a Run's history oldest-to-newest, page backward by walking with `before` from the most recent event, or sort the merged result on the client.
+
+## Status codes
+
+| Status | Meaning |
+|---|---|
+| `200 OK` | Page returned. Empty `data` is valid. |
+| `400 invalid_request` | Malformed cursor, both `after` and `before` set, `limit` outside `[1, 500]`, unknown `event_type`, or invalid timestamp. |
+| `401 invalid_api_key` | Bearer token missing, malformed, or revoked. |
+| `403 forbidden` | Filter targets a Run/Project outside the key's scope. |
+| `429 rate_limit_exceeded` | Per-key request rate limit reached. |
+
+## Common usage
+
+**Tail a Run's lifecycle.** Filter by `run_id` and poll forward with `after` from the last seen `event_id`. The bounded emission latency (under 500 ms p99) keeps a tail responsive without per-token push infrastructure.
+
+**Detect Run completion.** Filter `event_type[]=ks.run.completed&event_type[]=ks.run.failed`. The presence of either is the terminal signal — no other state follows.
+
+**Aggregate cost.** Sum `payload.cost_cents` across `ks.model_call.completed` events for the period. The same identity (`model_call_id`, ULID) joins to the [usage record](/docs/api/metering/usage) for cross-checks.
+
+## See also
+
+- [Execution events](/docs/concepts/events/execution) — the conceptual coverage and consumer patterns
+- [Run state machine](/docs/concepts/run-hierarchy/run-state-machine)
+- [Step state machine](/docs/concepts/run-hierarchy/step-state-machine)
+- [Event envelope](/docs/concepts/events/event-envelope)
+- [`GET /v1/ks/runs/{id}/timeline`](/docs/api/runs/timeline) — pre-merged timeline
+- [Pagination](/docs/api/using-the-api/pagination)

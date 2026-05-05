@@ -302,15 +302,15 @@ Living roadmap for `docs.kovaserve.com`. Source of structure for `content/docs/`
 
 ### Events
 
-- [ ] `api/events/index.mdx` — envelope + cursor
-- [ ] `api/events/execution.mdx`
-- [ ] `api/events/state.mdx`
-- [ ] `api/events/routing.mdx`
-- [ ] `api/events/policy.mdx`
-- [ ] `api/events/budget.mdx`
-- [ ] `api/events/checkpoint.mdx`
-- [ ] `api/events/runtime.mdx`
-- [ ] `api/events/context-engineering.mdx`
+- [x] `api/events/index.mdx` — envelope + cursor
+- [x] `api/events/execution.mdx`
+- [x] `api/events/state.mdx`
+- [x] `api/events/routing.mdx`
+- [x] `api/events/policy.mdx`
+- [x] `api/events/budget.mdx`
+- [x] `api/events/checkpoint.mdx`
+- [x] `api/events/runtime.mdx`
+- [x] `api/events/context-engineering.mdx`
 
 ### Cluster
 

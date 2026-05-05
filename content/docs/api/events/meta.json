@@ -1,0 +1,14 @@
+{
+  "title": "Events",
+  "pages": [
+    "index",
+    "execution",
+    "state",
+    "routing",
+    "policy",
+    "budget",
+    "checkpoint",
+    "runtime",
+    "context-engineering"
+  ]
+}

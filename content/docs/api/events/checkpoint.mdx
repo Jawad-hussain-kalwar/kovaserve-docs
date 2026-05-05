@@ -1,0 +1,241 @@
+---
+title: Checkpoint events
+description: GET /v1/ks/events/checkpoint — pull Checkpoint lifecycle events under ks.checkpoint.* covering created, validated, restore_started, restore_completed, and restore_failed.
+---
+
+Read checkpoint events — the lifecycle of [Checkpoints](/docs/concepts/recovery/checkpoints), the resumable snapshots that bind logical context first and KV state as an optional optimization. Every Checkpoint creation, validation, restore attempt, and restore outcome lands here.
+
+```http
+GET /v1/ks/events/checkpoint
+Authorization: Bearer ks_...
+```
+
+## Authorization scope
+
+Bearer key bound to a `(tenant, project, environment)` triple. Returns events whose `tenant_id` matches the resolved AuthContext.
+
+## Query parameters
+
+| Parameter | Type | Default | Meaning |
+|---|---|---|---|
+| `after` | string \| null | `null` | Opaque cursor — return events strictly after this position. |
+| `before` | string \| null | `null` | Opaque cursor — return events strictly before this position. |
+| `limit` | integer | `100` | Maximum events per page. Capped at `500`. |
+| `run_id` | ULID | `null` | Restrict to events for the originating Run. |
+| `target_run_id` | ULID | `null` | Restrict to restore events whose target Run matches. |
+| `checkpoint_id` | ULID | `null` | Restrict to events for a single Checkpoint. |
+| `event_type[]` | string | `null` | Filter to specific subjects. Repeat for multiple values. |
+| `since` | RFC 3339 | `null` | Include only events with `timestamp >= since`. |
+| `until` | RFC 3339 | `null` | Include only events with `timestamp < until`. |
+
+## Event types
+
+| `event_type` | Trigger | Resulting Checkpoint state |
+|---|---|---|
+| `ks.checkpoint.created` | Checkpoint row inserted; capture in flight. | `REQUESTED` → `CAPTURING` |
+| `ks.checkpoint.validated` | Compatibility validation completed. | `STORED` → `VALIDATED` |
+| `ks.checkpoint.restore_started` | Restore begins. | `RESTORING` |
+| `ks.checkpoint.restore_completed` | Restore reached `RESTORED`. | `RESTORED` |
+| `ks.checkpoint.restore_failed` | Restore failed; Checkpoint remains `VALIDATED`. | (failure terminal) |
+
+## Request
+
+```http
+GET /v1/ks/events/checkpoint?run_id=01J8X9Y2Z3K4M5N6P7Q8R9S0T1
+Authorization: Bearer ks_...
+```
+
+```bash
+curl -s -G "https://api.kovaserve.com/v1/ks/events/checkpoint" \
+  -H "Authorization: Bearer ks_..." \
+  --data-urlencode "run_id=01J8X9Y2Z3K4M5N6P7Q8R9S0T1"
+```
+
+```python
+import requests
+
+r = requests.get(
+    "https://api.kovaserve.com/v1/ks/events/checkpoint",
+    headers={"Authorization": f"Bearer {api_key}"},
+    params={"run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1"},
+)
+events = r.json()["data"]
+```
+
+## Response
+
+```json
+{
+  "data": [
+    {
+      "event_id": "01J8X9Y2Z3K4M5N6P7Q8R9CE01",
+      "event_type": "ks.checkpoint.validated",
+      "timestamp": "2026-04-30T12:08:14.412Z",
+      "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9ORG1",
+      "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9PRJ1",
+      "environment_id": "01J8X9Y2Z3K4M5N6P7Q8R9ENV1",
+      "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+      "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+      "step_id": "01J8X9Y2Z3K4M5N6P7Q8R9SP14",
+      "model_call_id": null,
+      "context_manifest_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T7",
+      "checkpoint_id": "01J8X9Y2Z3K4M5N6P7Q8R9CK01",
+      "state_handle_id": null,
+      "node_id": null,
+      "model_id": "qwen3-coder-30b",
+      "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+      "payload": {
+        "checkpoint_id": "01J8X9Y2Z3K4M5N6P7Q8R9CK01",
+        "compatibility": {
+          "model_family": "qwen3",
+          "tokenizer_fingerprint": "qwen3-bpe-v2",
+          "renderer_version": "v1.4",
+          "context_share_scope": "project"
+        },
+        "stored_at": "2026-04-30T12:08:14.001Z",
+        "byte_count": 18567320,
+        "kv_export_present": true
+      }
+    }
+  ],
+  "page": {
+    "next_cursor": "01J8X9Y2Z3K4M5N6P7Q8R9CE00",
+    "prev_cursor": "01J8X9Y2Z3K4M5N6P7Q8R9CE01",
+    "has_more": true,
+    "limit": 100
+  }
+}
+```
+
+## Payload shapes
+
+### `ks.checkpoint.created`
+
+```json
+{
+  "checkpoint_id": "01J8X9Y2Z3K4M5N6P7Q8R9CK01",
+  "trigger": "runtime",
+  "trigger_reason": "before_file_write",
+  "context_manifest_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T7",
+  "state_handles": [
+    { "type": "context_manifest", "id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T7" },
+    { "type": "kv_prefix", "id": "01J8X9Y2Z3K4M5N6P7Q8R9KV01" },
+    { "type": "artifact_bundle", "id": "01J8X9Y2Z3K4M5N6P7Q8R9AB01" },
+    { "type": "runtime_state", "id": "01J8X9Y2Z3K4M5N6P7Q8R9RS01" }
+  ]
+}
+```
+
+`trigger` ∈ `runtime` (managed runtime trigger rule), `manual` (operator), `budget_warning` (Budget threshold), `policy_advisory` (PolicyScope-driven, before risky tool call), `periodic`. `trigger_reason` is a free-form descriptor for human consumption — `before_file_write`, `pre_test_run`, `pre_unsafe_shell`, `analysis_phase_complete`.
+
+### `ks.checkpoint.validated`
+
+```json
+{
+  "checkpoint_id": "01J8X9Y2Z3K4M5N6P7Q8R9CK01",
+  "compatibility": {
+    "model_family": "qwen3",
+    "tokenizer_fingerprint": "qwen3-bpe-v2",
+    "renderer_version": "v1.4",
+    "context_share_scope": "project"
+  },
+  "stored_at": "2026-04-30T12:08:14.001Z",
+  "byte_count": 18567320,
+  "kv_export_present": true
+}
+```
+
+### `ks.checkpoint.restore_started`
+
+```json
+{
+  "checkpoint_id": "01J8X9Y2Z3K4M5N6P7Q8R9CK01",
+  "target_run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T9",
+  "restore_kind": "logical_first",
+  "kv_restore_planned": true
+}
+```
+
+`restore_kind` ∈ `logical_first` (manifest + artifacts; KV optional), `manifest_only` (KV restore not feasible). The target Run is the new Run created for the resume; the originating Run's `run_id` is on the envelope.
+
+### `ks.checkpoint.restore_completed`
+
+```json
+{
+  "checkpoint_id": "01J8X9Y2Z3K4M5N6P7Q8R9CK01",
+  "target_run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T9",
+  "kv_restored": true,
+  "kv_restore_duration_ms": 412,
+  "manifest_reconstructed": false,
+  "warmness": "warm"
+}
+```
+
+If KV restore failed but logical reconstruction succeeded: `kv_restored: false`, `manifest_reconstructed: true`, `warmness: "cold"`.
+
+### `ks.checkpoint.restore_failed`
+
+```json
+{
+  "checkpoint_id": "01J8X9Y2Z3K4M5N6P7Q8R9CK01",
+  "target_run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T9",
+  "stage": "compatibility_check",
+  "error": {
+    "code": "tokenizer_fingerprint_mismatch",
+    "message": "checkpoint tokenizer 'qwen3-bpe-v1' incompatible with target 'qwen3-bpe-v2'"
+  }
+}
+```
+
+`stage` ∈ `compatibility_check`, `manifest_load`, `artifact_validation`, `kv_import`. A failed restore at `compatibility_check` is a hard stop — the resume cannot proceed against the target. A failed restore at `kv_import` is recoverable: the system falls back to manifest-first reconstruction and emits `restore_completed` with `manifest_reconstructed: true`.
+
+## Identity fields
+
+`checkpoint_id` is populated on every event. `run_id` carries the *originating* Run on `created` and `validated`; on restore events it carries the originating Run while `payload.target_run_id` carries the resuming Run. The two are different ULIDs — resume creates a new Run.
+
+## Sequence
+
+A typical Checkpoint create-then-restore sequence:
+
+```
+ks.checkpoint.created           (Run X creates checkpoint at Step 14)
+ks.checkpoint.validated         (capture completed, compatibility verified)
+
+# ... time passes; original Run fails or is resumed elsewhere ...
+
+ks.checkpoint.restore_started   (target Run Y begins restore)
+ks.checkpoint.restore_completed (Y is RESTORED; transitions to RUNNING)
+```
+
+A failed restore replaces the final event with `restore_failed`. Kind-of-failure is in `payload.stage`.
+
+## Status codes
+
+| Status | Meaning |
+|---|---|
+| `200 OK` | Page returned. Empty `data` is valid. |
+| `400 invalid_request` | Malformed cursor, both `after` and `before` set, `limit` outside `[1, 500]`, unknown `event_type`. |
+| `401 invalid_api_key` | Bearer token missing, malformed, or revoked. |
+| `403 forbidden` | Filter targets a Run or Checkpoint outside the key's scope. |
+| `429 rate_limit_exceeded` | Per-key request rate limit reached. |
+
+## Common usage
+
+**Recovery dashboards.** Aggregate `ks.checkpoint.restore_completed` outcomes (KV-restored vs. manifest-reconstructed) per Project to surface restore quality.
+
+**Run timeline.** Checkpoint events sit on the Run timeline alongside Step events; the UI shows a checkpoint marker at the originating Step.
+
+**Audit.** `ks.checkpoint.restore_failed` events are the audit trail for resume incidents — `payload.stage` and `payload.error.code` identify the cause.
+
+**Trigger-rule tuning.** `ks.checkpoint.created.payload.trigger` distribution per Project is a signal of how frequently runtime trigger rules fire. A flood of `runtime` triggers may indicate over-aggressive trigger rules.
+
+## See also
+
+- [Checkpoint events](/docs/concepts/events/checkpoint) — the conceptual coverage
+- [Checkpoints](/docs/concepts/recovery/checkpoints) — the entity these events project
+- [Checkpoint state machine](/docs/concepts/recovery/checkpoint-state-machine) — the FSM transitions land on
+- [Resume flow](/docs/concepts/recovery/resume-flow) — the `RECOVERING → RESUMING → RUNNING` path that consumes restore events
+- [State handles](/docs/concepts/recovery/state-handles) — the typed references in `payload.state_handles`
+- [`POST /v1/ks/checkpoints/{id}/restore`](/docs/api/checkpoints/restore) — the action that produces these events
+- [Event envelope](/docs/concepts/events/event-envelope)
+- [Pagination](/docs/api/using-the-api/pagination)

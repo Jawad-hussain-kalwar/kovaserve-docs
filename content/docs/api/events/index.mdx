@@ -1,0 +1,165 @@
+---
+title: Events
+description: Pull KovaServe events — execution, state, routing, policy, budget, checkpoint, runtime, and context engineering — from cursor-paginated endpoints under a uniform envelope.
+---
+
+KovaServe events are pulled, not pushed. Every state transition in the control plane and the substrate emits exactly one event under a [uniform envelope](/docs/concepts/events/event-envelope), and every event is durable and replayable from cursor-paginated endpoints under `/v1/ks/events/*`.
+
+There is one endpoint per stream. The endpoint shape is identical across streams: cursor pagination over creation-time ordering, a closed envelope, stream-specific `payload`. Filters are applied before pagination.
+
+## Base URL and authentication
+
+```
+https://api.kovaserve.com/v1/ks/events
+```
+
+```http
+Authorization: Bearer ks_...
+```
+
+Events are tenancy-scoped. The resolved [AuthContext](/docs/api/using-the-api/authentication) bounds visibility — every event returned has the caller's `tenant_id` on the envelope. Cross-tenant fetches return `404 not_found`, never the actual row.
+
+## The eight stream endpoints
+
+| Stream | Endpoint | Subjects |
+|---|---|---|
+| Execution | [`GET /v1/ks/events/execution`](/docs/api/events/execution) | `ks.run.*`, `ks.step.*`, `ks.model_call.*` |
+| State | [`GET /v1/ks/events/state`](/docs/api/events/state) | `kv.state.*` |
+| Routing | [`GET /v1/ks/events/routing`](/docs/api/events/routing) | `ks.route.*` |
+| Policy | [`GET /v1/ks/events/policy`](/docs/api/events/policy) | `ks.policy.*` |
+| Budget | [`GET /v1/ks/events/budget`](/docs/api/events/budget) | `ks.budget.*` |
+| Checkpoint | [`GET /v1/ks/events/checkpoint`](/docs/api/events/checkpoint) | `ks.checkpoint.*` |
+| Runtime | [`GET /v1/ks/events/runtime`](/docs/api/events/runtime) | `ks.tool.*`, `ks.process.*`, `ks.file.*`, `ks.branch.*` |
+| Context engineering | [`GET /v1/ks/events/context-engineering`](/docs/api/events/context-engineering) | `ks.context.*` |
+
+`ks.*` events live in the `execution_events` JetStream stream under the `ks.>` filter. `kv.state.*` events live in the operationally separate `kv_events` stream — substrate volume is high and retention semantics differ. Consumers query the same envelope and the same correlation fields across both.
+
+## Common request shape
+
+Every events endpoint accepts the same query parameters:
+
+| Parameter | Type | Default | Meaning |
+|---|---|---|---|
+| `after` | string \| null | `null` | Opaque cursor — return events strictly after this position. |
+| `before` | string \| null | `null` | Opaque cursor — return events strictly before this position. |
+| `limit` | integer | `100` | Maximum events per page. Capped at `500`. |
+| `run_id` | ULID | `null` | Restrict to events for a single Run. |
+| `session_id` | `ses_<24hex>` | `null` | Restrict to events for a single Session. |
+| `step_id` | ULID | `null` | Restrict to events for a single Step. |
+| `model_call_id` | ULID | `null` | Restrict to events for a single ModelCall. |
+| `event_type[]` | string | `null` | One or more wire subjects to include. Repeat the parameter for multiple values. |
+| `since` | RFC 3339 | `null` | Include only events with `timestamp >= since`. |
+| `until` | RFC 3339 | `null` | Include only events with `timestamp < until`. |
+
+`after` and `before` are mutually exclusive. Tenancy filtering is implicit — the resolved AuthContext bounds visibility to the caller's `(tenant_id, project_id, environment_id)` triple. Per-stream pages document additional filters specific to that stream.
+
+The default page (no `after`, no `before`) returns the most recent `limit` events, in **descending** creation order. Walking forward to older events uses `after`; walking back toward newer events uses `before`. Cursors are opaque — see [Pagination](/docs/api/using-the-api/pagination) for the full contract.
+
+## Common response shape
+
+```json
+{
+  "data": [
+    {
+      "event_id": "01J8X9Y2Z3K4M5N6P7Q8R9EVT3",
+      "event_type": "ks.model_call.completed",
+      "timestamp": "2026-04-30T12:00:00.412Z",
+      "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9ORG1",
+      "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9PRJ1",
+      "environment_id": "01J8X9Y2Z3K4M5N6P7Q8R9ENV1",
+      "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+      "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+      "step_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+      "model_call_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T3",
+      "context_manifest_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T7",
+      "checkpoint_id": null,
+      "state_handle_id": null,
+      "node_id": "node-gpu-2",
+      "model_id": "qwen3-coder-30b",
+      "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+      "payload": {
+        "duration_ms": 412,
+        "prompt_tokens": 4218,
+        "completion_tokens": 312,
+        "cached_tokens": 3640,
+        "cost_cents": "0.0420"
+      }
+    }
+  ],
+  "page": {
+    "next_cursor": "01J8X9Y2Z3K4M5N6P7Q8R9EVT2",
+    "prev_cursor": "01J8X9Y2Z3K4M5N6P7Q8R9EVT3",
+    "has_more": true,
+    "limit": 100
+  }
+}
+```
+
+Every top-level envelope field is present on every event — non-applicable fields are `null`, never omitted. The `payload` shape is closed per `event_type` and documented on the per-stream page.
+
+## Status codes
+
+| Status | Meaning |
+|---|---|
+| `200 OK` | Page returned, possibly empty. An empty `data` array is a valid response. |
+| `400 invalid_request` | Malformed cursor, both `after` and `before` set, `limit` outside `[1, 500]`, unknown `event_type`, or invalid timestamp. |
+| `401 invalid_api_key` | Bearer token missing, malformed, or revoked. |
+| `403 forbidden` | API key scope does not cover the requested filter (e.g., a Project-scoped key requesting events for another Project). |
+| `429 rate_limit_exceeded` | Per-key request rate limit reached. Retry after the `Retry-After` header. |
+
+Errors use the [native error envelope](/docs/api/using-the-api/errors) — `error_code + message + details`.
+
+## Walking the stream
+
+Reading every event for a Run, oldest to newest:
+
+```python
+import requests
+
+cursor = None
+while True:
+    params = {"run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1", "limit": 200}
+    if cursor:
+        params["after"] = cursor
+    r = requests.get(
+        "https://api.kovaserve.com/v1/ks/events/execution",
+        headers={"Authorization": f"Bearer {api_key}"},
+        params=params,
+    ).json()
+    for event in r["data"]:
+        process(event)
+    if not r["page"]["has_more"]:
+        break
+    cursor = r["page"]["next_cursor"]
+```
+
+```bash
+curl -s -G "https://api.kovaserve.com/v1/ks/events/execution" \
+  -H "Authorization: Bearer ks_..." \
+  --data-urlencode "run_id=01J8X9Y2Z3K4M5N6P7Q8R9S0T1" \
+  --data-urlencode "limit=200"
+```
+
+## Replay and retention
+
+Every event is durable for the configured retention window — 7 days by default in managed cloud, configurable per Tenant; chosen at install time on private deployments. Within the retention window, a consumer that drops a cursor can rewind to any earlier `event_id` and re-read.
+
+Beyond the window the substrate `kv_events` stream rolls; the rest of the streams persist to S3-compatible storage configured at deployment time. Events that have aged out of the JetStream stream remain readable through the API — the API reads from the durable PostgreSQL projection that all events dual-write to at emit time.
+
+## Stream timing
+
+Events land in the API endpoint with bounded latency from the underlying transition — typically under 500 ms at the p99. The producer writes to JetStream and PostgreSQL on the same transaction that wrote the underlying row, so an event is visible the moment the row commits. There is no asynchronous publishing queue between the row and the event.
+
+## Filtering across streams
+
+For multi-stream timelines, query each stream endpoint separately and merge by `timestamp` and `event_id`. The envelope's correlation fields — `run_id`, `session_id`, `step_id`, `model_call_id`, `context_manifest_id`, `checkpoint_id`, `trace_id` — make joins trivial; no normalization is needed at consume time.
+
+The dedicated [`GET /v1/ks/runs/{id}/timeline`](/docs/api/runs/timeline) endpoint pre-merges the streams for a single Run into one chronologically ordered list. Use it for Run-scoped timeline UIs; use the per-stream endpoints for cross-Run aggregations and stream-specific consumers.
+
+## See also
+
+- [Event envelope](/docs/concepts/events/event-envelope) — the closed top-level field set
+- [Events overview](/docs/concepts/events) — the eight streams and their consumers
+- [Pagination](/docs/api/using-the-api/pagination) — opaque cursors, stable ordering
+- [Errors](/docs/api/using-the-api/errors) — native error envelope on `/v1/ks/*`
+- [`GET /v1/ks/runs/{id}/timeline`](/docs/api/runs/timeline) — pre-merged single-Run timeline

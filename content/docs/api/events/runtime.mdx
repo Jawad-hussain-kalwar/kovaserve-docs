@@ -1,0 +1,238 @@
+---
+title: Runtime events
+description: GET /v1/ks/events/runtime — pull managed runtime activity events under ks.tool.*, ks.process.*, ks.file.*, and ks.branch.* covering tool invocations, processes, file writes, and branches.
+---
+
+Read runtime events — managed runtime activity covering tool invocations, process lifecycle, file writes, and branch creation. This is the runtime-native projection of "what the agent did" beyond model calls — the surface a coding-agent timeline UI uses to draw activity alongside the [execution](/docs/api/events/execution) and [routing](/docs/api/events/routing) layers.
+
+```http
+GET /v1/ks/events/runtime
+Authorization: Bearer ks_...
+```
+
+## Authorization scope
+
+Bearer key bound to a `(tenant, project, environment)` triple. Returns events whose `tenant_id` matches the resolved AuthContext.
+
+## Query parameters
+
+| Parameter | Type | Default | Meaning |
+|---|---|---|---|
+| `after` | string \| null | `null` | Opaque cursor — return events strictly after this position. |
+| `before` | string \| null | `null` | Opaque cursor — return events strictly before this position. |
+| `limit` | integer | `100` | Maximum events per page. Capped at `500`. |
+| `run_id` | ULID | `null` | Restrict to events for a single Run. |
+| `step_id` | ULID | `null` | Restrict to events for a single Step. |
+| `tool_name` | string | `null` | Restrict to a tool by name (e.g., `shell`, `apply_patch`). |
+| `workspace_id` | ULID | `null` | Restrict to events from a single Workspace. |
+| `process_id` | ULID | `null` | Restrict to events for a single sandbox process. |
+| `event_type[]` | string | `null` | Filter to specific subjects. Repeat for multiple values. |
+| `since` | RFC 3339 | `null` | Include only events with `timestamp >= since`. |
+| `until` | RFC 3339 | `null` | Include only events with `timestamp < until`. |
+
+## Event types
+
+| `event_type` | Trigger |
+|---|---|
+| `ks.tool.invocation.started` | Tool call begins. |
+| `ks.tool.invocation.completed` | Tool call finishes — success, failure, cancellation, or policy block. |
+| `ks.process.started` | Sandbox process spawned. |
+| `ks.process.waiting` | Process waiting on I/O or external input. |
+| `ks.file.write.applied` | Workspace file mutation committed. |
+| `ks.branch.created` | Branch operation produced a new Run lineage from a Checkpoint. |
+
+`ks.process.waiting` is an event, not a [StepType](/docs/concepts/run-hierarchy/step-types) — events and step types are separate enumerations.
+
+## Request
+
+```http
+GET /v1/ks/events/runtime?run_id=01J8X9Y2Z3K4M5N6P7Q8R9S0T1
+Authorization: Bearer ks_...
+```
+
+```bash
+curl -s -G "https://api.kovaserve.com/v1/ks/events/runtime" \
+  -H "Authorization: Bearer ks_..." \
+  --data-urlencode "run_id=01J8X9Y2Z3K4M5N6P7Q8R9S0T1"
+```
+
+```python
+import requests
+
+r = requests.get(
+    "https://api.kovaserve.com/v1/ks/events/runtime",
+    headers={"Authorization": f"Bearer {api_key}"},
+    params={"run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1"},
+)
+events = r.json()["data"]
+```
+
+## Response
+
+```json
+{
+  "data": [
+    {
+      "event_id": "01J8X9Y2Z3K4M5N6P7Q8R9RT01",
+      "event_type": "ks.tool.invocation.completed",
+      "timestamp": "2026-04-30T12:01:14.412Z",
+      "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9ORG1",
+      "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9PRJ1",
+      "environment_id": "01J8X9Y2Z3K4M5N6P7Q8R9ENV1",
+      "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+      "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+      "step_id": "01J8X9Y2Z3K4M5N6P7Q8R9SP07",
+      "model_call_id": "01J8X9Y2Z3K4M5N6P7Q8R9MC07",
+      "context_manifest_id": null,
+      "checkpoint_id": null,
+      "state_handle_id": null,
+      "node_id": null,
+      "model_id": null,
+      "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+      "payload": {
+        "invocation_id": "01J8X9Y2Z3K4M5N6P7Q8R9TI01",
+        "outcome": "succeeded",
+        "duration_ms": 1240,
+        "artifact_id": "01J8X9Y2Z3K4M5N6P7Q8R9AR01",
+        "result_summary_tokens": 124,
+        "exit_code": 0
+      }
+    }
+  ],
+  "page": {
+    "next_cursor": "01J8X9Y2Z3K4M5N6P7Q8R9RT00",
+    "prev_cursor": "01J8X9Y2Z3K4M5N6P7Q8R9RT01",
+    "has_more": true,
+    "limit": 100
+  }
+}
+```
+
+## Payload shapes
+
+### `ks.tool.invocation.started`
+
+```json
+{
+  "tool_name": "shell",
+  "invocation_id": "01J8X9Y2Z3K4M5N6P7Q8R9TI01",
+  "arguments_summary": "git diff --stat HEAD~1",
+  "checkpoint_recommended": false
+}
+```
+
+`arguments_summary` is a redacted summary; full arguments are persisted on the runtime row addressable by `invocation_id`. `checkpoint_recommended` indicates whether the runtime trigger rules suggested a Checkpoint before this call.
+
+### `ks.tool.invocation.completed`
+
+```json
+{
+  "invocation_id": "01J8X9Y2Z3K4M5N6P7Q8R9TI01",
+  "outcome": "succeeded",
+  "duration_ms": 1240,
+  "artifact_id": "01J8X9Y2Z3K4M5N6P7Q8R9AR01",
+  "result_summary_tokens": 124,
+  "exit_code": 0
+}
+```
+
+`outcome` ∈ `succeeded`, `failed`, `canceled`, `blocked` (policy-blocked at execution time). `artifact_id` references the [ContextArtifact](/docs/concepts/context/context-artifacts) holding the full tool output.
+
+### `ks.process.started`
+
+```json
+{
+  "process_id": "01J8X9Y2Z3K4M5N6P7Q8R9PR01",
+  "sandbox_id": "01J8X9Y2Z3K4M5N6P7Q8R9SB01",
+  "command": "pytest tests/",
+  "workspace_id": "01J8X9Y2Z3K4M5N6P7Q8R9WS01"
+}
+```
+
+### `ks.process.waiting`
+
+```json
+{
+  "process_id": "01J8X9Y2Z3K4M5N6P7Q8R9PR01",
+  "wait_kind": "stdin",
+  "since_ms": 412
+}
+```
+
+`wait_kind` ∈ `stdin`, `network`, `signal`, `external_approval`.
+
+### `ks.file.write.applied`
+
+```json
+{
+  "workspace_id": "01J8X9Y2Z3K4M5N6P7Q8R9WS01",
+  "path": "src/handler.py",
+  "operation": "modify",
+  "diff_artifact_id": "01J8X9Y2Z3K4M5N6P7Q8R9DF01",
+  "byte_count_delta": 412
+}
+```
+
+`operation` ∈ `create`, `modify`, `delete`, `rename`. The full diff is persisted as a ContextArtifact addressable by `diff_artifact_id`.
+
+### `ks.branch.created`
+
+```json
+{
+  "from_checkpoint_id": "01J8X9Y2Z3K4M5N6P7Q8R9CK01",
+  "branched_run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T9",
+  "branch_kind": "manual",
+  "inherited_budget_id": "01J8X9Y2Z3K4M5N6P7Q8R9BG02"
+}
+```
+
+`branch_kind` ∈ `manual` (operator), `runtime` (runtime-triggered for parallel exploration), `recovery` (forked from a `RECOVERING` Run).
+
+## Identity fields
+
+`run_id` and `step_id` are populated on every runtime event. `model_call_id` is populated when the activity sits inside a Step that produced a ModelCall (typical `ks.tool.*` events). `ks.process.*` and `ks.file.*` events are tied to `run_id` and `step_id` but not to a specific ModelCall — they are runtime-side activity that runs between or alongside model calls. `ks.branch.created`'s envelope `run_id` is the originating Run; `payload.branched_run_id` is the new Run.
+
+## Sequence around a tool call
+
+```
+ks.step.started                (parent Step — typically TOOL_EXECUTE)
+ks.tool.invocation.started     (this stream)
+[optional] ks.process.started  (if the tool spawns a sandbox process)
+[optional] ks.process.waiting  (if the process waits)
+[optional] ks.file.write.applied (one per file mutation)
+ks.tool.invocation.completed   (this stream)
+ks.step.completed              (parent Step finishes)
+```
+
+Tools that produce no process or file activity emit only the two `ks.tool.invocation.*` events bracketing their Step.
+
+## Status codes
+
+| Status | Meaning |
+|---|---|
+| `200 OK` | Page returned. Empty `data` is valid. |
+| `400 invalid_request` | Malformed cursor, both `after` and `before` set, `limit` outside `[1, 500]`, unknown `event_type` or filter. |
+| `401 invalid_api_key` | Bearer token missing, malformed, or revoked. |
+| `403 forbidden` | Filter targets a Run, Workspace, or Process outside the key's scope. |
+| `429 rate_limit_exceeded` | Per-key request rate limit reached. |
+
+## Common usage
+
+**Coding-agent timeline UI.** Render tool calls, process spawns, file diffs, and branch points alongside model calls in the managed runtime UI.
+
+**Workspace audit.** Filter `event_type[]=ks.file.write.applied` for the audit log of workspace mutations — every mutation has an addressable diff artifact.
+
+**Branch lineage view.** `ks.branch.created` populates the branch tree visualization; consumers walk `payload.from_checkpoint_id` → `payload.branched_run_id` to render lineage.
+
+**Tool-policy feedback.** Filter `event_type[]=ks.tool.invocation.completed` and inspect `payload.outcome`. Aggregating `outcome = "blocked"` per Project surfaces tool-governance dashboards for [PolicyScope](/docs/concepts/policy/policy-scopes) tuning.
+
+## See also
+
+- [Runtime events](/docs/concepts/events/runtime) — the conceptual coverage
+- [Step types](/docs/concepts/run-hierarchy/step-types) — including `TOOL_EXECUTE`, `FILE_READ`, `FILE_WRITE`, `PROCESS_START`
+- [Tool invocations](/docs/concepts/runtime/tool-invocations)
+- [Workspaces](/docs/concepts/runtime/workspaces) and [Workspace artifacts](/docs/concepts/runtime/workspace-artifacts)
+- [Branches](/docs/concepts/recovery/branches)
+- [Context artifacts](/docs/concepts/context/context-artifacts) — the offload target for diffs and tool outputs
+- [Event envelope](/docs/concepts/events/event-envelope)
+- [Pagination](/docs/api/using-the-api/pagination)
