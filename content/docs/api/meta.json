@@ -14,6 +14,7 @@
     "tenancy",
     "runtime",
     "events",
-    "cluster"
+    "cluster",
+    "health"
   ]
 }

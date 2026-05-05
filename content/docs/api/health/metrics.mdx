@@ -1,0 +1,171 @@
+---
+title: Metrics
+description: GET /metrics — unauthenticated Prometheus exposition for KovaServe gateway request latency, routing decisions, substrate pressure, tenant usage, and budget telemetry.
+---
+
+`GET /metrics` exposes the gateway's Prometheus metrics in standard exposition format. It is the scrape target Prometheus, Grafana Agent, OpenTelemetry Collector, or any compatible scraper points at. Every metric carries the `kovaserve_` prefix and is sourced from real system state — token counts come from the substrate, GPU and KV occupancy come from the [Node Agents](/docs/concepts/runtime/workers), routing decisions and budget transitions come from the live request path. Nothing is estimated.
+
+The endpoint is unauthenticated, which is the convention for Prometheus scraping. Network-level isolation (NetworkPolicy, firewall, or ingress rules) is the operator's responsibility. Probe and scrape traffic are excluded from the request-duration histogram so a fast scrape cadence does not distort latency reporting.
+
+## Endpoint
+
+```
+GET /metrics
+```
+
+| Property | Value |
+|---|---|
+| Auth | None — `/metrics` is unauthenticated and accepts any caller. Restrict at the network layer in production. |
+| Path | Mounted at the gateway root, not under `/v1/`. Identical across managed cloud and private deployments. |
+| Logging | Excluded from request logs and from `kovaserve_request_duration_seconds`. |
+
+## Response — `200 OK`
+
+```http
+HTTP/1.1 200 OK
+Content-Type: text/plain; version=0.0.4; charset=utf-8
+
+# HELP kovaserve_requests_total Total inference requests
+# TYPE kovaserve_requests_total counter
+kovaserve_requests_total{tenant_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T0",model="qwen3-coder-30b"} 18402
+
+# HELP kovaserve_tokens_total Total tokens processed
+# TYPE kovaserve_tokens_total counter
+kovaserve_tokens_total{type="prompt",tenant_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T0",model="qwen3-coder-30b"} 6.184302e+07
+kovaserve_tokens_total{type="completion",tenant_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T0",model="qwen3-coder-30b"} 1.243018e+07
+
+# HELP kovaserve_request_duration_seconds HTTP request duration in seconds
+# TYPE kovaserve_request_duration_seconds histogram
+kovaserve_request_duration_seconds_bucket{method="POST",path="/v1/chat/completions",status="200",stream="false",le="0.5"} 14201
+kovaserve_request_duration_seconds_bucket{method="POST",path="/v1/chat/completions",status="200",stream="false",le="1.0"} 17984
+kovaserve_request_duration_seconds_bucket{method="POST",path="/v1/chat/completions",status="200",stream="false",le="+Inf"} 18402
+kovaserve_request_duration_seconds_count{method="POST",path="/v1/chat/completions",status="200",stream="false"} 18402
+kovaserve_request_duration_seconds_sum{method="POST",path="/v1/chat/completions",status="200",stream="false"} 9821.4
+
+# HELP kovaserve_gpu_utilization_percent GPU utilization percentage per node
+# TYPE kovaserve_gpu_utilization_percent gauge
+kovaserve_gpu_utilization_percent{node_id="01J8X9Y2Z3K4M5N6P7Q8R9N002"} 42.6
+
+# HELP kovaserve_kv_blocks_by_tier Number of KV cache blocks per memory tier per node
+# TYPE kovaserve_kv_blocks_by_tier gauge
+kovaserve_kv_blocks_by_tier{node_id="01J8X9Y2Z3K4M5N6P7Q8R9N002",tier="hbm"} 5014
+kovaserve_kv_blocks_by_tier{node_id="01J8X9Y2Z3K4M5N6P7Q8R9N002",tier="ram"} 0
+kovaserve_kv_blocks_by_tier{node_id="01J8X9Y2Z3K4M5N6P7Q8R9N002",tier="nvme"} 0
+kovaserve_kv_blocks_by_tier{node_id="01J8X9Y2Z3K4M5N6P7Q8R9N002",tier="s3"} 0
+```
+
+The body is the Prometheus 0.0.4 text format. Exposition follows standard semantics: each metric is preceded by `# HELP` and `# TYPE` lines, samples carry labels in the canonical order, and counter and histogram families are emitted as multiple lines per metric.
+
+## Metric reference
+
+Metrics group by the surface they describe.
+
+### Request lifecycle
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `kovaserve_requests_total` | counter | `tenant_id`, `model` | Inference requests admitted to the substrate. Anonymous-mode requests use the resolved Tenant from the bearer key. |
+| `kovaserve_tokens_total` | counter | `type` (`prompt` \| `completion`), `tenant_id`, `model` | Real token counts from the substrate, partitioned by direction. Never estimated. |
+| `kovaserve_request_duration_seconds` | histogram | `method`, `path`, `status`, `stream` (`true` \| `false`) | End-to-end gateway request duration, including admission, routing, and substrate execution. `path` is the routed FastAPI path, not the raw URL. |
+| `kovaserve_ttft_seconds` | histogram | `cache_status` (`warm` \| `cold`) | Time-to-first-token for streaming requests, partitioned by whether the [Cache-Aware Router](/docs/concepts/routing/manifest-aware-routing) found a warm hit. |
+| `kovaserve_errors_total` | counter | `error_type` | Errors by stable [`error_code`](/docs/api/using-the-api/errors). Use to alert on rate spikes per code. |
+
+### Routing and cache
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `kovaserve_routing_decisions_total` | counter | `cache_status` (`warm` \| `cold`) | Router placement outcomes. The ratio of `warm` to `cold` is the headline cache-hit indicator. |
+| `kovaserve_kv_cache_usage_percent` | gauge | `node_id` | Fraction of KV blocks in use on the substrate node, on `[0.0, 100.0]`. |
+| `kovaserve_kv_blocks_by_tier` | gauge | `node_id`, `tier` (`hbm` \| `ram` \| `nvme` \| `s3`) | KV block population per memory tier. When tiering is inactive, all population sits in `hbm` and the other tiers report `0` — that is the real system state, not a missing data signal. |
+| `kovaserve_tier_transitions_total` | counter | — | Lifetime KV block tier transitions (promotion plus demotion). |
+
+### Substrate node
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `kovaserve_gpu_utilization_percent` | gauge | `node_id` | GPU compute utilization on `[0.0, 100.0]`. |
+| `kovaserve_node_pending_requests` | gauge | `node_id` | Requests queued at the substrate, not yet executing. Drives the router's queue cost. |
+| `kovaserve_node_active_requests` | gauge | `node_id` | Requests currently executing on the node. |
+| `kovaserve_node_info` | gauge | `node_id`, `gpu_memory_total_gb`, `model` | Info-style gauge — value is always `1`; the labels carry static node metadata. Use with `* on(node_id)` joins to enrich other node metrics with model and GPU size. |
+
+`node_id` joins to [`GET /v1/ks/nodes`](/docs/api/cluster/nodes) and to the [routing](/docs/concepts/events/routing) and [state](/docs/concepts/events/state) event streams.
+
+### Tenant usage
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `kovaserve_tenant_budget_used_tokens` | gauge | `tenant_id` | Tokens consumed against the tenant's current monthly window. |
+| `kovaserve_tenant_budget_limit_tokens` | gauge | `tenant_id` | Tenant monthly token cap. Combine with `kovaserve_tenant_budget_used_tokens` to alert at threshold ratios. |
+
+### Run budget
+
+These metrics describe the run-level [Budget](/docs/concepts/policy/budgets) admission path. The decision label uses the canonical [Budget state machine](/docs/concepts/policy/budget-state-machine) outcomes.
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `kovaserve_budget_decisions_total` | counter | `decision` (`ALLOW` \| `WARN` \| `DEGRADE` \| `HARD_STOP`), `tenant_id` | Budget pre-check outcomes per request. |
+| `kovaserve_budget_transitions_total` | counter | `from_state`, `to_state`, `tenant_id` | Edge-triggered Budget lifecycle transitions. Each increment maps 1:1 to a [`ks.budget.*`](/docs/concepts/events/budget) event. |
+| `kovaserve_budget_rejections_total` | counter | `dimension` (`tokens` \| `steps` \| `time` \| `tools` \| `cost`), `tenant_id` | `HARD_STOP` rejections, partitioned by the dimension that tripped. |
+| `kovaserve_budget_precheck_latency_seconds` | histogram | — | Budget pre-check duration. The hot-path target is `p99 < 5ms`. |
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `200 OK` | Standard response. Body is Prometheus 0.0.4 text exposition. |
+| Connection refused or timeout | The gateway is not serving. Pair with [`/health`](/docs/api/health/health) to disambiguate scrape failure from service outage. |
+
+## Examples
+
+### Scrape with curl
+
+```bash
+curl -s https://api.kovaserve.com/metrics | head -n 40
+```
+
+### Prometheus scrape config
+
+```yaml
+scrape_configs:
+  - job_name: kovaserve-gateway
+    metrics_path: /metrics
+    scrape_interval: 15s
+    static_configs:
+      - targets:
+          - api.kovaserve.com
+```
+
+For self-hosted clusters, point `targets` at the gateway Service instead. The `scrape_interval` of `15s` is conservative — `kovaserve_budget_precheck_latency_seconds` and `kovaserve_request_duration_seconds` are accurate at any interval down to `5s` without histogram-resolution loss.
+
+### Recording rules
+
+Two recording rules cover the headline operator dashboards:
+
+```yaml
+groups:
+  - name: kovaserve.headline
+    interval: 30s
+    rules:
+      - record: kovaserve:cache_hit_ratio:5m
+        expr: |
+          sum(rate(kovaserve_routing_decisions_total{cache_status="warm"}[5m]))
+            /
+          sum(rate(kovaserve_routing_decisions_total[5m]))
+
+      - record: kovaserve:budget_hard_stop_rate:5m
+        expr: |
+          sum by (tenant_id) (
+            rate(kovaserve_budget_rejections_total[5m])
+          )
+```
+
+`kovaserve:cache_hit_ratio:5m` is the headline metric for [manifest-aware routing](/docs/concepts/routing/manifest-aware-routing). `kovaserve:budget_hard_stop_rate:5m` flags tenants approaching their Budget limits before users notice request-level `429`s.
+
+## See also
+
+- [Health](/docs/api/health/health) — gateway liveness probe
+- [Cluster nodes](/docs/api/cluster/nodes) — substrate-side state behind the `node_id` labels
+- [Manifest-aware routing](/docs/concepts/routing/manifest-aware-routing) — what `cache_status` means and how `warm` and `cold` are decided
+- [Budget state machine](/docs/concepts/policy/budget-state-machine) — the transitions counted in `kovaserve_budget_transitions_total`
+- [Errors](/docs/api/using-the-api/errors) — the `error_code` values aggregated in `kovaserve_errors_total`
+- [Cost headers](/docs/api/using-the-api/cost-headers) — per-request cost surface that complements aggregate token and budget metrics

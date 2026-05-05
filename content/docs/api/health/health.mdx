@@ -1,0 +1,103 @@
+---
+title: Health
+description: GET /health — unauthenticated liveness probe for the KovaServe gateway, returning a fixed JSON body when the gateway process is reachable.
+---
+
+`GET /health` is the gateway's liveness probe. It returns `200 OK` with a small fixed JSON body whenever the gateway HTTP server can answer a request. It is the surface Kubernetes liveness and readiness checks point at, and the surface external uptime monitors should poll.
+
+The endpoint is deliberately shallow: a `200` proves only that the gateway process is running and serving HTTP, not that every downstream dependency is healthy. The substrate, PostgreSQL, NATS JetStream, Redis, and MinIO each carry their own probes; combine `/health` with those signals when you need full-system readiness rather than gateway liveness alone.
+
+## Endpoint
+
+```
+GET /health
+```
+
+| Property | Value |
+|---|---|
+| Auth | None — `/health` is unauthenticated and accepts any caller. |
+| Logging | Excluded from request logs and from request-duration metrics. Probe traffic does not pollute observability. |
+| Path | Mounted at the gateway root, not under `/v1/`. The path is identical across managed cloud and private deployments. |
+
+## Response — `200 OK`
+
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{
+  "status": "ok"
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `status` | string | Always the literal `"ok"` when the gateway answers. The field exists so the body is structured JSON rather than an empty payload; do not branch on its value. |
+
+The body shape is stable. Future health additions ship as additive fields — clients that match on `status == "ok"` continue to work without changes.
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `200 OK` | The gateway HTTP server answered. Treat as proof of liveness only — not of substrate readiness. |
+| Connection refused, timeout, or `5xx` | The gateway is not serving. Liveness probes should fail-restart the pod; external monitors should page. |
+
+`/health` never returns the [native error envelope](/docs/api/using-the-api/errors) — failures surface as transport-level errors or as the upstream load balancer's response, not as a JSON error body from the gateway itself.
+
+## Examples
+
+### curl
+
+```bash
+curl -i https://api.kovaserve.com/health
+```
+
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{"status":"ok"}
+```
+
+### Python
+
+```python
+import httpx
+
+resp = httpx.get("https://api.kovaserve.com/health", timeout=2.0)
+resp.raise_for_status()
+assert resp.json()["status"] == "ok"
+```
+
+### Kubernetes probes
+
+The gateway pod ships with `/health` wired as both the liveness and readiness probe:
+
+```yaml
+livenessProbe:
+  httpGet:
+    path: /health
+    port: 8080
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 2
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /health
+    port: 8080
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 2
+  failureThreshold: 3
+```
+
+Probe traffic is filtered out of request logs and metrics, so a 10-second cadence has no observable cost.
+
+## See also
+
+- [Metrics](/docs/api/health/metrics) — Prometheus exposition for substrate, routing, tenant, and budget telemetry
+- [Cluster nodes](/docs/api/cluster/nodes) — substrate-side liveness and per-node KV pressure
+- [Errors](/docs/api/using-the-api/errors) — the native and OpenAI-compatible error envelopes used by every other endpoint

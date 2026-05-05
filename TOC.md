@@ -320,8 +320,8 @@ Living roadmap for `docs.kovaserve.com`. Source of structure for `content/docs/`
 
 ### Health & Metrics
 
-- [ ] `api/health/health.mdx` — `/health`
-- [ ] `api/health/metrics.mdx` — `/metrics`
+- [x] `api/health/health.mdx` — `/health`
+- [x] `api/health/metrics.mdx` — `/metrics`
 
 ## 6. SDK Reference (Python `kovaserve`)
 
