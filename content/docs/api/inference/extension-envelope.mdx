@@ -67,7 +67,7 @@ The envelope is a flat object. Fields fall into seven groups by purpose.
 | Field | Type | Meaning |
 |---|---|---|
 | `context_blocks` | array of objects | Typed context segments to admit alongside `messages`. Each block carries a `type`, `context_type`, `memory_class`, and either `text` or `artifact_ref_id`. See [ContextSegments](/docs/concepts/context/context-segments) and the [`parts` wire format](/docs/concepts/context/context-segments). |
-| `memory_class_hints` | array of objects | Hints for how `messages` and `context_blocks` should be classified by [memory class](/docs/concepts/context/context-segments) — `ephemeral`, `session`, `user`, `tenant`, `global`. Each hint is `{ "selector": "...", "memory_class": "...", "retention": "...", "checkpoint_relevant": true|false }`. |
+| `memory_class_hints` | array of objects | Hints for how `messages` and `context_blocks` should be classified by [memory class](/docs/concepts/context/context-segments) — `ephemeral`, `session`, `user`, `tenant`, `global`. Each hint is `{ "selector": "...", "memory_class": "...", "retention": "...", "checkpoint_relevant": true\|false }`. |
 | `context_manifest_id` | ULID | Pre-assembled [ContextManifest](/docs/concepts/context/context-manifests) to consume verbatim. When set, the gateway validates the manifest, runs admission, and skips re-assembly. |
 | `context_budget_ref` | ULID \| string | The [ContextBudget](/docs/concepts/policy/context-budgets) to admit the call against. Resolves to a bound `context_budget_id` on the Run. |
 | `context_scope_ref` | ULID \| string | Override the inherited context-share scope for this call. Resolves to a [PolicyScope](/docs/concepts/policy/policy-scopes) `context_share_scope` value. |
