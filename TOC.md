@@ -251,14 +251,14 @@ Living roadmap for `docs.kovaserve.com`. Source of structure for `content/docs/`
 
 ### Context
 
-- [ ] `api/context/manifests/get.mdx`
-- [ ] `api/context/manifests/list.mdx`
-- [ ] `api/context/segments/get.mdx`
-- [ ] `api/context/artifacts/upload.mdx`
-- [ ] `api/context/artifacts/get.mdx`
-- [ ] `api/context/artifacts/list.mdx`
-- [ ] `api/context/compaction-records/get.mdx`
-- [ ] `api/context/compaction-records/list.mdx`
+- [x] `api/context/manifests/get.mdx`
+- [x] `api/context/manifests/list.mdx`
+- [x] `api/context/segments/get.mdx`
+- [x] `api/context/artifacts/upload.mdx`
+- [x] `api/context/artifacts/get.mdx`
+- [x] `api/context/artifacts/list.mdx`
+- [x] `api/context/compaction-records/get.mdx`
+- [x] `api/context/compaction-records/list.mdx`
 
 ### Policy & Budgets
 

@@ -1,0 +1,150 @@
+---
+title: Get a ContextArtifact
+description: GET /v1/ks/context/artifacts/{id} — fetch a ContextArtifact's metadata and a short-lived signed download URL for the underlying bytes.
+---
+
+`GET /v1/ks/context/artifacts/{id}` returns a single [ContextArtifact](/docs/concepts/context/context-artifacts) — name, version, MIME type, byte count, digest, scope, retention, preview — plus a short-lived `download_url` for streaming the underlying bytes. Bytes are not returned inline by the JSON endpoint; the runtime uses the URL when it actually needs the full payload.
+
+A given `(name, version)` pair is immutable. Two reads of the same `id` always return identical metadata and identical bytes. New content under the same logical name produces a new version with its own `id`; prior versions remain addressable until their retention expires.
+
+The artifact is resolved against the API key's Tenant. Cross-tenant fetches return `404 Not Found` — the same response as a genuinely missing artifact — so the surface leaks no information about artifacts the caller cannot see.
+
+## Endpoint
+
+```
+GET /v1/ks/context/artifacts/{artifact_id}
+```
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_...` — see [Authentication](/docs/api/using-the-api/authentication). |
+| Path parameter | `artifact_id` — bare 26-character Crockford ULID. See [IDs](/docs/api/using-the-api/ids). |
+| Errors | Native envelope — see [Errors](/docs/api/using-the-api/errors). |
+
+### Query parameters
+
+| Parameter | Type | Default | Meaning |
+|---|---|---|---|
+| `download_ttl_seconds` | integer | `300` | Lifetime of the returned `download_url` in seconds. Capped at `3600`. Values outside `30..3600` return `400 invalid_request`. |
+| `include_download_url` | boolean | `true` | When `false`, omit `download_url` and `expires_at`. The fast path for audits and dashboards that only need metadata. |
+
+## Response — `200 OK`
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9AR03",
+  "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+  "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+  "name": "tool_output:run_tests",
+  "version": 1,
+  "mime_type": "text/plain",
+  "byte_count": 2457621,
+  "digest": "sha256:e7c14e1f0925a1b6c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f70",
+  "storage_ref": "s3://kovaserve-artifacts/01J8X9Y2Z3K4M5N6P7Q8R9AR03",
+  "scope": {
+    "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+    "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1"
+  },
+  "retention": "with_session",
+  "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+  "run_id": null,
+  "preview": "Test failure: tests/test_auth.py::test_token_format[legacy] - AssertionError: expected ...",
+  "metadata": null,
+  "download_url": "https://artifacts.kovaserve.com/01J8X9Y2Z3K4M5N6P7Q8R9AR03?token=eyJhbGciOiJI…",
+  "expires_at": "2026-05-05T12:09:00Z",
+  "created_at": "2026-04-30T12:00:00Z"
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | string | Artifact ID. Bare 26-char ULID. |
+| `tenant_id` / `project_id` | string | Owning tenancy pair. |
+| `name` | string | Logical name. Conventionally `<class>:<descriptor>`. Names are scoped to `(tenant_id, project_id)`. |
+| `version` | integer | Monotonically incrementing per `(scope, name)`. |
+| `mime_type` | string | Standard MIME type. |
+| `byte_count` | integer | Exact size of the underlying bytes. |
+| `digest` | string | SHA-256 over the bytes. Verified on read. |
+| `storage_ref` | string | Object-storage URI. MinIO-managed in managed cloud; customer-supplied S3 in private deployments. |
+| `scope` | object | Tenant / Project ownership. Cross-tenant access returns `404`. |
+| `retention` | string | `with_call` / `with_session` / `with_compaction_lineage` / `with_tenant`. |
+| `session_id` / `run_id` | string \| null | Bindings recorded at upload. |
+| `preview` | string | Short payload preview — typically the first 512 characters of text MIME types, an empty string for non-text types. |
+| `metadata` | object \| null | Free-form metadata recorded at upload. |
+| `download_url` | string \| null | Short-lived signed URL for streaming the bytes. Omitted when `include_download_url=false`. |
+| `expires_at` | string \| null | ISO-8601 timestamp the `download_url` stops working. Omitted alongside `download_url`. |
+| `created_at` | string | ISO-8601 timestamp the artifact was written. |
+
+### `download_url` semantics
+
+The URL is a single-use signed link. It points at the deployment's artifact host and carries an opaque token bound to the caller's Tenant and to `expires_at`. After expiry the URL returns `403`; refresh by calling this endpoint again.
+
+The deployment's artifact host is an internal-network host in private deployments and a public host in managed cloud — the URL transparently picks the correct one based on where the deployment is running. Verify the streamed bytes against `digest` after download.
+
+### Reading via the artifact host
+
+```http
+GET /01J8X9Y2Z3K4M5N6P7Q8R9AR03?token=eyJhbGciOiJI…
+Host: artifacts.kovaserve.com
+```
+
+Returns the raw bytes with `Content-Type: <mime_type>` and `Content-Length: <byte_count>`. The artifact host does not authenticate beyond the signed token — never log the URL or share it across tenants.
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `200 OK` | The artifact exists and is visible to the caller. |
+| `400 Bad Request` | Malformed `artifact_id` or `download_ttl_seconds` outside `30..3600`. Codes: `invalid_id`, `invalid_request`. |
+| `401 Unauthorized` | Missing, malformed, or unresolved API key. |
+| `404 Not Found` | The artifact does not exist *or* belongs to another Tenant. Code: `context_artifact_not_found`. |
+| `410 Gone` | The artifact's retention has elapsed and its bytes have been reclaimed. The metadata row is still returned for audit; `download_url` and `expires_at` are omitted. Code: `context_artifact_retired`. |
+
+## Examples
+
+```bash
+# Default — metadata + 5-minute signed URL
+curl https://api.kovaserve.com/v1/ks/context/artifacts/01J8X9Y2Z3K4M5N6P7Q8R9AR03 \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# Audit fetch — skip the URL roundtrip
+curl "https://api.kovaserve.com/v1/ks/context/artifacts/01J8X9Y2Z3K4M5N6P7Q8R9AR03?include_download_url=false" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# Long-lived URL for a batch worker
+curl "https://api.kovaserve.com/v1/ks/context/artifacts/01J8X9Y2Z3K4M5N6P7Q8R9AR03?download_ttl_seconds=3600" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+```
+
+```python
+import hashlib
+import urllib.request
+
+from kovaserve import KovaClient
+
+kova = KovaClient(api_key="ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b")
+
+artifact = kova.context.artifacts.get("01J8X9Y2Z3K4M5N6P7Q8R9AR03")
+
+print(f"name        {artifact.name}")
+print(f"version     {artifact.version}")
+print(f"mime_type   {artifact.mime_type}")
+print(f"bytes       {artifact.byte_count}")
+print(f"digest      {artifact.digest}")
+print(f"preview     {artifact.preview!r}")
+
+# Stream the underlying bytes and verify against the recorded digest.
+with urllib.request.urlopen(artifact.download_url) as resp:
+    body = resp.read()
+
+actual_digest = "sha256:" + hashlib.sha256(body).hexdigest()
+assert actual_digest == artifact.digest, "digest mismatch — refusing to use bytes"
+```
+
+## See also
+
+- [`POST /v1/ks/context/artifacts`](/docs/api/context/artifacts/upload) · [`GET /v1/ks/context/artifacts`](/docs/api/context/artifacts/list)
+- [Context artifacts](/docs/concepts/context/context-artifacts) — entity overview, versioning, retention, storage backends
+- [Context segments](/docs/concepts/context/context-segments) — the entity that references artifacts via `artifact_ref_id`
+- [Admission](/docs/concepts/policy/admission) — the producer of `OFFLOAD_REQUIRED`, the auto-offload trigger
+- [IDs](/docs/api/using-the-api/ids) · [Errors](/docs/api/using-the-api/errors)

@@ -1,0 +1,203 @@
+---
+title: List ContextManifests
+description: GET /v1/ks/context/manifests — page through ContextManifests with cursor pagination, filtered by run, session, step, model call, checkpoint, model, scope, or admission decision.
+---
+
+`GET /v1/ks/context/manifests` lists [ContextManifests](/docs/concepts/context/context-manifests) the caller owns, newest first. The response uses cursor pagination — the same shape as every other list endpoint in the API. Filters narrow the result set to one Run, Session, Step, ModelCall, Checkpoint, model, scope, or admission decision.
+
+The list response carries the manifest row but **does not** embed segments. Each row is metadata only — to read the ordered segment list, fetch the manifest individually with [`GET /v1/ks/context/manifests/{id}`](/docs/api/context/manifests/get). This keeps list latency bounded and predictable; embedding N manifests' worth of segments is an unbounded cost the caller decides whether to pay.
+
+## Endpoint
+
+```
+GET /v1/ks/context/manifests
+```
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_...` — see [Authentication](/docs/api/using-the-api/authentication). |
+| Pagination | Cursor — see [Pagination](/docs/api/using-the-api/pagination). |
+| Errors | Native envelope — see [Errors](/docs/api/using-the-api/errors). |
+
+## Query parameters
+
+| Parameter | Type | Default | Meaning |
+|---|---|---|---|
+| `limit` | integer | `100` | Maximum manifests to return. Capped at `200`. Values outside `1..200` return `400 invalid_request`. |
+| `after` | string \| null | `null` | Cursor — return manifests strictly after it in descending creation order. |
+| `before` | string \| null | `null` | Cursor — return manifests strictly before it. Mutually exclusive with `after`. |
+| `run_id` | string \| null | `null` | Restrict to one Run. |
+| `session_id` | string \| null | `null` | Restrict to one Session. Format `ses_<24hex>`. |
+| `step_id` | string \| null | `null` | Restrict to one Step. |
+| `model_call_id` | string \| null | `null` | Restrict to the manifest bound to one ModelCall. Returns at most one row. |
+| `checkpoint_id` | string \| null | `null` | Restrict to manifests frozen as snapshots of one Checkpoint. |
+| `project_id` | string \| null | `null` | Restrict to one Project. The Tenant filter is always implicit. |
+| `model_id` | string \| null | `null` | Restrict to manifests dispatched to a specific model. |
+| `model_family` | string \| null | `null` | Restrict to manifests dispatched against a model family (e.g. `qwen3-coder`). |
+| `context_share_scope` | string \| null | `null` | Restrict to manifests admitted under a given scope — `tenant`, `project`, `private`. |
+| `admission_decision` | string \| null | `null` | Restrict to manifests with a given admission outcome — `ALLOW`, `WARN`, `OFFLOAD_REQUIRED`, `COMPACT_REQUIRED`, `DEGRADE`, `HARD_STOP`. |
+| `created_after` | string \| null | `null` | ISO-8601 timestamp — manifests with `created_at >= created_after`. |
+| `created_before` | string \| null | `null` | ISO-8601 timestamp — manifests with `created_at < created_before`. |
+
+The Tenant filter is implicit — manifests from other Tenants never appear in the result, regardless of any query-parameter combination.
+
+## Response — `200 OK`
+
+```json
+{
+  "data": [
+    {
+      "id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T6",
+      "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+      "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+      "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+      "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+      "step_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0S5",
+      "model_call_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0M2",
+      "checkpoint_id": null,
+      "stable_prefix_id": "sha256:9a1c…",
+      "stable_context_id": "sha256:7e44…",
+      "renderer_version": "v3",
+      "model_id": "qwen3-coder-30b",
+      "model_family": "qwen3-coder",
+      "tokenizer_fingerprint": "sha256:9f2c…",
+      "scope": {
+        "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+        "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+        "context_share_scope": "project"
+      },
+      "token_counts": {
+        "stable_tokens": 1840,
+        "volatile_tokens": 312,
+        "active_tokens": 2152,
+        "offloaded_tokens": 7400
+      },
+      "admission_decision": "OFFLOAD_REQUIRED",
+      "created_at": "2026-04-30T12:00:00Z"
+    },
+    {
+      "id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T5",
+      "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+      "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+      "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+      "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+      "step_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0S4",
+      "model_call_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0M1",
+      "checkpoint_id": null,
+      "stable_prefix_id": "sha256:9a1c…",
+      "stable_context_id": "sha256:1f08…",
+      "renderer_version": "v3",
+      "model_id": "qwen3-coder-30b",
+      "model_family": "qwen3-coder",
+      "tokenizer_fingerprint": "sha256:9f2c…",
+      "scope": {
+        "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+        "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+        "context_share_scope": "project"
+      },
+      "token_counts": {
+        "stable_tokens": 1840,
+        "volatile_tokens": 188,
+        "active_tokens": 2028,
+        "offloaded_tokens": 0
+      },
+      "admission_decision": "ALLOW",
+      "created_at": "2026-04-30T11:58:12Z"
+    }
+  ],
+  "page": {
+    "next_cursor": "01J8X9Y2Z3K4M5N6P7Q8R9S0T5",
+    "prev_cursor": "01J8X9Y2Z3K4M5N6P7Q8R9S0T6",
+    "has_more": true,
+    "limit": 100
+  }
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | string | Manifest ID. |
+| `tenant_id` / `project_id` | string | Owning tenancy pair. |
+| `run_id` / `session_id` | string \| null | The Run and Session the manifest belongs to. |
+| `step_id` / `model_call_id` | string \| null | The Step and ModelCall the manifest is bound to. |
+| `checkpoint_id` | string \| null | Set when the manifest is a Checkpoint snapshot. |
+| `stable_prefix_id` / `stable_context_id` | string | The two stable identities. |
+| `renderer_version` / `model_id` / `model_family` / `tokenizer_fingerprint` | string | Compatibility vector. |
+| `scope` | object | Tenant / Project / `context_share_scope` under which the manifest was admitted. |
+| `token_counts` | object | Stable / volatile / active / offloaded breakdown. |
+| `admission_decision` | string | The admission outcome — `ALLOW`, `WARN`, `OFFLOAD_REQUIRED`, `COMPACT_REQUIRED`, `DEGRADE`, `HARD_STOP`. The full transformation list is on the manifest detail response, not the list row. |
+| `created_at` | string | ISO-8601 creation timestamp. |
+
+The list response intentionally omits the `segments` array, the `tier_digests` block, and `admission.transformations` to keep the page small. Fetch [`GET /v1/ks/context/manifests/{id}`](/docs/api/context/manifests/get) for the full row.
+
+The pagination envelope is documented at [Pagination](/docs/api/using-the-api/pagination). Empty `data` is valid — it means no manifests match the supplied filters.
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `200 OK` | Returns a page of manifests. Empty `data` is valid. |
+| `400 Bad Request` | Both `before` and `after` supplied; an unrecognized filter value; or `limit` outside `1..200`. Code: `invalid_request`. |
+| `401 Unauthorized` | Missing or invalid bearer token. |
+| `404 Not Found` | A scoping ID (`run_id`, `session_id`, `step_id`, `model_call_id`, `checkpoint_id`, `project_id`) does not resolve in the caller's Tenant. Codes: `run_not_found`, `session_not_found`, `step_not_found`, `model_call_not_found`, `checkpoint_not_found`, `project_not_found`. |
+
+## Examples
+
+```bash
+# Newest 50 manifests across the Tenant
+curl "https://api.kovaserve.com/v1/ks/context/manifests?limit=50" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# Every manifest under one Run, in reverse chronological order
+curl "https://api.kovaserve.com/v1/ks/context/manifests?run_id=01J8X9Y2Z3K4M5N6P7Q8R9S0T1" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# Manifests admitted under context-budget pressure — triage offload patterns
+curl "https://api.kovaserve.com/v1/ks/context/manifests?admission_decision=OFFLOAD_REQUIRED&created_after=2026-04-30T00:00:00Z" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# Frozen manifests for a specific Checkpoint
+curl "https://api.kovaserve.com/v1/ks/context/manifests?checkpoint_id=01J8X9Y2Z3K4M5N6P7Q8R9CP01" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+```
+
+```python
+from kovaserve import KovaClient
+
+kova = KovaClient(api_key="ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b")
+
+# Walk every manifest under a Run
+cursor = None
+while True:
+    page = kova.context.manifests.list(
+        run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+        limit=100,
+        after=cursor,
+    )
+    for m in page.data:
+        print(f"  {m.created_at}  {m.id}  {m.admission_decision:18}  active={m.token_counts.active_tokens}")
+    if not page.has_more:
+        break
+    cursor = page.next_cursor
+
+# Quick check for any HARD_STOP admissions in the last hour
+denied = kova.context.manifests.list(
+    admission_decision="HARD_STOP",
+    created_after="2026-05-05T11:00:00Z",
+    limit=20,
+)
+if denied.data:
+    print(f"{len(denied.data)} hard-stop admissions in the last hour")
+
+# Built-in iterator helper — auto-paginates
+for m in kova.context.manifests.iter(session_id="ses_a7f3c2b8d4e1f0925a1b6c3d"):
+    print(f"{m.id}  {m.model_id}  {m.token_counts.active_tokens} active tokens")
+```
+
+## See also
+
+- [`GET /v1/ks/context/manifests/{id}`](/docs/api/context/manifests/get) · [`GET /v1/ks/context/segments/{id}`](/docs/api/context/segments/get)
+- [Context manifests](/docs/concepts/context/context-manifests) — entity overview, tier model, identity rules
+- [Admission](/docs/concepts/policy/admission) — how the `admission_decision` is produced
+- [Manifest-aware routing](/docs/concepts/routing/manifest-aware-routing) — how the router consumes `stable_context_id`
+- [Pagination](/docs/api/using-the-api/pagination) · [IDs](/docs/api/using-the-api/ids) · [Errors](/docs/api/using-the-api/errors)

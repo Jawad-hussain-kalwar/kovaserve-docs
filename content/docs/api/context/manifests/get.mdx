@@ -1,0 +1,296 @@
+---
+title: Get a ContextManifest
+description: GET /v1/ks/context/manifests/{id} — fetch a ContextManifest with its ordered segments, stable identities, token accounting, scope, and admission decision.
+---
+
+`GET /v1/ks/context/manifests/{id}` returns a [ContextManifest](/docs/concepts/context/context-manifests) — the durable per-[ModelCall](/docs/concepts/run-hierarchy/model-calls) record of context shape, identity, and accounting. The response carries the manifest row (stable identities, renderer version, model and tokenizer fingerprint, token accounting, scope, admission outcome) with its [ContextSegments](/docs/concepts/context/context-segments) embedded in canonical order.
+
+A manifest is immutable. Two reads of the same `id` always return identical bytes. Re-admission produces a *new* manifest with its own id; the prior manifest stays addressable.
+
+The manifest is resolved against the API key's Tenant. Cross-tenant fetches return `404 Not Found` — the same response as a genuinely missing manifest — so the surface leaks no information about manifests the caller cannot see.
+
+## Endpoint
+
+```
+GET /v1/ks/context/manifests/{manifest_id}
+```
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_...` — see [Authentication](/docs/api/using-the-api/authentication). |
+| Path parameter | `manifest_id` — bare 26-character Crockford ULID. See [IDs](/docs/api/using-the-api/ids). |
+| Errors | Native envelope — see [Errors](/docs/api/using-the-api/errors). |
+
+### Query parameters
+
+| Parameter | Type | Default | Meaning |
+|---|---|---|---|
+| `expand` | string \| null | `segments` | Comma-separated list controlling which embedded blocks the response includes. Supported values: `segments` (the ordered ContextSegment rows; default), `compaction_records` (CompactionRecord summaries for any compacted segments), `none` (manifest row only — useful for audit listings). Unknown values return `400 invalid_request`. |
+
+## Response — `200 OK`
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T6",
+  "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+  "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+  "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+  "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+  "step_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0S5",
+  "model_call_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0M2",
+  "checkpoint_id": null,
+  "stable_prefix_id": "sha256:9a1c4e1f0925a1b6c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f70",
+  "stable_context_id": "sha256:7e44a3b8d4e1f0925a1b6c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5",
+  "renderer_version": "v3",
+  "model_id": "qwen3-coder-30b",
+  "model_family": "qwen3-coder",
+  "tokenizer_fingerprint": "sha256:9f2c4e1f0925a1b6c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f70",
+  "scope": {
+    "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+    "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    "context_share_scope": "project"
+  },
+  "token_counts": {
+    "stable_tokens": 1840,
+    "volatile_tokens": 312,
+    "active_tokens": 2152,
+    "offloaded_tokens": 7400
+  },
+  "byte_counts": {
+    "artifact_bytes": 3145728
+  },
+  "tier_digests": {
+    "tools": "sha256:1aa0…",
+    "system": "sha256:c4f2…",
+    "history_prefix": "sha256:88e9…",
+    "summary": "sha256:5b71…"
+  },
+  "admission": {
+    "decision": "OFFLOAD_REQUIRED",
+    "transformations": [
+      {
+        "type": "artifact_offload",
+        "segment_ids": ["01J8X9Y2Z3K4M5N6P7Q8R9SG07"],
+        "artifact_ref_ids": ["01J8X9Y2Z3K4M5N6P7Q8R9AR03"]
+      }
+    ],
+    "timestamp": "2026-04-30T12:00:00Z"
+  },
+  "segments": [
+    {
+      "id": "01J8X9Y2Z3K4M5N6P7Q8R9SG01",
+      "ordinal": 0,
+      "tier": "tools",
+      "context_type": "persistent_context",
+      "memory_class": "tenant",
+      "digest": "sha256:1aa0…",
+      "token_count": 612,
+      "byte_count": 4218,
+      "checkpoint_relevant": true,
+      "retention_policy": "with_tenant",
+      "stable_prefix_part": true,
+      "artifact_ref_id": null
+    },
+    {
+      "id": "01J8X9Y2Z3K4M5N6P7Q8R9SG02",
+      "ordinal": 1,
+      "tier": "system",
+      "context_type": "system_prompt",
+      "memory_class": "tenant",
+      "digest": "sha256:c4f2…",
+      "token_count": 184,
+      "byte_count": 920,
+      "checkpoint_relevant": true,
+      "retention_policy": "with_tenant",
+      "stable_prefix_part": true,
+      "artifact_ref_id": null
+    },
+    {
+      "id": "01J8X9Y2Z3K4M5N6P7Q8R9SG03",
+      "ordinal": 2,
+      "tier": "history_prefix",
+      "context_type": "session_history",
+      "memory_class": "session",
+      "digest": "sha256:88e9…",
+      "token_count": 1044,
+      "byte_count": 6411,
+      "checkpoint_relevant": true,
+      "retention_policy": "with_session",
+      "stable_prefix_part": false,
+      "artifact_ref_id": null
+    },
+    {
+      "id": "01J8X9Y2Z3K4M5N6P7Q8R9SG04",
+      "ordinal": 3,
+      "tier": "summary",
+      "context_type": "summary",
+      "memory_class": "session",
+      "digest": "sha256:5b71…",
+      "token_count": 220,
+      "byte_count": 1190,
+      "checkpoint_relevant": true,
+      "retention_policy": "with_compaction_lineage",
+      "stable_prefix_part": false,
+      "artifact_ref_id": null,
+      "compaction_record_id": "01J8X9Y2Z3K4M5N6P7Q8R9CR04"
+    },
+    {
+      "id": "01J8X9Y2Z3K4M5N6P7Q8R9SG05",
+      "ordinal": 4,
+      "tier": null,
+      "context_type": "agent_state",
+      "memory_class": "ephemeral",
+      "digest": "sha256:e7c1…",
+      "token_count": 92,
+      "byte_count": 451,
+      "checkpoint_relevant": false,
+      "retention_policy": "with_call",
+      "stable_prefix_part": false,
+      "artifact_ref_id": null
+    },
+    {
+      "id": "01J8X9Y2Z3K4M5N6P7Q8R9SG07",
+      "ordinal": 5,
+      "tier": null,
+      "context_type": "tool_result",
+      "memory_class": "session",
+      "digest": "sha256:e7c1…",
+      "token_count": 128,
+      "byte_count": 3145728,
+      "checkpoint_relevant": true,
+      "retention_policy": "with_session",
+      "stable_prefix_part": false,
+      "artifact_ref_id": "01J8X9Y2Z3K4M5N6P7Q8R9AR03",
+      "preview": "First 512 chars of the tool result..."
+    }
+  ],
+  "created_at": "2026-04-30T12:00:00Z"
+}
+```
+
+### Top-level fields
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | string | Manifest ID. Bare 26-char ULID. |
+| `tenant_id` / `project_id` | string | Owning tenancy pair. |
+| `run_id` | string | The Run the manifest belongs to. |
+| `session_id` | string \| null | Bound Session. |
+| `step_id` / `model_call_id` | string \| null | Set after admission and Step creation. `null` on `HARD_STOP` and on checkpoint-only snapshots. |
+| `checkpoint_id` | string \| null | Set when the manifest is a [Checkpoint](/docs/concepts/recovery/checkpoints) snapshot. |
+| `stable_prefix_id` | string | Prefix-tier identity used by the cache-aware router for KV lookups. |
+| `stable_context_id` | string | Compatibility-aware identity over the full segment cascade plus renderer / model family / tokenizer fingerprint / scope. |
+| `renderer_version` | string | The context-renderer version that produced this shape. |
+| `model_id` / `model_family` | string | The dispatched model. |
+| `tokenizer_fingerprint` | string | Hash of the tokenizer assets used to compute token counts. |
+| `scope` | object | Tenant, project, and `context_share_scope` under which the manifest was admitted. |
+| `token_counts` | object | Stable / volatile / active / offloaded breakdown — see [Context manifests](/docs/concepts/context/context-manifests). |
+| `byte_counts` | object | `artifact_bytes` aggregate over offloaded segments. |
+| `tier_digests` | object | Per-tier digests for the four prefix tiers (`tools`, `system`, `history_prefix`, `summary`). Consumers select their reuse boundary by tier. |
+| `admission` | object | The [admission](/docs/concepts/policy/admission) outcome — see below. |
+| `segments` | array | Embedded segment rows. Present when `expand` includes `segments` (the default). |
+| `created_at` | string | ISO-8601 timestamp the manifest was written. |
+
+### `admission`
+
+| Field | Type | Meaning |
+|---|---|---|
+| `decision` | string | One of `ALLOW`, `WARN`, `OFFLOAD_REQUIRED`, `COMPACT_REQUIRED`, `DEGRADE`, `HARD_STOP`. |
+| `transformations` | array | The transformations applied to reach the admitted shape. Empty for `ALLOW` / `WARN`. |
+| `timestamp` | string | ISO-8601 timestamp the admission ran. |
+
+### Embedded segment fields
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | string | Segment ID. Bare 26-char ULID. |
+| `ordinal` | integer | Position inside the manifest, gap-free from `0`. |
+| `tier` | string \| null | One of `tools`, `system`, `history_prefix`, `summary` — the four prefix tiers — or `null` for the volatile tail (`agent_state`, `tool_result`). |
+| `context_type` | string | Canonical position. See [segment types](/docs/concepts/context/segment-types). |
+| `memory_class` | string | `ephemeral` / `session` / `user` / `tenant` / `global`. |
+| `digest` | string | Content hash over the segment payload and its `context_type`. |
+| `token_count` | integer | Real measurement under the manifest's `tokenizer_fingerprint`, not an estimate. |
+| `byte_count` | integer | Raw byte size of the payload (inline + artifact). |
+| `checkpoint_relevant` | boolean | Whether the segment must survive into Checkpoint snapshots. |
+| `retention_policy` | string | `with_call` / `with_session` / `with_compaction_lineage` / `with_tenant`. |
+| `stable_prefix_part` | boolean | Whether the segment contributes to `stable_prefix_id`. |
+| `artifact_ref_id` | string \| null | Set when the segment is offloaded; the payload lives in a [ContextArtifact](/docs/concepts/context/context-artifacts). |
+| `preview` | string \| null | Short payload preview when the segment is offloaded; absent for inline segments. |
+| `compaction_record_id` | string \| null | Set when the segment was produced by compaction; resolves to a [CompactionRecord](/docs/concepts/context/compaction-records). |
+
+The segment row's full payload (inline body or artifact bytes) is fetched via [`GET /v1/ks/context/segments/{id}`](/docs/api/context/segments/get) or by resolving the referenced artifact with [`GET /v1/ks/context/artifacts/{id}`](/docs/api/context/artifacts/get).
+
+### `expand=compaction_records`
+
+When `expand=segments,compaction_records` is supplied, every distinct `compaction_record_id` referenced by an embedded segment is materialized as a sibling block on the response:
+
+```json
+{
+  "compaction_records": [
+    {
+      "id": "01J8X9Y2Z3K4M5N6P7Q8R9CR04",
+      "method": "runtime_reported",
+      "model_id": "qwen3-coder-30b",
+      "token_count_before": 9842,
+      "token_count_after": 412,
+      "source_segment_ids": ["01J8X9Y2Z3K4M5N6P7Q8R9SG10", "01J8X9Y2Z3K4M5N6P7Q8R9SG11"],
+      "output_segment_ids": ["01J8X9Y2Z3K4M5N6P7Q8R9SG04"],
+      "created_at": "2026-04-30T11:58:12Z"
+    }
+  ]
+}
+```
+
+This is a convenience surface for timelines and audit views; the canonical record is still resolvable via [`GET /v1/ks/context/compaction-records/{id}`](/docs/api/context/compaction-records/get).
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `200 OK` | The manifest exists and is visible to the caller. |
+| `400 Bad Request` | Malformed `manifest_id` or unknown `expand` value. Codes: `invalid_id`, `invalid_request`. |
+| `401 Unauthorized` | Missing, malformed, or unresolved API key. |
+| `404 Not Found` | The manifest does not exist *or* belongs to another Tenant. Code: `context_manifest_not_found`. |
+
+## Examples
+
+```bash
+# Default — manifest with embedded segments in canonical order
+curl https://api.kovaserve.com/v1/ks/context/manifests/01J8X9Y2Z3K4M5N6P7Q8R9S0T6 \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# Audit listing — manifest row only, no segments
+curl "https://api.kovaserve.com/v1/ks/context/manifests/01J8X9Y2Z3K4M5N6P7Q8R9S0T6?expand=none" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# Timeline view — include compaction lineage for any compacted segments
+curl "https://api.kovaserve.com/v1/ks/context/manifests/01J8X9Y2Z3K4M5N6P7Q8R9S0T6?expand=segments,compaction_records" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+```
+
+```python
+from kovaserve import KovaClient
+
+kova = KovaClient(api_key="ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b")
+
+manifest = kova.context.manifests.get("01J8X9Y2Z3K4M5N6P7Q8R9S0T6")
+
+print(f"manifest         {manifest.id}")
+print(f"stable_context   {manifest.stable_context_id}")
+print(f"admitted         {manifest.admission.decision}")
+print(f"active_tokens    {manifest.token_counts.active_tokens}")
+print(f"offloaded_tokens {manifest.token_counts.offloaded_tokens}")
+
+for seg in manifest.segments:
+    backing = "artifact" if seg.artifact_ref_id else "inline"
+    print(f"  [{seg.ordinal}] {seg.context_type:20} {seg.memory_class:10} {seg.token_count:>5} tok  ({backing})")
+```
+
+## See also
+
+- [`GET /v1/ks/context/manifests`](/docs/api/context/manifests/list) · [`GET /v1/ks/context/segments/{id}`](/docs/api/context/segments/get)
+- [Context manifests](/docs/concepts/context/context-manifests) — entity, tier model, admission decision
+- [Context segments](/docs/concepts/context/context-segments) · [Segment types](/docs/concepts/context/segment-types)
+- [Manifest-aware routing](/docs/concepts/routing/manifest-aware-routing) — the consumer of `stable_context_id`
+- [Admission](/docs/concepts/policy/admission) — the producer of the `admission` block
+- [IDs](/docs/api/using-the-api/ids) · [Errors](/docs/api/using-the-api/errors)

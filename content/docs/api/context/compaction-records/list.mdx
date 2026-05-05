@@ -1,0 +1,179 @@
+---
+title: List CompactionRecords
+description: GET /v1/ks/context/compaction-records — page through CompactionRecords with cursor pagination, filtered by run, session, source manifest, source/output segment, method, model, or creation window.
+---
+
+`GET /v1/ks/context/compaction-records` lists [CompactionRecords](/docs/concepts/context/compaction-records) the caller owns, newest first. The response uses cursor pagination — the same shape as every other list endpoint in the API. Filters narrow the result set to one Run, Session, source manifest, source segment, output segment, method, model, or creation window.
+
+The list response carries the record row but **does not** embed source or output segments. Each row is metadata only — to read source/output rows or pull source artifacts for replay, fetch the record individually with [`GET /v1/ks/context/compaction-records/{id}`](/docs/api/context/compaction-records/get) and pass `expand=`. This keeps list latency bounded and predictable; embedding N records' worth of segments is an unbounded cost the caller decides whether to pay.
+
+## Endpoint
+
+```
+GET /v1/ks/context/compaction-records
+```
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_...` — see [Authentication](/docs/api/using-the-api/authentication). |
+| Pagination | Cursor — see [Pagination](/docs/api/using-the-api/pagination). |
+| Errors | Native envelope — see [Errors](/docs/api/using-the-api/errors). |
+
+## Query parameters
+
+| Parameter | Type | Default | Meaning |
+|---|---|---|---|
+| `limit` | integer | `100` | Maximum records to return. Capped at `200`. Values outside `1..200` return `400 invalid_request`. |
+| `after` | string \| null | `null` | Cursor — return records strictly after it in descending creation order. |
+| `before` | string \| null | `null` | Cursor — return records strictly before it. Mutually exclusive with `after`. |
+| `run_id` | string \| null | `null` | Restrict to one Run. |
+| `session_id` | string \| null | `null` | Restrict to one Session. Format `ses_<24hex>`. |
+| `source_manifest_id` | string \| null | `null` | Restrict to records that compacted segments inside one ContextManifest. |
+| `source_segment_id` | string \| null | `null` | Restrict to records that include the given segment as a source. Useful for "what summarized this turn?" lookups. |
+| `output_segment_id` | string \| null | `null` | Restrict to the record whose output the given segment is. Returns at most one row. |
+| `project_id` | string \| null | `null` | Restrict to one Project. The Tenant filter is always implicit. |
+| `method` | string \| null | `null` | Restrict to `runtime_reported` or `kovaserve_managed`. |
+| `model_id` | string \| null | `null` | Restrict to records that used a specific model to produce the summary. |
+| `created_after` | string \| null | `null` | ISO-8601 timestamp — records with `created_at >= created_after`. |
+| `created_before` | string \| null | `null` | ISO-8601 timestamp — records with `created_at < created_before`. |
+
+The Tenant filter is implicit — records from other Tenants never appear in the result, regardless of any query-parameter combination.
+
+## Response — `200 OK`
+
+```json
+{
+  "data": [
+    {
+      "id": "01J8X9Y2Z3K4M5N6P7Q8R9CR04",
+      "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+      "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+      "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+      "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+      "step_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0S5",
+      "source_manifest_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T6",
+      "source_segment_count": 3,
+      "output_segment_count": 1,
+      "method": "runtime_reported",
+      "model_id": "qwen3-coder-30b",
+      "token_count_before": 9842,
+      "token_count_after": 412,
+      "created_at": "2026-04-30T11:58:12Z"
+    },
+    {
+      "id": "01J8X9Y2Z3K4M5N6P7Q8R9CR03",
+      "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+      "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+      "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+      "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+      "step_id": null,
+      "source_manifest_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T4",
+      "source_segment_count": 8,
+      "output_segment_count": 1,
+      "method": "kovaserve_managed",
+      "model_id": "qwen3-coder-30b",
+      "token_count_before": 24618,
+      "token_count_after": 720,
+      "created_at": "2026-04-30T11:42:01Z"
+    }
+  ],
+  "page": {
+    "next_cursor": "01J8X9Y2Z3K4M5N6P7Q8R9CR03",
+    "prev_cursor": "01J8X9Y2Z3K4M5N6P7Q8R9CR04",
+    "has_more": true,
+    "limit": 100
+  }
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | string | Record ID. |
+| `tenant_id` / `project_id` | string | Owning tenancy pair. |
+| `run_id` / `session_id` | string \| null | The Run and Session the compaction belongs to. |
+| `step_id` | string \| null | The `COMPACT` Step under which the compaction ran. `null` for `kovaserve_managed` records. |
+| `source_manifest_id` | string | The ContextManifest the source segments belonged to. |
+| `source_segment_count` / `output_segment_count` | integer | Counts of source and output segments. The full id arrays are on the record detail response, not the list row. |
+| `method` | string | `runtime_reported` or `kovaserve_managed`. |
+| `model_id` | string \| null | The model used to produce the summary. |
+| `token_count_before` / `token_count_after` | integer | The two ends of the compaction. |
+| `created_at` | string | ISO-8601 creation timestamp. |
+
+The list response intentionally omits `source_segment_ids`, `output_segment_ids`, `quality_flags`, and `metadata` to keep the page small. Fetch [`GET /v1/ks/context/compaction-records/{id}`](/docs/api/context/compaction-records/get) for the full row, with optional `expand=` for embedded segment rows and source artifacts.
+
+The pagination envelope is documented at [Pagination](/docs/api/using-the-api/pagination). Empty `data` is valid — it means no records match the supplied filters.
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `200 OK` | Returns a page of records. Empty `data` is valid. |
+| `400 Bad Request` | Both `before` and `after` supplied; an unrecognized filter value; or `limit` outside `1..200`. Code: `invalid_request`. |
+| `401 Unauthorized` | Missing or invalid bearer token. |
+| `404 Not Found` | A scoping ID (`run_id`, `session_id`, `source_manifest_id`, `source_segment_id`, `output_segment_id`, `project_id`) does not resolve in the caller's Tenant. Codes: `run_not_found`, `session_not_found`, `context_manifest_not_found`, `context_segment_not_found`, `project_not_found`. |
+
+## Examples
+
+```bash
+# Newest 50 records across the Tenant
+curl "https://api.kovaserve.com/v1/ks/context/compaction-records?limit=50" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# Every compaction in one Run, in reverse chronological order
+curl "https://api.kovaserve.com/v1/ks/context/compaction-records?run_id=01J8X9Y2Z3K4M5N6P7Q8R9S0T1" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# What summarized this segment? (resolve a compacted segment back to its lineage)
+curl "https://api.kovaserve.com/v1/ks/context/compaction-records?source_segment_id=01J8X9Y2Z3K4M5N6P7Q8R9SG10" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# Triage runtime-reported compactions in the last hour — quality flags vary by producer
+curl "https://api.kovaserve.com/v1/ks/context/compaction-records?method=runtime_reported&created_after=2026-05-05T11:00:00Z" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+```
+
+```python
+from kovaserve import KovaClient
+
+kova = KovaClient(api_key="ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b")
+
+# Token savings per Run
+total_before = 0
+total_after = 0
+for r in kova.context.compaction_records.iter(run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1"):
+    total_before += r.token_count_before
+    total_after += r.token_count_after
+
+if total_before:
+    ratio = total_after / total_before
+    print(f"compaction reduced {total_before} -> {total_after} tokens ({ratio:.0%} retained)")
+
+# Walk every page explicitly
+cursor = None
+while True:
+    page = kova.context.compaction_records.list(
+        session_id="ses_a7f3c2b8d4e1f0925a1b6c3d",
+        limit=100,
+        after=cursor,
+    )
+    for r in page.data:
+        print(f"  {r.created_at}  {r.id}  {r.method:18}  {r.token_count_before} -> {r.token_count_after}")
+    if not page.has_more:
+        break
+    cursor = page.next_cursor
+
+# Find the lineage that produced one summary segment
+hits = kova.context.compaction_records.list(output_segment_id="01J8X9Y2Z3K4M5N6P7Q8R9SG20")
+record = hits.data[0] if hits.data else None
+if record:
+    print(f"summary {record.output_segment_count} from {record.source_segment_count} sources via {record.method}")
+```
+
+## See also
+
+- [`GET /v1/ks/context/compaction-records/{id}`](/docs/api/context/compaction-records/get)
+- [`GET /v1/ks/context/manifests/{id}`](/docs/api/context/manifests/get) — read the source manifest
+- [`GET /v1/ks/context/segments/{id}`](/docs/api/context/segments/get) — resolve a source or output segment
+- [Compaction records](/docs/concepts/context/compaction-records) — entity overview, methods, retention, quality flags
+- [Compaction lineage](/docs/concepts/context/compaction-lineage) — how source/output relationships chain across compactions
+- [Pagination](/docs/api/using-the-api/pagination) · [IDs](/docs/api/using-the-api/ids) · [Errors](/docs/api/using-the-api/errors)

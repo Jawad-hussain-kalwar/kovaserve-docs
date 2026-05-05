@@ -1,0 +1,182 @@
+---
+title: Get a CompactionRecord
+description: GET /v1/ks/context/compaction-records/{id} — fetch a CompactionRecord with source manifest, source/output segment IDs, method, model, token deltas, quality flags, and lineage metadata.
+---
+
+`GET /v1/ks/context/compaction-records/{id}` returns a single [CompactionRecord](/docs/concepts/context/compaction-records) — the lineage object that describes how a set of source [ContextSegments](/docs/concepts/context/context-segments) was reduced into one or more compacted output segments. The response carries the source manifest, the ordered source segment ids, the output segment ids, the method, the model used, token counts before and after, and the quality flags asserted by the producer.
+
+CompactionRecords make compaction reconstructible. Every compacted segment in a [ContextManifest](/docs/concepts/context/context-manifests) carries a `compaction_record_id` that resolves to a complete description of how that segment came to exist — what it summarized, by what method, with what fidelity claims.
+
+The record is resolved against the API key's Tenant. Cross-tenant fetches return `404 Not Found` — the same response as a genuinely missing record — so the surface leaks no information about records the caller cannot see.
+
+## Endpoint
+
+```
+GET /v1/ks/context/compaction-records/{record_id}
+```
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_...` — see [Authentication](/docs/api/using-the-api/authentication). |
+| Path parameter | `record_id` — bare 26-character Crockford ULID. See [IDs](/docs/api/using-the-api/ids). |
+| Errors | Native envelope — see [Errors](/docs/api/using-the-api/errors). |
+
+### Query parameters
+
+| Parameter | Type | Default | Meaning |
+|---|---|---|---|
+| `expand` | string \| null | `null` | Comma-separated list controlling which embedded blocks the response includes. Supported values: `source_segments` (the source segment rows), `output_segments` (the output segment rows), `source_artifacts` (the artifacts referenced by source segments, when retention preserved them), `none`. Unknown values return `400 invalid_request`. |
+
+## Response — `200 OK`
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9CR04",
+  "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+  "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+  "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+  "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+  "step_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0S5",
+  "source_manifest_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T6",
+  "source_segment_ids": [
+    "01J8X9Y2Z3K4M5N6P7Q8R9SG10",
+    "01J8X9Y2Z3K4M5N6P7Q8R9SG11",
+    "01J8X9Y2Z3K4M5N6P7Q8R9SG12"
+  ],
+  "output_segment_ids": [
+    "01J8X9Y2Z3K4M5N6P7Q8R9SG20"
+  ],
+  "method": "runtime_reported",
+  "model_id": "qwen3-coder-30b",
+  "token_count_before": 9842,
+  "token_count_after": 412,
+  "quality_flags": {
+    "verbatim_quotes_preserved": true,
+    "tool_call_records_preserved": true,
+    "decisions_preserved": true,
+    "latest_user_request_preserved": true
+  },
+  "metadata": {
+    "source_artifact_ids": ["01J8X9Y2Z3K4M5N6P7Q8R9AR05"],
+    "output_artifact_id": "01J8X9Y2Z3K4M5N6P7Q8R9AR06",
+    "trigger": "context_budget.compact_required"
+  },
+  "created_at": "2026-04-30T11:58:12Z"
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | string | Record ID. Bare 26-char ULID. |
+| `tenant_id` / `project_id` | string | Owning tenancy pair. |
+| `run_id` | string | The Run the compaction belongs to. |
+| `session_id` | string \| null | The Session the compaction belongs to. |
+| `step_id` | string \| null | The `COMPACT` Step under which the compaction ran, when the producer is the runtime. `null` for `kovaserve_managed` records — managed compactions are control-plane-internal and do not occupy step slots. |
+| `source_manifest_id` | string | The ContextManifest the source segments belonged to. |
+| `source_segment_ids` | array | Ordered ids of the segments that were compacted. |
+| `output_segment_ids` | array | Ids of the resulting segments. Usually one; may be more when the source spans distinct topics. |
+| `method` | string | `runtime_reported` or `kovaserve_managed`. The closed enum maintained by the Compaction Lineage Service. |
+| `model_id` | string \| null | The model used to produce the summary. Required for `kovaserve_managed`; informational for `runtime_reported`. |
+| `token_count_before` | integer | Sum of source segment `token_count`s under the source manifest's tokenizer fingerprint. |
+| `token_count_after` | integer | Sum of output segment `token_count`s. The savings is `token_count_before - token_count_after`. |
+| `quality_flags` | object | Method- and producer-specific structured flags asserting preserved properties. See [Compaction records › Quality flags](/docs/concepts/context/compaction-records). |
+| `metadata` | object \| null | Free-form metadata. Conventionally carries `source_artifact_ids`, `output_artifact_id`, byte counts, scope refs, and the trigger. |
+| `created_at` | string | ISO-8601 timestamp the record was written. |
+
+### `expand=source_segments`
+
+When `expand` includes `source_segments`, the response carries an ordered `source_segments` array with the full segment rows for each id in `source_segment_ids`. Source segments under `with_compaction_lineage` retention remain addressable until every record that references them is pruned.
+
+```json
+{
+  "source_segments": [
+    {
+      "id": "01J8X9Y2Z3K4M5N6P7Q8R9SG10",
+      "context_type": "session_history",
+      "memory_class": "session",
+      "token_count": 3284,
+      "byte_count": 18412,
+      "digest": "sha256:1aa0…",
+      "artifact_ref_id": "01J8X9Y2Z3K4M5N6P7Q8R9AR05",
+      "preview": "User: Refactor src/auth.py to use the new token format..."
+    }
+  ]
+}
+```
+
+### `expand=output_segments`
+
+When `expand` includes `output_segments`, the response carries an `output_segments` array with the full output segment rows. Output segments always carry `context_type: "summary"` per [segment types](/docs/concepts/context/segment-types).
+
+### `expand=source_artifacts`
+
+When `expand` includes `source_artifacts`, the response carries a `source_artifacts` array with the metadata rows for every artifact referenced by a source segment. Bytes are not embedded; resolve the canonical [`GET /v1/ks/context/artifacts/{id}`](/docs/api/context/artifacts/get) for a fresh `download_url`.
+
+The expansions are additive — `expand=source_segments,output_segments,source_artifacts` is valid and returns all three blocks.
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `200 OK` | The record exists and is visible to the caller. |
+| `400 Bad Request` | Malformed `record_id` or unknown `expand` value. Codes: `invalid_id`, `invalid_request`. |
+| `401 Unauthorized` | Missing, malformed, or unresolved API key. |
+| `404 Not Found` | The record does not exist *or* belongs to another Tenant. Code: `compaction_record_not_found`. |
+| `410 Gone` | The record's retention has elapsed. Cold-storage reads return the metadata row with `details.reason: "retired"`; expansions are unavailable regardless of `expand`. Code: `compaction_record_retired`. |
+
+## Examples
+
+```bash
+# Default — record metadata only
+curl https://api.kovaserve.com/v1/ks/context/compaction-records/01J8X9Y2Z3K4M5N6P7Q8R9CR04 \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# Audit replay — source rows and the output summary
+curl "https://api.kovaserve.com/v1/ks/context/compaction-records/01J8X9Y2Z3K4M5N6P7Q8R9CR04?expand=source_segments,output_segments" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# Re-compaction prep — pull the source artifacts so a fresh summarizer can re-run
+curl "https://api.kovaserve.com/v1/ks/context/compaction-records/01J8X9Y2Z3K4M5N6P7Q8R9CR04?expand=source_segments,source_artifacts" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+```
+
+```python
+from kovaserve import KovaClient
+
+kova = KovaClient(api_key="ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b")
+
+record = kova.context.compaction_records.get(
+    "01J8X9Y2Z3K4M5N6P7Q8R9CR04",
+    expand="source_segments,output_segments",
+)
+
+savings = record.token_count_before - record.token_count_after
+ratio = record.token_count_after / record.token_count_before
+
+print(f"method        {record.method}")
+print(f"model         {record.model_id}")
+print(f"before/after  {record.token_count_before} -> {record.token_count_after} tokens")
+print(f"savings       {savings} tokens ({ratio:.0%} of original)")
+
+print("source segments:")
+for src in record.source_segments:
+    print(f"  {src.id}  {src.context_type:18}  {src.token_count:>5} tok")
+
+print("output segments:")
+for out in record.output_segments:
+    print(f"  {out.id}  {out.context_type:18}  {out.token_count:>5} tok")
+
+# Audit the producer's fidelity claims
+for flag, value in record.quality_flags.items():
+    print(f"  {flag:36}  {value}")
+```
+
+## See also
+
+- [`GET /v1/ks/context/compaction-records`](/docs/api/context/compaction-records/list)
+- [`GET /v1/ks/context/segments/{id}`](/docs/api/context/segments/get) — resolve a source or output segment
+- [`GET /v1/ks/context/manifests/{id}`](/docs/api/context/manifests/get) — read the source manifest
+- [Compaction records](/docs/concepts/context/compaction-records) — entity overview, methods, retention, quality flags
+- [Compaction lineage](/docs/concepts/context/compaction-lineage) — how source/output relationships chain across compactions
+- [Step types](/docs/concepts/run-hierarchy/step-types) — the `COMPACT` step type
+- [IDs](/docs/api/using-the-api/ids) · [Errors](/docs/api/using-the-api/errors)

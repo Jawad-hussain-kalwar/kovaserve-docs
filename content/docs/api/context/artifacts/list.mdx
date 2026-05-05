@@ -1,0 +1,172 @@
+---
+title: List ContextArtifacts
+description: GET /v1/ks/context/artifacts — page through ContextArtifacts with cursor pagination, filtered by name, session, run, project, MIME type, retention, or upload window.
+---
+
+`GET /v1/ks/context/artifacts` lists [ContextArtifacts](/docs/concepts/context/context-artifacts) the caller owns, newest first. The response uses cursor pagination — the same shape as every other list endpoint in the API. Filters narrow the result set by logical name, name prefix, Session, Run, Project, MIME type, retention, or upload window.
+
+The list response carries the artifact row but **does not** include a `download_url`. Each row is metadata only — to stream bytes, fetch the artifact individually with [`GET /v1/ks/context/artifacts/{id}`](/docs/api/context/artifacts/get). This keeps list latency bounded and predictable; minting N signed URLs is an avoidable cost the caller decides whether to pay.
+
+## Endpoint
+
+```
+GET /v1/ks/context/artifacts
+```
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_...` — see [Authentication](/docs/api/using-the-api/authentication). |
+| Pagination | Cursor — see [Pagination](/docs/api/using-the-api/pagination). |
+| Errors | Native envelope — see [Errors](/docs/api/using-the-api/errors). |
+
+## Query parameters
+
+| Parameter | Type | Default | Meaning |
+|---|---|---|---|
+| `limit` | integer | `100` | Maximum artifacts to return. Capped at `200`. Values outside `1..200` return `400 invalid_request`. |
+| `after` | string \| null | `null` | Cursor — return artifacts strictly after it in descending creation order. |
+| `before` | string \| null | `null` | Cursor — return artifacts strictly before it. Mutually exclusive with `after`. |
+| `name` | string \| null | `null` | Exact `name` match. Returns every version under the name, newest version first. |
+| `name_prefix` | string \| null | `null` | Prefix match on `name` — e.g. `name_prefix=tool_output:` to list every tool-output artifact. Mutually exclusive with `name`. |
+| `session_id` | string \| null | `null` | Restrict to artifacts bound to one Session. Format `ses_<24hex>`. |
+| `run_id` | string \| null | `null` | Restrict to artifacts bound to one Run. |
+| `project_id` | string \| null | `null` | Restrict to one Project. The Tenant filter is always implicit. |
+| `mime_type` | string \| null | `null` | Restrict to one MIME type. |
+| `retention` | string \| null | `null` | Restrict to one retention class — `with_call`, `with_session`, `with_compaction_lineage`, `with_tenant`. |
+| `referenced_by_segment` | boolean | `null` | When `true`, return only artifacts at least one ContextSegment references via `artifact_ref_id`. When `false`, return only orphan artifacts (no live segment reference). When unset, return both. |
+| `created_after` | string \| null | `null` | ISO-8601 timestamp — artifacts with `created_at >= created_after`. |
+| `created_before` | string \| null | `null` | ISO-8601 timestamp — artifacts with `created_at < created_before`. |
+
+The Tenant filter is implicit — artifacts from other Tenants never appear in the result, regardless of any query-parameter combination.
+
+## Response — `200 OK`
+
+```json
+{
+  "data": [
+    {
+      "id": "01J8X9Y2Z3K4M5N6P7Q8R9AR03",
+      "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+      "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+      "name": "tool_output:run_tests",
+      "version": 1,
+      "mime_type": "text/plain",
+      "byte_count": 2457621,
+      "digest": "sha256:e7c1…",
+      "retention": "with_session",
+      "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+      "run_id": null,
+      "preview": "Test failure: tests/test_auth.py::test_token_format[legacy] ...",
+      "referenced_by_segments": 2,
+      "created_at": "2026-04-30T12:00:00Z"
+    },
+    {
+      "id": "01J8X9Y2Z3K4M5N6P7Q8R9AR02",
+      "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+      "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+      "name": "file_diff:src/auth.py",
+      "version": 1,
+      "mime_type": "application/x-diff",
+      "byte_count": 18214,
+      "digest": "sha256:1aa0…",
+      "retention": "with_session",
+      "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+      "run_id": null,
+      "preview": "--- a/src/auth.py\n+++ b/src/auth.py\n@@ -42,11 +42,15 @@ ...",
+      "referenced_by_segments": 1,
+      "created_at": "2026-04-30T11:58:12Z"
+    }
+  ],
+  "page": {
+    "next_cursor": "01J8X9Y2Z3K4M5N6P7Q8R9AR02",
+    "prev_cursor": "01J8X9Y2Z3K4M5N6P7Q8R9AR03",
+    "has_more": true,
+    "limit": 100
+  }
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | string | Artifact ID. |
+| `tenant_id` / `project_id` | string | Owning tenancy pair. |
+| `name` | string | Logical name. |
+| `version` | integer | Monotonically incrementing per `(scope, name)`. |
+| `mime_type` | string | Standard MIME type. |
+| `byte_count` | integer | Exact size of the underlying bytes. |
+| `digest` | string | SHA-256 over the bytes. |
+| `retention` | string | `with_call` / `with_session` / `with_compaction_lineage` / `with_tenant`. |
+| `session_id` / `run_id` | string \| null | Bindings recorded at upload. |
+| `preview` | string | Short payload preview (text MIME types only). |
+| `referenced_by_segments` | integer | Count of distinct ContextSegments that reference this artifact via `artifact_ref_id` and have not aged past their own retention. `0` means the artifact is currently orphaned. |
+| `created_at` | string | ISO-8601 creation timestamp. |
+
+The list response intentionally omits `storage_ref`, `metadata`, `download_url`, and `expires_at` to keep the page small. Fetch [`GET /v1/ks/context/artifacts/{id}`](/docs/api/context/artifacts/get) for the full row plus a fresh signed URL.
+
+The pagination envelope is documented at [Pagination](/docs/api/using-the-api/pagination). Empty `data` is valid — it means no artifacts match the supplied filters.
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `200 OK` | Returns a page of artifacts. Empty `data` is valid. |
+| `400 Bad Request` | Both `before` and `after` supplied; both `name` and `name_prefix` supplied; an unrecognized filter value; or `limit` outside `1..200`. Code: `invalid_request`. |
+| `401 Unauthorized` | Missing or invalid bearer token. |
+| `404 Not Found` | A scoping ID (`session_id`, `run_id`, `project_id`) does not resolve in the caller's Tenant. Codes: `session_not_found`, `run_not_found`, `project_not_found`. |
+
+## Examples
+
+```bash
+# Newest 50 artifacts across the Tenant
+curl "https://api.kovaserve.com/v1/ks/context/artifacts?limit=50" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# Every version of a specific tool output
+curl "https://api.kovaserve.com/v1/ks/context/artifacts?name=tool_output:run_tests" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# All artifacts in a Session — pick the diff to reference next
+curl "https://api.kovaserve.com/v1/ks/context/artifacts?session_id=ses_a7f3c2b8d4e1f0925a1b6c3d&name_prefix=file_diff:" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# Retention sweep — orphans uploaded more than 24h ago
+curl "https://api.kovaserve.com/v1/ks/context/artifacts?referenced_by_segment=false&created_before=2026-05-04T12:00:00Z&limit=200" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+```
+
+```python
+from kovaserve import KovaClient
+
+kova = KovaClient(api_key="ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b")
+
+# Find every tool-output artifact for a Session, newest first
+page = kova.context.artifacts.list(
+    session_id="ses_a7f3c2b8d4e1f0925a1b6c3d",
+    name_prefix="tool_output:",
+    limit=20,
+)
+for a in page.data:
+    print(f"  {a.created_at}  {a.name:30}  v{a.version}  {a.byte_count:>10} bytes")
+
+# Iterate every artifact for a Run via the auto-paginating iterator
+total_bytes = 0
+for a in kova.context.artifacts.iter(run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1"):
+    total_bytes += a.byte_count
+print(f"run uses {total_bytes / 1_048_576:.1f} MiB of artifact storage")
+
+# Triage orphans — uploaded but no live segment reference
+orphans = kova.context.artifacts.list(
+    referenced_by_segment=False,
+    project_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    limit=200,
+)
+for a in orphans.data:
+    print(f"orphan  {a.id}  {a.name}  uploaded {a.created_at}")
+```
+
+## See also
+
+- [`POST /v1/ks/context/artifacts`](/docs/api/context/artifacts/upload) · [`GET /v1/ks/context/artifacts/{id}`](/docs/api/context/artifacts/get)
+- [Context artifacts](/docs/concepts/context/context-artifacts) — entity overview, versioning, retention
+- [Context segments](/docs/concepts/context/context-segments) — the entity that references artifacts via `artifact_ref_id`
+- [Pagination](/docs/api/using-the-api/pagination) · [IDs](/docs/api/using-the-api/ids) · [Errors](/docs/api/using-the-api/errors)

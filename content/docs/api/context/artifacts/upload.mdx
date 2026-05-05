@@ -1,0 +1,199 @@
+---
+title: Upload a ContextArtifact
+description: POST /v1/ks/context/artifacts — upload a ContextArtifact to object storage with name, mime_type, retention, and bytes; returns the canonical id and version a segment can reference.
+---
+
+`POST /v1/ks/context/artifacts` uploads a [ContextArtifact](/docs/concepts/context/context-artifacts) — externalized context data that lives in object storage and is referenced from [ContextSegments](/docs/concepts/context/context-segments) via `artifact_ref_id`. The endpoint accepts the canonical `name + version + mime_type + bytes` shape: the runtime supplies `name`, `mime_type`, `retention`, and the byte payload; KovaServe assigns the `id` and the next monotonic `version`.
+
+Artifacts are how runtimes keep active context bounded. Tool outputs, file diffs, retrieved documents, workspace snapshots, and large transcripts upload once and are referenced by id from any subsequent ContextManifest. The active prompt stays small; the underlying material remains durable and re-admissible.
+
+## Endpoint
+
+```
+POST /v1/ks/context/artifacts
+```
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_...` — see [Authentication](/docs/api/using-the-api/authentication). |
+| Content type | `multipart/form-data` (preferred for files) or `application/json` with a base64-encoded body (small payloads, automation). |
+| Idempotency | Optional `Idempotency-Key` header — see [Idempotency](/docs/api/using-the-api/idempotency). Same key + same payload returns the original artifact id. |
+| Errors | Native envelope — see [Errors](/docs/api/using-the-api/errors). |
+
+## Request
+
+### Multipart form (preferred)
+
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `bytes` | file | yes | The artifact payload. The byte count is computed from the upload stream. |
+| `name` | string | yes | Logical name. Conventionally `<class>:<descriptor>` — e.g. `tool_output:run_tests`, `file_diff:src/auth.py`, `workspace_snapshot:before-refactor`. Names are scoped to `(tenant_id, project_id)`. |
+| `mime_type` | string | yes | Standard MIME type — `text/plain`, `text/markdown`, `application/json`, `application/x-diff`, `image/png`, etc. |
+| `retention` | string | no | One of `with_call`, `with_session`, `with_compaction_lineage`, `with_tenant`. Defaults to `with_session`. |
+| `session_id` | string | no | The Session the artifact belongs to. Required when `retention=with_session`. |
+| `run_id` | string | no | The Run the artifact belongs to. Required when `retention=with_call`. |
+| `metadata` | string | no | JSON-encoded free-form metadata persisted alongside the artifact. |
+| `preview_chars` | integer | no | Number of leading characters to capture as `preview` for text MIME types. Defaults to `512`. Capped at `4096`. Ignored for non-text types. |
+
+### JSON form (small payloads)
+
+```http
+POST /v1/ks/context/artifacts
+Authorization: Bearer ks_...
+Content-Type: application/json
+
+{
+  "name": "tool_output:run_tests",
+  "mime_type": "text/plain",
+  "retention": "with_session",
+  "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+  "bytes_b64": "VGVzdCBmYWlsdXJlOiAuLi4="
+}
+```
+
+The JSON form is hard-capped at **1 MiB** of base64 payload (≈768 KiB raw bytes). Larger uploads must use multipart.
+
+### Storage destination
+
+The `data_boundary` field on the active [PolicyScope](/docs/concepts/policy/policy-scopes) selects the bucket. When unset, artifacts land in the default bucket; when set (e.g. `eu_only`), uploads route to a region-suffixed bucket. The chosen bucket is reflected in the response `storage_ref`.
+
+## Response — `201 Created`
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9AR03",
+  "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+  "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+  "name": "tool_output:run_tests",
+  "version": 1,
+  "mime_type": "text/plain",
+  "byte_count": 2457621,
+  "digest": "sha256:e7c14e1f0925a1b6c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f70",
+  "storage_ref": "s3://kovaserve-artifacts/01J8X9Y2Z3K4M5N6P7Q8R9AR03",
+  "scope": {
+    "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+    "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1"
+  },
+  "retention": "with_session",
+  "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+  "run_id": null,
+  "preview": "Test failure: tests/test_auth.py::test_token_format[legacy] - AssertionError: expected ...",
+  "metadata": null,
+  "created_at": "2026-04-30T12:00:00Z"
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | string | Bare 26-char ULID. The reference a segment uses as `artifact_ref_id`. |
+| `tenant_id` / `project_id` | string | Owning tenancy pair. |
+| `name` | string | Echoed from the request. |
+| `version` | integer | Monotonically incrementing per `(scope, name)`. The first upload for a name is `1`. |
+| `mime_type` | string | Echoed from the request. |
+| `byte_count` | integer | Exact size of the uploaded bytes. |
+| `digest` | string | SHA-256 over the bytes. Verified on read. |
+| `storage_ref` | string | Object-storage URI. MinIO-managed in managed cloud; customer-supplied S3 in private deployments. |
+| `scope` | object | Tenant / Project ownership. |
+| `retention` | string | Effective retention. |
+| `session_id` / `run_id` | string \| null | Bindings; populated when supplied or required by retention. |
+| `preview` | string | Short payload preview for text MIME types; empty string for non-text. |
+| `metadata` | object \| null | Echoed metadata. |
+| `created_at` | string | ISO-8601 timestamp the artifact was written. |
+
+The artifact's bytes are not returned inline. Subsequent reads use [`GET /v1/ks/context/artifacts/{id}`](/docs/api/context/artifacts/get), which returns metadata plus a short-lived `download_url`.
+
+### Versioning
+
+A second upload against the same `(scope, name)` produces version `2` — version `1` remains addressable until its retention expires. References from segments always carry both `id` and the bound `version`, so frozen manifests resolve to the exact bytes they were assembled against. There is no concept of "latest" at the manifest layer.
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `201 Created` | The artifact was written. The body is the canonical artifact row. |
+| `400 Bad Request` | Missing required field, malformed `name`, unsupported `mime_type`, malformed `metadata`, `preview_chars` outside `1..4096`, base64 payload over the JSON-form cap. Code: `invalid_request`. |
+| `401 Unauthorized` | Missing or invalid bearer token. |
+| `403 Forbidden` | The active PolicyScope's `data_boundary` requires a region-suffixed bucket that is not provisioned in this deployment. Code: `data_boundary_unsatisfiable`. |
+| `404 Not Found` | A supplied `session_id` or `run_id` does not resolve in the caller's Tenant. Codes: `session_not_found`, `run_not_found`. |
+| `409 Conflict` | An `Idempotency-Key` was reused with a different payload. The body identifies the original artifact. Code: `idempotency_conflict`. |
+| `413 Payload Too Large` | The upload exceeds the per-request size cap (default `200 MiB` multipart, `1 MiB` JSON). Code: `payload_too_large`. |
+| `415 Unsupported Media Type` | The request's `Content-Type` is neither `multipart/form-data` nor `application/json`. Code: `unsupported_media_type`. |
+| `422 Unprocessable Entity` | `retention=with_session` without a `session_id`, or `retention=with_call` without a `run_id`. Code: `retention_binding_required`. |
+
+## Examples
+
+```bash
+# Multipart upload — text tool output, session-bound retention
+curl -X POST https://api.kovaserve.com/v1/ks/context/artifacts \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b" \
+  -F "name=tool_output:run_tests" \
+  -F "mime_type=text/plain" \
+  -F "retention=with_session" \
+  -F "session_id=ses_a7f3c2b8d4e1f0925a1b6c3d" \
+  -F "bytes=@./pytest-output.txt"
+
+# JSON small-payload upload — base64 body, idempotency key
+curl -X POST https://api.kovaserve.com/v1/ks/context/artifacts \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: upload-run42-tests-2026-05-05" \
+  -d '{
+        "name": "tool_output:run_tests",
+        "mime_type": "text/plain",
+        "retention": "with_session",
+        "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+        "bytes_b64": "VGVzdCBmYWlsdXJlOiAuLi4="
+      }'
+
+# Workspace snapshot — large diff, larger preview budget
+curl -X POST https://api.kovaserve.com/v1/ks/context/artifacts \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b" \
+  -F "name=workspace_snapshot:before-refactor" \
+  -F "mime_type=application/x-diff" \
+  -F "retention=with_session" \
+  -F "session_id=ses_a7f3c2b8d4e1f0925a1b6c3d" \
+  -F "preview_chars=2048" \
+  -F "bytes=@./snapshot.diff"
+```
+
+```python
+from kovaserve import KovaClient
+
+kova = KovaClient(api_key="ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b")
+
+# Upload from a path
+with open("pytest-output.txt", "rb") as fh:
+    artifact = kova.context.artifacts.upload(
+        name="tool_output:run_tests",
+        mime_type="text/plain",
+        retention="with_session",
+        session_id="ses_a7f3c2b8d4e1f0925a1b6c3d",
+        bytes=fh,
+    )
+
+print(f"id      {artifact.id}")
+print(f"version {artifact.version}")
+print(f"bytes   {artifact.byte_count}")
+print(f"preview {artifact.preview[:60]!r}")
+
+# Reference from the next request — the segment carries artifact_ref_id,
+# the manifest stores the preview only, the runtime fetches bytes on demand.
+response = kova.chat.completions.create(
+    model="qwen3-coder-30b",
+    messages=[{"role": "user", "content": "Diagnose the failing tests."}],
+    extra_body={
+        "kovaserve": {
+            "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+            "artifact_refs": [artifact.id],
+        }
+    },
+)
+```
+
+## See also
+
+- [`GET /v1/ks/context/artifacts/{id}`](/docs/api/context/artifacts/get) · [`GET /v1/ks/context/artifacts`](/docs/api/context/artifacts/list)
+- [Context artifacts](/docs/concepts/context/context-artifacts) — entity overview, versioning, retention, storage backends
+- [Context segments](/docs/concepts/context/context-segments) — the consumer of `artifact_ref_id`
+- [Admission](/docs/concepts/policy/admission) — the producer of `OFFLOAD_REQUIRED`, the auto-offload trigger that writes artifacts on the runtime's behalf
+- [Idempotency](/docs/api/using-the-api/idempotency) · [IDs](/docs/api/using-the-api/ids) · [Errors](/docs/api/using-the-api/errors)

@@ -1,0 +1,217 @@
+---
+title: Get a ContextSegment
+description: GET /v1/ks/context/segments/{id} — fetch a ContextSegment with full payload (inline body or artifact-backed preview), digest, token accounting, retention, and lineage refs.
+---
+
+`GET /v1/ks/context/segments/{id}` returns a single [ContextSegment](/docs/concepts/context/context-segments) — a typed fragment of context that lives inside a [ContextManifest](/docs/concepts/context/context-manifests). The response carries the full segment row including the inline payload (when stored inline) or the `artifact_ref_id` plus `preview` (when offloaded).
+
+Segments are immutable once written into a manifest. Re-admitted manifests produce fresh segment rows with their own IDs, while prior segments remain addressable for the lifetime of their `retention_policy`. Two reads of the same `id` always return identical bytes.
+
+The segment is resolved against the API key's Tenant. Cross-tenant fetches return `404 Not Found` — the same response as a genuinely missing segment — so the surface leaks no information about segments the caller cannot see.
+
+## Endpoint
+
+```
+GET /v1/ks/context/segments/{segment_id}
+```
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_...` — see [Authentication](/docs/api/using-the-api/authentication). |
+| Path parameter | `segment_id` — bare 26-character Crockford ULID. See [IDs](/docs/api/using-the-api/ids). |
+| Errors | Native envelope — see [Errors](/docs/api/using-the-api/errors). |
+
+### Query parameters
+
+| Parameter | Type | Default | Meaning |
+|---|---|---|---|
+| `include_payload` | boolean | `true` | When `false`, omit `content_inline` for inline segments and `preview` for offloaded segments. The fast path for audit and retention sweeps that only need metadata. |
+| `manifest_id` | string \| null | `null` | Optional disambiguator. A segment row is unique by `id`, but the same logical segment may be referenced by multiple manifests. Supplying `manifest_id` returns the segment alongside the `tier` and `ordinal` it occupies in that specific manifest. |
+
+## Response — `200 OK`
+
+### Inline segment
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9SG02",
+  "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+  "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+  "context_type": "system_prompt",
+  "memory_class": "tenant",
+  "source": "runtime_request",
+  "digest": "sha256:c4f24e1f0925a1b6c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f70",
+  "token_count": 184,
+  "byte_count": 920,
+  "content_inline": "You are a senior engineer. Follow these rules...",
+  "artifact_ref_id": null,
+  "checkpoint_relevant": true,
+  "retention_policy": "with_tenant",
+  "stable_prefix_part": true,
+  "compaction_record_id": null,
+  "scope_id": "01J8X9Y2Z3K4M5N6P7Q8R9PS01",
+  "created_at": "2026-04-30T11:58:12Z",
+  "expires_at": null
+}
+```
+
+### Offloaded (artifact-backed) segment
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9SG07",
+  "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+  "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+  "context_type": "tool_result",
+  "memory_class": "session",
+  "source": "artifact_offload",
+  "digest": "sha256:e7c14e1f0925a1b6c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f70",
+  "token_count": 128,
+  "byte_count": 3145728,
+  "content_inline": null,
+  "artifact_ref_id": "01J8X9Y2Z3K4M5N6P7Q8R9AR03",
+  "preview": "First 512 chars of the tool result...",
+  "checkpoint_relevant": true,
+  "retention_policy": "with_session",
+  "stable_prefix_part": false,
+  "compaction_record_id": null,
+  "scope_id": "01J8X9Y2Z3K4M5N6P7Q8R9PS01",
+  "created_at": "2026-04-30T12:00:00Z",
+  "expires_at": null
+}
+```
+
+### Compacted segment
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9SG20",
+  "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+  "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+  "context_type": "summary",
+  "memory_class": "session",
+  "source": "compaction",
+  "digest": "sha256:5b714e1f0925a1b6c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f70",
+  "token_count": 412,
+  "byte_count": 1827,
+  "content_inline": "Across the prior 38 turns the agent...",
+  "artifact_ref_id": null,
+  "preview": null,
+  "checkpoint_relevant": true,
+  "retention_policy": "with_compaction_lineage",
+  "stable_prefix_part": false,
+  "compaction_record_id": "01J8X9Y2Z3K4M5N6P7Q8R9CR04",
+  "scope_id": "01J8X9Y2Z3K4M5N6P7Q8R9PS01",
+  "created_at": "2026-04-30T11:58:12Z",
+  "expires_at": null
+}
+```
+
+### With `manifest_id` — adds positional metadata
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9SG02",
+  "manifest_position": {
+    "manifest_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T6",
+    "ordinal": 1,
+    "tier": "system"
+  },
+  "...": "...remaining fields as above..."
+}
+```
+
+### Fields
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | string | Segment ID. Bare 26-char ULID. |
+| `tenant_id` / `project_id` | string | Owning tenancy pair. |
+| `context_type` | string | Canonical position. One of `system_prompt`, `persistent_context`, `summary`, `session_history`, `agent_state`, `tool_result`. See [segment types](/docs/concepts/context/segment-types). |
+| `memory_class` | string | Retention-intent label — `ephemeral` / `session` / `user` / `tenant` / `global`. |
+| `source` | string | Origin tag — `runtime_request`, `session_history`, `compaction`, `artifact_offload`. |
+| `digest` | string | Content hash over the segment payload (inline body or artifact bytes) and `context_type`. Identical content produces identical digests across calls. |
+| `token_count` | integer | Real measurement under the manifest's `tokenizer_fingerprint`, never an estimate. |
+| `byte_count` | integer | Raw byte size of the payload (inline body or full artifact). For offloaded segments, `byte_count` reflects the artifact, not the preview. |
+| `content_inline` | string \| null | The segment body when stored inline. `null` for offloaded and audit-only fetches (`include_payload=false`). |
+| `artifact_ref_id` | string \| null | Set when the segment is offloaded; resolves to a [ContextArtifact](/docs/concepts/context/context-artifacts). |
+| `preview` | string \| null | Short payload preview for offloaded segments — typically the first 512 characters of text MIME types. `null` for inline segments and for audit-only fetches. |
+| `checkpoint_relevant` | boolean | Whether the segment must survive into Checkpoint snapshots. The Checkpoint Manager refuses capture if any `checkpoint_relevant` segment is unreachable. |
+| `retention_policy` | string | `with_call` / `with_session` / `with_compaction_lineage` / `with_tenant`. Governs how long the segment row survives. |
+| `stable_prefix_part` | boolean | Whether the segment contributes to `stable_prefix_id` (true only for `system_prompt` and `persistent_context`). |
+| `compaction_record_id` | string \| null | Set when the segment was produced by compaction; resolves to a [CompactionRecord](/docs/concepts/context/compaction-records). |
+| `scope_id` | string | The PolicyScope under which the segment was admitted. |
+| `created_at` | string | ISO-8601 timestamp the segment row was written. |
+| `expires_at` | string \| null | Hard expiry derived from `retention_policy`, or `null` when retention is open-ended. |
+
+## Resolving the payload
+
+| The segment is… | Where the bytes live | How to read them |
+|---|---|---|
+| Inline | `content_inline` on this response. | Read the field directly. |
+| Artifact-backed | A [ContextArtifact](/docs/concepts/context/context-artifacts) at `artifact_ref_id`. The `preview` field is sufficient for routing and dashboards. | Fetch [`GET /v1/ks/context/artifacts/{id}`](/docs/api/context/artifacts/get) for metadata plus a short-lived `download_url`. |
+
+The wire surface is symmetric: an offloaded segment's `digest` is computed over the original payload, not the preview, so an offloaded segment never invalidates a manifest's `stable_context_id`.
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `200 OK` | The segment exists and is visible to the caller. |
+| `400 Bad Request` | Malformed `segment_id`, malformed `manifest_id`, or both. Codes: `invalid_id`, `invalid_request`. |
+| `401 Unauthorized` | Missing, malformed, or unresolved API key. |
+| `404 Not Found` | The segment does not exist *or* belongs to another Tenant. When `manifest_id` is supplied and the segment is not present in that manifest, the body distinguishes the cases via `details.reason: "segment_not_in_manifest"`. Codes: `context_segment_not_found`, `context_manifest_not_found`. |
+| `410 Gone` | The segment row exists but its retention has elapsed and the row is being read from cold storage as audit-only. The body still carries the metadata; `content_inline` and `preview` are omitted regardless of `include_payload`. Code: `context_segment_retired`. |
+
+## Examples
+
+```bash
+# Default — full payload for an inline segment
+curl https://api.kovaserve.com/v1/ks/context/segments/01J8X9Y2Z3K4M5N6P7Q8R9SG02 \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# Audit fetch — skip the body
+curl "https://api.kovaserve.com/v1/ks/context/segments/01J8X9Y2Z3K4M5N6P7Q8R9SG02?include_payload=false" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# Resolve a segment in the context of a specific manifest — adds tier and ordinal
+curl "https://api.kovaserve.com/v1/ks/context/segments/01J8X9Y2Z3K4M5N6P7Q8R9SG02?manifest_id=01J8X9Y2Z3K4M5N6P7Q8R9S0T6" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+```
+
+```python
+from kovaserve import KovaClient
+
+kova = KovaClient(api_key="ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b")
+
+seg = kova.context.segments.get("01J8X9Y2Z3K4M5N6P7Q8R9SG07")
+
+print(f"segment       {seg.id}")
+print(f"context_type  {seg.context_type}")
+print(f"memory_class  {seg.memory_class}")
+print(f"tokens        {seg.token_count}")
+print(f"bytes         {seg.byte_count}")
+
+if seg.artifact_ref_id:
+    # Offloaded — preview is on the segment, full bytes via the artifact.
+    print(f"preview       {seg.preview!r}")
+    artifact = kova.context.artifacts.get(seg.artifact_ref_id)
+    print(f"download via  {artifact.download_url}")
+else:
+    print(f"inline body   {seg.content_inline!r}")
+
+# Resolve a compacted segment back to its lineage record
+if seg.compaction_record_id:
+    record = kova.context.compaction_records.get(seg.compaction_record_id)
+    print(f"compacted from {len(record.source_segment_ids)} sources via {record.method}")
+```
+
+## See also
+
+- [`GET /v1/ks/context/manifests/{id}`](/docs/api/context/manifests/get) · [`GET /v1/ks/context/manifests`](/docs/api/context/manifests/list)
+- [`GET /v1/ks/context/artifacts/{id}`](/docs/api/context/artifacts/get) — resolve the payload of an offloaded segment
+- [`GET /v1/ks/context/compaction-records/{id}`](/docs/api/context/compaction-records/get) — resolve the lineage of a compacted segment
+- [Context segments](/docs/concepts/context/context-segments) — entity overview, retention, digest semantics
+- [Segment types](/docs/concepts/context/segment-types) — the closed `context_type` enum
+- [Context manifests](/docs/concepts/context/context-manifests) — the parent entity that orders segments
+- [IDs](/docs/api/using-the-api/ids) · [Errors](/docs/api/using-the-api/errors)
