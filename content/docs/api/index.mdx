@@ -1,0 +1,37 @@
+---
+title: API Reference
+description: The complete HTTP surface of the KovaServe control plane — two API families on a single base URL, organized by resource.
+---
+
+KovaServe's HTTP API is the public interface to the [control plane](/docs/concepts/layers/control-plane). It exposes two coexistent families on the same base URL:
+
+- **OpenAI-compatible inference** — `/v1/chat/completions` and `/v1/models`. Drop-in usage from any OpenAI SDK works without code changes; the `kovaserve` extension envelope opts into native features when you want them.
+- **Native control plane** — `/v1/ks/*` for [Runs](/docs/concepts/run-hierarchy/runs), [Sessions](/docs/concepts/continuity/sessions), [Checkpoints](/docs/concepts/recovery/checkpoints), context engineering, budgets, policy, metering, tenancy, runtime, events, and cluster operations.
+
+Start with [Using the API](/docs/api/using-the-api) for the cross-cutting conventions every endpoint shares — base URL, authentication, errors, pagination, idempotency, IDs, cost headers, and streaming. Then jump to the resource you need.
+
+## Sections
+
+<Cards>
+  <Card title="Using the API" href="/docs/api/using-the-api" description="Base URL, two API families, auth, errors, pagination, idempotency, IDs, cost headers, streaming." />
+  <Card title="Chat & Models" href="/docs/api/inference/chat-completions" description="OpenAI-compatible inference: /v1/chat/completions and /v1/models." />
+  <Card title="Runs" href="/docs/api/runs/create" description="Create, read, list, update, cancel, branch — and walk Steps, ModelCalls, and timelines." />
+  <Card title="Sessions" href="/docs/api/sessions/create" description="Continuity containers across turns and related runs." />
+  <Card title="Checkpoints" href="/docs/api/checkpoints/create" description="Resumable snapshots; logical-context-first restore." />
+  <Card title="Context" href="/docs/api/context/manifests/get" description="ContextManifests, segments, artifacts, and compaction records." />
+  <Card title="Memory" href="/docs/api/memory/scopes" description="Memory scopes, entries, and search across ephemeral / session / user / tenant / global." />
+  <Card title="Tools" href="/docs/api/tools/catalogs/create" description="Tool catalogs — hashed, immutable, versioned." />
+  <Card title="Budgets & Policy" href="/docs/api/budgets/create" description="Run budgets, context budgets, and policy scopes." />
+  <Card title="Usage & Cost" href="/docs/api/metering/usage" description="Metering queries and exports." />
+  <Card title="Tenants & Keys" href="/docs/api/tenants/get" description="Tenant, Project, Environment, and key lifecycle." />
+  <Card title="Workers & Sandboxes" href="/docs/api/runtime/workers/list" description="Runtime workers, sandboxes, workspaces, and tool invocations." />
+  <Card title="Events" href="/docs/api/events/index" description="Ten event streams on a unified envelope." />
+  <Card title="Cluster" href="/docs/api/cluster/nodes" description="Nodes, cache lookup, routing plans, state handles." />
+  <Card title="Health & Metrics" href="/docs/api/health/health" description="/health and /metrics endpoints." />
+</Cards>
+
+## See also
+
+- [Concepts](/docs/concepts) — the canonical entities every endpoint operates on
+- [SDK Reference](/docs/sdk) — Python `kovaserve` client
+- [CLI Reference](/docs/cli) — `kova` command-line interface

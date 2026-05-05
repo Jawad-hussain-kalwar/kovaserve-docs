@@ -1,14 +1,8 @@
 {
   "title": "API Reference",
   "pages": [
-    "---Using the API---",
     "index",
-    "authentication",
-    "errors",
-    "pagination",
-    "idempotency",
-    "ids",
-    "cost-headers",
-    "streaming"
+    "using-the-api",
+    "inference"
   ]
 }

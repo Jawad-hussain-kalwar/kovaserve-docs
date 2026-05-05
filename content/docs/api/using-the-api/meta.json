@@ -1,0 +1,13 @@
+{
+  "title": "Using the API",
+  "pages": [
+    "index",
+    "authentication",
+    "errors",
+    "pagination",
+    "idempotency",
+    "ids",
+    "cost-headers",
+    "streaming"
+  ]
+}
