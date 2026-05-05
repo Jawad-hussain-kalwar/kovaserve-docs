@@ -87,10 +87,10 @@ The response is the **only time the raw secret is returned** — clients must st
 
 ## Scope binding
 
-A Key's `(tenant_id, project_id, environment_id)` triple is **immutable after creation**. Re-binding is not an operation:
+A Key's `(tenant_id, project_id, environment_id)` triple is **immutable after creation**. The triple is fixed at issuance:
 
-- A Key issued for Project A cannot later be moved to Project B.
-- A Key issued for the `staging` Environment cannot later be promoted to `production`.
+- A Key issued for Project A stays bound to Project A for its lifetime.
+- A Key issued for the `staging` Environment stays bound to `staging`.
 - The pattern for promotion is: create a new Key for the target Environment and revoke the old one.
 
 The triple is the only thing the Key carries. Permissions, rate limits, model ACLs, and data boundary all come from the resolved [PolicyScope](/docs/concepts/policy/policy-scopes#resolution), which overlays Tenant → Project → Environment defaults at admission time.
@@ -173,12 +173,9 @@ The full secret is never surfaced — only the Key ID, name, last four character
 
 A Key with `mode = "test"` resolves identically against `tier = "dev"` Environments and rejects against `tier = "prod"`. Test keys exist so a deployment with both production and development traffic on the same gateway cannot accidentally accept a development credential against production load. The gateway returns `403 Forbidden` with `error.code = "key_mode_environment_mismatch"`.
 
-## What a Key is not
+## Identity scope of a Key
 
-- **Not a user identity.** Keys are service credentials. End-user identity is mapped by the application; KovaServe records `key_id` on every request and the application is responsible for mapping users to Keys.
-- **Not a permission set.** Permissions come from the resolved PolicyScope, not the Key. Two Keys bound to the same triple resolve to identical permissions.
-- **Not editable.** Name and `expires_at` can be updated; everything else is immutable. To change the bound scope, issue a new Key and revoke the old one.
-- **Not transferable across Tenants.** A Key is rooted at a specific Tenant at creation. Moving workloads between Tenants is a re-issuance operation, not a Key edit.
+A Key is a service credential — KovaServe records `key_id` on every request, and the application maps end users to Keys. Permissions come from the resolved [PolicyScope](/docs/concepts/policy/policy-scopes), so two Keys bound to the same `(tenant_id, project_id, environment_id)` triple resolve to identical permissions. The Key's `name` and `expires_at` can be updated through `PATCH /v1/ks/keys/{id}`; the bound triple stays fixed for the Key's lifetime, and moving workloads between Tenants or scopes is done by issuing a new Key and revoking the old one.
 
 ## See also
 

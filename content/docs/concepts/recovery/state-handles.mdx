@@ -13,7 +13,7 @@ Every StateHandle carries a `type` discriminator that determines what the `ref` 
 
 | `type` | What it points at | Validator |
 |---|---|---|
-| `kv_prefix` | A KV cache prefix exported from a vLLM worker. | Tokenizer fingerprint, model family, residency tier, freshness. |
+| `kv_prefix` | A KV cache prefix exported from an inference worker on the substrate. | Tokenizer fingerprint, model family, residency tier, freshness. |
 | `context_manifest` | A frozen `ContextManifest` row. | Renderer version, model id, scope match. |
 | `checkpoint` | Another Checkpoint (composition or chained restore). | Target Checkpoint must be `VALIDATED` or `RESTORED`. |
 | `artifact_bundle` | A set of `ContextArtifact` rows. | Each artifact readable from object storage; hashes match. |
@@ -79,7 +79,7 @@ The State Handle Registry returns the resolved target along with the validation 
 |---|---|
 | Substrate KV export at Checkpoint capture | One `kv_prefix` per exported prefix. |
 | Checkpoint capture | One `context_manifest`, plus zero or more `artifact_bundle`s, plus optional `runtime_state`. |
-| GCM v2 manifest assembly | One `context_manifest` per produced manifest. |
+| Global Context Manager (manifest assembly) | One `context_manifest` per produced manifest. |
 | Context Artifact Store on artifact creation | One `artifact_bundle` for runs that retain artifacts at Session scope. |
 | Layer 3 workspace snapshot | One `runtime_state` per snapshot. |
 

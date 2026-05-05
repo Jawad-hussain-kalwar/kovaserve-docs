@@ -5,7 +5,7 @@ description: Managed agents for document-heavy enterprise workflows on the Agent
 
 **DocRuns** is the managed-agent SKU for document-heavy enterprise workflows — contract review, compliance checks, redline assistance, clause extraction, and document reconciliation. A DocRun receives one or more documents, reads them under a bounded context budget, applies the configured review or extraction policy, produces a structured output with citations to the source spans, and records a full audit trail.
 
-DocRuns is the SKU that proves the platform on **text-bound, retrieval-heavy, citation-driven, audit-grade** work — the kinds of reviews a legal, compliance, or risk team would otherwise do by hand and need to defend afterward.
+DocRuns is shaped for **text-bound, retrieval-heavy, citation-driven, audit-grade** work — the kinds of reviews a legal, compliance, or risk team would otherwise do by hand and need to defend afterward.
 
 ```
        documents (contracts, policies, filings)              structured output + citations
@@ -100,7 +100,7 @@ When a DocRun reaches `COMPLETED`:
 - A **policy audit** — every rule applied, every finding's classification, every cross-check pass or flag.
 - A **cost per completed run** number — what it cost to complete the review, with frozen pricing snapshots.
 
-If the DocRun was unable to reach a confident conclusion (a clause not found, an extraction underspecified, a cross-check disagreement that the policy says cannot be silently resolved), the output surfaces the gap explicitly with the evidence the agent did find. *Inconclusive* is a first-class outcome, not a failure mode.
+If the DocRun was unable to reach a confident conclusion (a clause not found, an extraction underspecified, a cross-check disagreement that the policy says cannot be silently resolved), the output surfaces the gap explicitly with the evidence the agent did find. *Inconclusive* is a first-class outcome, with the same shape as a confident finding minus the conclusion.
 
 ## Citation discipline
 
@@ -112,12 +112,9 @@ Every finding a DocRun produces is bound to a source span — there are no orpha
 
 This is what makes DocRuns suitable for legal and compliance work: a reviewer can verify any finding by clicking through to the cited span without trusting the agent's narrative.
 
-## What DocRuns is not
+## Where DocRuns fits in a review workflow
 
-- **Not a document store.** DocRuns reads from the customer's content store; it does not replace it. Documents are registered as artifacts referenced by content hash, not stored as a primary copy.
-- **Not a redline applicator.** DocRuns proposes redlines; final acceptance and application stay with a human reviewer. The output is a structured proposal, not a committed change.
-- **Not a legal opinion.** DocRuns surfaces evidence-anchored findings against a configured policy. The reviewer is the decision-maker; the SKU is a productivity surface, not a substitute for licensed counsel.
-- **Not unbounded retrieval.** DocRuns operates against the documents it is given (or the spans the registered tools can fetch). It does not roam unrelated content stores or the open web.
+DocRuns reads from the customer's content store as the primary copy of every document — each document is registered as an artifact referenced by content hash, and the content store remains the system of record. Redlines come back as structured proposals for a human reviewer to accept and apply. Findings are evidence-anchored against a configured policy, surfaced for the reviewer to decide on; the SKU is a productivity surface alongside licensed counsel and existing review tooling. Retrieval stays inside the documents the DocRun is given and the spans its registered tools can fetch.
 
 ## See also
 

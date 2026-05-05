@@ -22,12 +22,11 @@ The pointer never references a manifest that was rejected at admission (`HARD_ST
 
 ## When it advances
 
-`current_manifest_id` advances at exactly one moment: when the Canonical Execution Service records a `ModelCall` row whose `context_manifest_id` is non-null, scoped to this Session. The update is atomic with the ModelCall write; there is no observable window where the ModelCall exists but the pointer still references the prior manifest.
+`current_manifest_id` advances at exactly one moment: when the Canonical Execution Service records a `ModelCall` row scoped to this Session. The update is atomic with the ModelCall write; there is no observable window where the ModelCall exists but the pointer still references the prior manifest.
 
 | Event | Effect on `current_manifest_id` |
 |---|---|
 | ModelCall recorded successfully | Advances to the new manifest. Prior manifest pushed onto `manifest_history`. |
-| ModelCall recorded with no manifest (anonymous v1 path) | Unchanged. |
 | Manifest assembled but admission rejected (`HARD_STOP`) | Unchanged. No ModelCall is created. |
 | Manifest re-admitted after `OFFLOAD_REQUIRED` / `COMPACT_REQUIRED` / `DEGRADE` | Advances when the re-admitted manifest finally produces a ModelCall. Transient advisory states do not move the pointer on their own. |
 | Run completes / fails / is canceled | Unchanged. Run boundaries do not reset the pointer. |

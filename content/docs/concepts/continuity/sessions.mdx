@@ -155,11 +155,11 @@ curl https://api.kovaserve.com/v1/chat/completions \
 
 If the Session is `EXPIRED` or `ARCHIVED`, the request is rejected before inference. If it is `IDLE`, it reactivates to `OPEN` atomically with the new turn.
 
-## What Sessions are not
+## Scope
 
-- **Not the unit of value.** That is the [Run](/docs/concepts/run-hierarchy/runs). A Session can host zero, one, or many Runs over its lifetime.
-- **Not a runtime construct.** The Session Registry is owned by the control plane; runtimes (LangGraph, Temporal, custom) reference Sessions but do not implement them.
-- **Not the canonical owner of every ContextManifest.** Each ModelCall carries its own `context_manifest_id`; the Session tracks `current_manifest_id` and a bounded history for resume planning, not the full per-call lineage.
+- **Containment.** A Session is a container above the [Run](/docs/concepts/run-hierarchy/runs); the Run carries the work and the unit of value. One Session hosts zero, one, or many Runs over its lifetime.
+- **Ownership.** The Session Registry is the control-plane home for Sessions. Runtimes such as LangGraph, Temporal, and custom orchestrators reference Sessions by ID and rely on the Registry for persistence and lifecycle.
+- **Manifest pointer.** Each ModelCall owns its own `context_manifest_id` end-to-end; the Session denormalizes `current_manifest_id` and a bounded history of recent manifests so resume planning, branching, and routing can read recent manifest lineage as a single read against the Session row.
 
 ## See also
 

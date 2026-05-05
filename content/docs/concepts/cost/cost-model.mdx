@@ -1,9 +1,9 @@
 ---
 title: Cost model
-description: How KovaServe computes per-call cost — gross cost, net cost, and cache savings — bound by the ADR-019/020/021 contract so the identity `gross = net + savings` holds exactly for every row and every aggregation.
+description: How KovaServe computes per-call cost — gross cost, net cost, and cache savings — so the identity `gross = net + savings` holds exactly for every row and every aggregation.
 ---
 
-The **cost model** is the per-[ModelCall](/docs/concepts/run-hierarchy/model-calls) accounting that turns real token counts and pricing into three numbers: **gross cost**, **net cost**, and **cache savings**. It is owned by the **Metering / Cost / Budget Layer** and binds three ADRs — ADR-019 (header contract), ADR-020 (rounding semantics), and ADR-021 (streaming delivery) — into a single arithmetic identity that every audit, dashboard, and aggregation depends on.
+The **cost model** is the per-[ModelCall](/docs/concepts/run-hierarchy/model-calls) accounting that turns real token counts and pricing into three numbers: **gross cost**, **net cost**, and **cache savings**. It is owned by the **Metering / Cost / Budget Layer** and is built around a single arithmetic identity that every audit, dashboard, and aggregation depends on.
 
 The unit of accounting is the ModelCall. One row in `usage_records`, one cost computation, one set of three values. Every other surface — Run-level totals, project totals, JSONL exports — is a sum over rows.
 
@@ -21,11 +21,11 @@ The relationship is fixed:
 cost_cents + cache_savings_cents = gross_cost_cents
 ```
 
-This identity holds **exactly**, for every individual row and every aggregation level. ADR-020 rules that savings are computed as the difference of already-rounded values rather than by rounding the discount term independently — the latter would introduce ±1 cent drift per row that compounds across thousands of rows.
+This identity holds **exactly**, for every individual row and every aggregation level. Savings are always computed as the difference of already-rounded values rather than by rounding the discount term independently — independent rounding would introduce ±1 cent drift per row that compounds across thousands of rows.
 
 ## The formula
 
-Cost is computed from real vLLM token counts (ADR-006) and the [pricing snapshots](/docs/concepts/cost/pricing-snapshots) frozen onto the row at compute time:
+Cost is computed from real substrate token counts and the [pricing snapshots](/docs/concepts/cost/pricing-snapshots) frozen onto the row at compute time:
 
 ```
 gross_cost_cents = quantize(
@@ -43,14 +43,14 @@ cost_cents = quantize(
 cache_savings_cents = gross_cost_cents − cost_cents
 ```
 
-`quantize` is HALF_UP at the 4-decimal-cent boundary (sub-millicent, ADR-025). Storage is `NUMERIC(18, 4)` so quantized Decimals sum losslessly and aggregations are exact without re-rounding.
+`quantize` is HALF_UP at the 4-decimal-cent boundary (sub-millicent). Storage is `NUMERIC(18, 4)` so quantized Decimals sum losslessly and aggregations are exact without re-rounding.
 
 | Symbol | Source |
 |---|---|
 | `input_tokens` | `usage.prompt_tokens` from the substrate response. |
 | `output_tokens` | `usage.completion_tokens` from the substrate response. |
 | `cached_tokens` | `usage.cached_tokens` from the substrate response — see [`cached_tokens`](/docs/concepts/routing/cached-tokens). |
-| `input_price_snapshot` | Frozen `input_price_per_1k` at compute time (ADR-022). |
+| `input_price_snapshot` | Frozen `input_price_per_1k` at compute time. |
 | `output_price_snapshot` | Frozen `output_price_per_1k` at compute time. |
 | `discount_snapshot` | Frozen `cached_discount_pct` at compute time (0.0 – 1.0). |
 
@@ -73,9 +73,9 @@ Each `usage_records` row carries the three computed values plus the snapshots th
 
 ## Wire delivery
 
-### Non-streaming responses — headers (ADR-019)
+### Non-streaming responses — headers
 
-Three headers are present unconditionally on every v2 non-streaming response:
+Three headers are present unconditionally on every non-streaming response carrying a `kovaserve` extension:
 
 ```
 X-KS-Cost-Cents: 0.0420
@@ -83,7 +83,7 @@ X-KS-Cost-Cents-Gross: 0.0680
 X-KS-Cost-Cents-Savings: 0.0260
 ```
 
-Values are 4-decimal strings (ADR-025). When pricing is missing, the values are `0.0000` and a fourth header appears:
+Values are 4-decimal strings. When pricing is missing, the values are `0.0000` and a fourth header appears:
 
 ```
 X-KS-Cost-Status: no-pricing
@@ -93,7 +93,7 @@ X-KS-Cost-Status: no-pricing
 
 Anonymous responses (no `kovaserve` extension key) carry none of these headers.
 
-### Streaming responses — final SSE chunk (ADR-021)
+### Streaming responses — final SSE chunk
 
 Streaming responses do not carry cost in HTTP headers — completion-token count is unknown when headers are sent. Cost lands in the final SSE chunk before `data: [DONE]`:
 
@@ -132,7 +132,7 @@ Because per-row values are quantized to the same 4-decimal step, the identity pr
 total_cost_cents + total_cache_savings_cents = total_gross_cost_cents
 ```
 
-ADR-020 forbids re-applying the formula to scope totals. Aggregation is always the sum of per-row differences — re-deriving savings from `total_input_tokens × discount × price` produces a different number at rounding boundaries and breaks reconciliation against per-row history.
+Aggregation never re-applies the formula to scope totals — it is always the sum of per-row differences. Re-deriving savings from `total_input_tokens × discount × price` produces a different number at rounding boundaries and breaks reconciliation against per-row history.
 
 The metering API exposes aggregations at every scope:
 
@@ -142,26 +142,19 @@ The metering API exposes aggregations at every scope:
 | Project | `GET /v1/ks/metering/usage?scope=project&project_id=...` |
 | Tenant | `GET /v1/ks/metering/usage?scope=tenant` |
 
-ADR-023 governs error semantics: `scope=run` returns `404` when the Run is unknown; `scope=project` and `scope=tenant` return `200` with zero counts when there is no traffic.
+Error semantics: `scope=run` returns `404` when the Run is unknown; `scope=project` and `scope=tenant` return `200` with zero counts when there is no traffic.
 
-## What anonymous traffic looks like
+## Anonymous traffic
 
-The v1 anonymous path (no `kovaserve` extension) computes cost identically — same formula, same snapshots, same row shape — but the row carries no `run_id`, `step_id`, or `model_call_id`. JSONL exports include anonymous rows per ADR-024 so a project's full economic history is reconstructable.
+Calls without a `kovaserve` extension compute cost identically — same formula, same snapshots, same row shape — but the row carries no `run_id`, `step_id`, or `model_call_id`. JSONL exports include anonymous rows so a project's full economic history is reconstructable.
 
-A given project's `total_cost_cents` therefore covers both v2 traffic (Run-attributed) and v1 traffic (anonymous), summed against the same column.
+A given project's `total_cost_cents` therefore covers Run-attributed and anonymous calls alike, summed against the same column.
 
 ## Forecasting
 
 Per-Run cost forecasts use the historical [`cached_tokens`](/docs/concepts/routing/cached-tokens) ratio for the Session and stable-context lineage to project remaining spend. A Run sitting on a hot prefix forecasts lower than one without; the forecast advances on every ModelCall as actual `cached_tokens` come in.
 
 Forecast deltas surface as `ks.budget.forecast_updated` events. Forecasts inform UX (warning UI, dashboard projections) but never *cause* admission decisions on their own — the [Budget state machine](/docs/concepts/policy/budget-state-machine) advances on realized consumption, not projected.
-
-## What the cost model is not
-
-- **Not an estimate.** Token counts are real vLLM counts. Cost is computed from those counts and the snapshot rates.
-- **Not float arithmetic.** Cost is `Decimal` end-to-end at 4-decimal precision; serialization uses decimal-strings so JSON parsers do not widen to IEEE-754 floats.
-- **Not the billing total.** Billing rounds and aggregates per the customer's contract; the cost model is the raw audit record. The two relate by the contract, not by independent rounding.
-- **Not retroactive.** Re-pricing is forward-only. Old rows keep their snapshots and their original `cost_cents`. See [pricing snapshots](/docs/concepts/cost/pricing-snapshots).
 
 ## See also
 

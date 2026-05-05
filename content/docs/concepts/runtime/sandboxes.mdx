@@ -3,7 +3,7 @@ title: Sandboxes
 description: Container-isolated execution environments for file, process, shell, and tool actions in the KovaServe runtime — workspace mounting, policy-limited file and network access, output capture, resource accounting, and branchable snapshots.
 ---
 
-A **Sandbox** is the isolated execution environment a [Worker](/docs/concepts/runtime/workers) dispatches file, process, shell, and tool actions into during a Run in [KovaServe runtime mode](/docs/concepts/deployment/managed-runtime). Because the wedge is process-, file-, and tool-heavy, sandboxes are first-class: a Worker never executes a `FILE_WRITE`, `PROCESS_START`, or sandbox-bound tool against its own host. v1 sandboxes are container-based.
+A **Sandbox** is the isolated execution environment a [Worker](/docs/concepts/runtime/workers) dispatches file, process, shell, and tool actions into during a Run in [KovaServe runtime mode](/docs/concepts/deployment/managed-runtime). The runtime is process-, file-, and tool-heavy, and sandboxes are first-class: every `FILE_WRITE`, `PROCESS_START`, and sandbox-bound tool runs inside a sandbox rather than on the Worker host. Sandboxes are container-based.
 
 ```
 ┌─ Worker (lease holder) ──────────────────────┐
@@ -30,7 +30,7 @@ A **Sandbox** is the isolated execution environment a [Worker](/docs/concepts/ru
 └──────────────────────────────────────────────┘
 ```
 
-The Sandbox Manager is the [Layer 3 subsystem](/docs/concepts/runtime/runtime-architecture#sandbox-manager) that owns the lifecycle.
+The Sandbox Manager is the [runtime subsystem](/docs/concepts/runtime/runtime-architecture#sandbox-manager) that owns the lifecycle.
 
 ## What a Sandbox provides
 
@@ -169,9 +169,9 @@ Runtime events the sandbox produces:
 
 See [runtime events](/docs/concepts/events/runtime) for the full stream.
 
-## Sandbox vs. Layer 1
+## Sandbox and substrate
 
-A sandbox is the Worker's *execution* boundary; it is not the substrate. Model calls do not run inside the sandbox — they go through `POST /v1/chat/completions` to the [Cache-Aware Router](/docs/concepts/routing/manifest-aware-routing) and execute on a vLLM node. Tools that talk to external HTTP services do egress from the sandbox; tools that talk to in-cluster KovaServe APIs go through the Worker.
+A sandbox is the Worker's *execution* boundary for file, process, shell, and tool actions. Model calls follow a separate path: they dispatch through `POST /v1/chat/completions` to the [Cache-Aware Router](/docs/concepts/routing/manifest-aware-routing) and execute on a vLLM substrate node. Tools that talk to external HTTP services egress from the sandbox; tools that talk to in-cluster KovaServe APIs go through the Worker.
 
 ## Failure modes
 

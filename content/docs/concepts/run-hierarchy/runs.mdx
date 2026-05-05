@@ -32,7 +32,7 @@ A Run also tracks creation, lifecycle, and operational metadata:
 | `step_count` | Monotonic counter of admitted Steps. Incremented only after admission succeeds. |
 | `created_at` / `started_at` / `completed_at` | Lifecycle timestamps. `completed_at` is set when the Run reaches a terminal state. |
 
-What a Run **does not** carry on the row itself: prompts, messages, or tool definitions. Those are recorded on the [ContextManifest](/docs/concepts/context/context-manifests) per [ModelCall](/docs/concepts/run-hierarchy/model-calls) — never inlined onto the Run.
+Prompts, messages, and tool definitions live on the [ContextManifest](/docs/concepts/context/context-manifests) per [ModelCall](/docs/concepts/run-hierarchy/model-calls). The Run row points at the work and its bindings; payloads belong on the manifest.
 
 ## How a Run is created
 
@@ -46,10 +46,10 @@ Both paths produce the same Run shape. The implicit path exists so BYO-runtime a
 
 ## The Run is the unit of value
 
-KovaServe is run-centric, not request-centric. This is the load-bearing decision the rest of the architecture is built on:
+KovaServe is run-centric. This is the load-bearing decision the rest of the architecture is built on:
 
-- **Cost and budget are run-scoped.** A Run carries a single Budget; a single completed Run is the metering unit reported through `cost_per_completed_run`. Tokens, ModelCalls, and tool invocations roll up into the Run's cost accounting and are not the unit billed against.
-- **Continuity is run-scoped.** Checkpoints bind to a Run and a Step within it. Resume always produces a new Run that references the prior Run's Checkpoint, never an in-place restart of the original.
+- **Cost and budget are run-scoped.** A Run carries a single Budget; a single completed Run is the metering unit reported through `cost_per_completed_run`. Tokens, ModelCalls, and tool invocations roll up into the Run's cost accounting.
+- **Continuity is run-scoped.** Checkpoints bind to a Run and a Step within it. Resume produces a new Run that references the prior Run's Checkpoint.
 - **Audit is run-scoped.** The execution event stream and the timeline endpoint are keyed on `run_id`. A Run is the smallest unit you can fully reconstruct after the fact.
 - **Governance is run-scoped.** The PolicyScope a Run resolved at creation governs every Step inside it; tool admissions, share-scope decisions, and data-boundary checks all evaluate against the Run's scope.
 
@@ -57,7 +57,7 @@ A Run completes when the work it represents is done — possibly after many Step
 
 ## Branch lineage
 
-A Run may produce a new Run lineage from a Checkpoint or stable point via the [Branch](/docs/concepts/recovery/branches) primitive. The child Run carries `branch_from` pointing back at its parent and inherits the parent's PolicyScope along with a bounded copy of its Budget. Branching is the only sanctioned way to compose Runs in v1 — speculative exploration, what-if comparisons, recovery forks all flow through this single primitive.
+A Run may produce a new Run lineage from a Checkpoint or stable point via the [Branch](/docs/concepts/recovery/branches) primitive. The child Run carries `branch_from` pointing back at its parent and inherits the parent's PolicyScope along with a bounded copy of its Budget. Branching composes Runs into a tree — speculative exploration, what-if comparisons, recovery forks all flow through this single primitive.
 
 ```
 Run (parent) ─▶ Checkpoint C
@@ -65,7 +65,7 @@ Run (parent) ─▶ Checkpoint C
                     └─▶ Run (child, branch_from = parent.id, restored_from = C.id)
 ```
 
-The child Run executes its own Steps under its own ContextManifests with a fresh budget allocation. A branch is an alternate continuation, not a delegated sub-task: the parent does not wait for the child, and the child does not return a value to the parent. Audit, cost rollup, and lineage navigation all walk `branch_from` pointers through the [recovery branch](/docs/concepts/recovery/branches) surface.
+The child Run executes its own Steps under its own ContextManifests with a fresh budget allocation. A branch is an alternate continuation — the parent and child Runs proceed independently, and there is no return-value contract between them. Audit, cost rollup, and lineage navigation all walk `branch_from` pointers through the [recovery branch](/docs/concepts/recovery/branches) surface.
 
 A Run has at most one direct parent through `branch_from`; branches are themselves branchable, so lineage is a tree.
 
@@ -142,13 +142,6 @@ Authorization: Bearer ks_...
 ```
 
 Cancellation transitions the Run to `CANCELED` (terminal), stops further admission, and finalizes cost accounting. In-flight ModelCalls are allowed to settle so cost attribution remains accurate. See the [Run state machine](/docs/concepts/run-hierarchy/run-state-machine) for terminal-state semantics.
-
-## What a Run is not
-
-- **Not a request.** A request is a transient unit of substrate work; a Run is a durable execution objective that may consume many requests across many ModelCalls.
-- **Not a Session.** A [Session](/docs/concepts/continuity/sessions) is a continuity container that may host many Runs sequentially. A Run binds to at most one Session, and the binding is immutable.
-- **Not the orchestration logic.** The Run records what executed; the runtime (LangGraph, Temporal, KovaServe runtime, custom) decides what to execute next. KovaServe is not an orchestration engine.
-- **Not a transaction log.** The execution event stream is the continuous record; the Run row is the durable summary, and Checkpoints are the resumable safe-points within it.
 
 ## See also
 

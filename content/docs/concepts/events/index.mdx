@@ -19,7 +19,7 @@ Events are organized into named streams. Each stream covers one subsystem's life
 | [Policy](/docs/concepts/events/policy) | `ks.policy.*` | Policy evaluation, denial, and degraded admission. |
 | [Budget](/docs/concepts/events/budget) | `ks.budget.*` | Run-level Budget warnings, forecasts, and hard stops. |
 | [Checkpoint](/docs/concepts/events/checkpoint) | `ks.checkpoint.*` | Checkpoint create, validate, restore. |
-| [Runtime](/docs/concepts/events/runtime) | `ks.tool.*`, `ks.process.*`, `ks.file.*`, `ks.branch.*` | Layer 3 runtime activity: tool invocations, processes, files, branches. |
+| [Runtime](/docs/concepts/events/runtime) | `ks.tool.*`, `ks.process.*`, `ks.file.*`, `ks.branch.*` | Managed runtime activity: tool invocations, processes, files, branches. |
 | [Context engineering](/docs/concepts/events/context-engineering) | `ks.context.*` | Manifest, segment, artifact, compaction, ContextBudget. |
 
 The `execution_events` JetStream stream uses the broad subject filter `ks.>` so new event families can be added under the same stream config without migration. The `kv_events` stream uses `kv.>` and is operationally separate — substrate lifecycle is high-volume and isolated for retention and ingestion reasons.
@@ -43,7 +43,7 @@ Every event — regardless of stream — carries the same minimum [event envelop
 }
 ```
 
-Stream-specific fields live under `payload`. The envelope is closed; new fields require ADR-driven extension.
+Stream-specific fields live under `payload`. The envelope is closed; new fields require a versioned schema extension.
 
 ## How events are produced
 
@@ -100,12 +100,9 @@ Events are retained 7 days by default in managed cloud, configurable per Tenant.
 
 Within the retention window, events are replayable: a consumer that drops a cursor can rewind by `event_id` and re-read. Beyond the window, the substrate `kv_events` stream rolls; the rest of the streams are durable to S3-compatible storage configured at deployment time.
 
-## What events are not
+## Consumption surface
 
-- **Not webhooks.** KovaServe does not push events to consumer URLs in v1. Consumers pull from the cursor-paginated endpoints. The v1 surface explicitly excludes a webhook management API.
-- **Not metrics.** Metrics are exposed via Prometheus on `/metrics`. Events carry the per-transition record; metrics carry rolling counters.
-- **Not the source of truth for cost.** Cost is on `usage_records` with [pricing snapshots](/docs/concepts/cost/pricing-snapshots) — the audit anchor. Events convey transitions; they do not redefine economics.
-- **Not push to all clients.** Pulled cursor-paginated reads are the only public consumption surface in v1.
+Events are pulled from cursor-paginated endpoints. Metrics are exposed separately via Prometheus on `/metrics` — events carry per-transition records, metrics carry rolling counters. Cost lives on `usage_records` with [pricing snapshots](/docs/concepts/cost/pricing-snapshots), which is the audit anchor for economics; events convey transitions and reference the same `model_call_id`.
 
 ## See also
 

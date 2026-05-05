@@ -67,7 +67,7 @@ The Gateway is the canonical entry point into the control plane. It hosts both t
 | Front-door policy checks | Coarse `PolicyScope` checks before deeper subsystems are invoked. |
 | Tracing | OpenTelemetry trace correlation across the entire control plane. |
 
-The Gateway is a thin discriminator and ingress, not a business-logic layer. Discrimination rule: `kovaserve` extension field present on `/v1/chat/completions` engages the v2 path with full canonical execution; absent engages anonymous v1 mode (still metered, still tenanted, no `Run` row).
+The Gateway is a thin discriminator and ingress. Discrimination rule: `kovaserve` extension field present on `/v1/chat/completions` engages full canonical execution with `Run` / `Step` / `ModelCall` records; absent engages anonymous mode (still metered, still tenanted, no `Run` row).
 
 ### Canonical Execution Service
 
@@ -86,7 +86,7 @@ Every Step, ModelCall, Checkpoint, and timeline event in the system traces back 
 
 ### Global Context Manager (GCM v2)
 
-GCM is the producer of [`ContextManifest`](/docs/concepts/context/context-manifests) records. It is the execution-boundary owner of context shape, identity, and accounting; it is **not** a prompt composition engine and **not** a retrieval framework.
+GCM is the producer of [`ContextManifest`](/docs/concepts/context/context-manifests) records. It is the execution-boundary owner of context shape, identity, and accounting.
 
 | Responsibility | Detail |
 |---|---|
@@ -94,15 +94,15 @@ GCM is the producer of [`ContextManifest`](/docs/concepts/context/context-manife
 | Normalize | Segment metadata — digest, token count, byte count, checkpoint relevance, scope, retention. |
 | Identify | Assign segment IDs and content digests. |
 | Order | Deterministically order segments per ADR-003. |
-| Identify (legacy) | Compute `stable_prefix_id` for Pass 4 router compatibility. |
+| Identify (prefix) | Compute `stable_prefix_id` for prefix-based cache routing. |
 | Identify (compatibility-aware) | Compute `stable_context_id` from the digest cascade plus renderer version, model family, tokenizer fingerprint, and Tenant/Project/context scope. |
 | Account | Stable, volatile, active, and offloaded token counts. |
 | Materialize | Artifact-backed segments by reference (preview text, never full payload). |
 | Produce | The durable [`ContextManifest`](/docs/concepts/context/context-manifests) consumed by Admission, Router, Checkpoint Manager, and the runtime. |
 | Expose | Checkpoint-relevant segment refs to the Checkpoint Manager. |
-| Render | Deterministic model-dispatch output with multi-tier prefix breakpoints (tools / system / history-prefix / summary) so Pass 4-aligned routing and Anthropic-style prompt cache hints work from the same data structure. |
+| Render | Deterministic model-dispatch output with multi-tier prefix breakpoints (tools / system / history-prefix / summary) so prefix-aligned routing and Anthropic-style prompt cache hints work from the same data structure. |
 
-GCM is **not** a broad retrieval framework, **not** a domain-specific prompt assembler, **not** an agent memory authoring UX, **not** a planner, and **not** an in-process summarizer. Frameworks own retrieval; runtimes own prompt logic and memory; the [Compaction Lineage Service](#compaction-lineage-service) owns the lineage contract.
+Frameworks own retrieval; runtimes own prompt logic and memory; the [Compaction Lineage Service](#compaction-lineage-service) owns the lineage contract.
 
 ### Context Manifest Registry
 
@@ -133,7 +133,7 @@ The decision hits the wire as a [`ContextBudgetDecision`](/docs/concepts/policy/
 
 ### KV Event System
 
-Ingests and normalizes the `kv_events` stream from [Layer 1](/docs/concepts/layers/execution-substrate). Responsibilities: durable ingestion, event enrichment and validation, replayable streams, and fan-out to KV Index, Metering, Dashboard, and audit consumers. The system is event-driven on real substrate truth — never synthetic polling approximations. See [state events](/docs/concepts/events/state).
+Ingests and normalizes the `kv_events` stream from [Layer 1](/docs/concepts/layers/execution-substrate). Responsibilities: durable ingestion, event enrichment and validation, replayable streams, and fan-out to KV Index, Metering, Dashboard, and audit consumers. The system is event-driven on real substrate truth. See [state events](/docs/concepts/events/state).
 
 ### KV Index Service
 
@@ -203,7 +203,7 @@ Preserves continuity under pressure. Observes tier occupancy and pressure, plans
 
 ### Metering / Cost / Budget Layer
 
-The economic system of record. Active control objects, not just billing records.
+The economic system of record — active control objects with real-time enforcement on every request.
 
 | Responsibility | Detail |
 |---|---|
@@ -298,18 +298,6 @@ The control plane orders the standard model call so context-dependent decisions 
 10. Recording                           ── ModelCall stored with context_manifest_id FK; metering, ContextBudget
                                             consumption, ExecutionEvents, Session updates, dashboards update
 ```
-
-## What the control plane does not own
-
-The boundary is precise.
-
-- **Not the substrate.** Model execution mechanics, KV cache, scheduler — all Layer 1.
-- **Not the runtime.** Worker lease ownership, sandbox lifecycle, workspace and `WorkspaceArtifact` model, runtime-local state, retry/resume/branch UX — all [Layer 3](/docs/concepts/layers/runtime-wedge).
-- **Not prompt composition.** Frameworks own retrieval; runtimes own prompt logic.
-- **Not a planner.** Runtimes own planning.
-- **Not an agent memory authoring UX.** Memory belongs in the agent framework.
-- **Not a context engineering platform.** The control plane ships execution-boundary primitives — manifests, segments, artifacts, budgets, compaction lineage — and not a prompt-composition studio.
-- **Not bespoke per customer.** The same semantic model serves every Tenant on managed cloud, every customer on private deployment, and every partner on a partner fleet.
 
 ## Deployment
 

@@ -16,7 +16,7 @@ The runtime stays in charge of planning, prompting, retrieval, and agent memory 
 
 ## Where it fits
 
-KovaServe ships two product modes ([§9.1](/docs/concepts/deployment/managed-runtime) is the other). BYO mode is the one that minimizes migration friction:
+KovaServe ships two product modes — BYO and the [managed runtime](/docs/concepts/deployment/managed-runtime). BYO mode is the one that minimizes migration friction:
 
 | Goal | BYO runtime mode |
 |---|---|
@@ -24,7 +24,7 @@ KovaServe ships two product modes ([§9.1](/docs/concepts/deployment/managed-run
 | Orchestration ownership | The external runtime keeps it. |
 | Run / Session / Step semantics | KovaServe owns them; the runtime supplies correlation IDs. |
 | Context engineering primitives | KovaServe owns manifest, admission, artifact, compaction, memory, tool catalog, governance. |
-| Workspace / sandbox / file model | Not provided in this mode (those live in the [managed runtime](/docs/concepts/deployment/managed-runtime)). |
+| Workspace / sandbox / file model | Available in the [managed runtime](/docs/concepts/deployment/managed-runtime). |
 
 A team running LangGraph, Temporal, or a custom orchestrator points at KovaServe's OpenAI-compatible endpoint and immediately gains durable Runs, ContextBudgets, manifest-aware routing, and a real event stream — without reorganizing the agent code.
 
@@ -51,7 +51,7 @@ Every model call enters through `POST /v1/chat/completions`. The standard OpenAI
 | `artifact_refs` | List of [ContextArtifact](/docs/concepts/context/context-artifacts) ids referenced by the prompt. |
 | `compaction_policy` | Optional runtime-supplied compaction strategy hint. |
 
-Layer 2 maps each field into the canonical model. Missing fields are tolerated — anonymous traffic without a `kovaserve` envelope is also accepted (this is the `v1` discriminator path) but does not produce Run-level continuity, budgets, or checkpoints.
+Layer 2 maps each field into the canonical model. Missing fields are tolerated. The `kovaserve` envelope activates Run-level continuity, budgets, and checkpoints — anonymous traffic without it runs as plain inference.
 
 ## Wire shape
 
@@ -93,7 +93,7 @@ The control plane normalizes inbound metadata through **Runtime Integration Adap
 - resolve or create the `Run`, `Session`, and `Step` rows under the canonical model
 - attach the runtime's own `external_run_id` for cross-system lookup
 - preserve `placement_hint`, `memory_class_hints`, `budget_context`, `context_budget_ref`, `policy_scope_ref`, `artifact_refs`, and `compaction_policy` so the rest of the control plane sees the same envelope regardless of which runtime produced it
-- never take over orchestration logic — the runtime keeps its retry policy, planner, and tool loop
+- preserve the runtime's retry policy, planner, and tool loop intact
 
 Adapters ship for LangGraph and Temporal; the same contract is what a custom runtime targets when it wants the BYO surface.
 
@@ -111,14 +111,14 @@ The runtime keeps its agent code. KovaServe adds:
 | Cache-aware routing | The [Cache-Aware Router](/docs/concepts/routing/manifest-aware-routing) considers manifest reuse, restore cost, and budget pressure. |
 | Checkpoint + resume | [Checkpoint Manager](/docs/concepts/recovery/checkpoints) with logical-context-first restore. |
 | Cost per completed run | Roll-up across every ModelCall and tool action, with frozen [pricing snapshots](/docs/concepts/cost/pricing-snapshots). |
-| Real event stream | Ten [event streams](/docs/concepts/events) under `ks.>` and `kv_events`. |
+| Real event stream | The `ks.>` execution event stream and the `kv_events` substrate stream — see [events](/docs/concepts/events). |
 | Tenancy | [Tenant → Project → Environment → Deployment](/docs/concepts/tenancy) on every record. |
 
-Workspace, sandbox, and file primitives are *not* part of BYO mode. A coding agent that needs them adopts the [managed runtime](/docs/concepts/deployment/managed-runtime) instead.
+Workspace, sandbox, and file primitives ship with the [managed runtime](/docs/concepts/deployment/managed-runtime), which a coding agent adopts when those are part of the value.
 
 ## What stays with the runtime
 
-The runtime owns — and KovaServe never takes over — the following. The boundary is enforced by what the metadata envelope does and does not carry.
+The runtime continues to own its application-layer surface. The metadata envelope carries identifiers and references — orchestration logic stays where it always was.
 
 - prompt composition and assembly logic
 - planner / agent graph / state machine
@@ -127,7 +127,7 @@ The runtime owns — and KovaServe never takes over — the following. The bound
 - retry policy at the application layer
 - tool loop control flow
 
-If the runtime wants any of these to *interact* with KovaServe primitives — for example, asking the [admission](/docs/concepts/policy/admission) service whether a candidate prompt fits, or registering a [CompactionRecord](/docs/concepts/context/compaction-records) it produced itself — it does so through the explicit context-engineering APIs, not by handing over orchestration.
+When the runtime wants any of these to *interact* with KovaServe primitives — for example, asking the [admission](/docs/concepts/policy/admission) service whether a candidate prompt fits, or registering a [CompactionRecord](/docs/concepts/context/compaction-records) it produced itself — it does so through the explicit context-engineering APIs while keeping orchestration in place.
 
 ## Authoring a Run from a BYO runtime
 

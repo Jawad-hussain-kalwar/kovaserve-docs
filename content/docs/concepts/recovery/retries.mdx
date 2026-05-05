@@ -96,12 +96,6 @@ Retries count against the Run-level [Budget](/docs/concepts/policy/budgets) like
 
 [ContextBudget](/docs/concepts/policy/context-budgets) admission is also re-run on every retry. A retry of a `MODEL_CALL` with a manifest that has grown past `active_token_limit` since the original attempt will be rejected at admission and must compact or offload first.
 
-## What retries are not
-
-- **Not idempotency on their own.** Retry replays a Step; the operation underneath the Step must itself be idempotent (or carry an idempotency key) for the retry to be safe.
-- **Not a substitute for [Checkpoints](/docs/concepts/recovery/checkpoints).** Retry handles transient failures within a Step. Checkpoints handle bigger failures that span multiple Steps or require resume on a different node.
-- **Not invisible.** Every retry is a new Step row, fully traceable. There is no "retry count" hidden inside a single Step.
-
 ## See also
 
 - [Steps](/docs/concepts/run-hierarchy/steps) — the entity each retry attempt produces

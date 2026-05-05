@@ -3,7 +3,7 @@ title: Manifest-aware routing
 description: How the Cache-Aware Router scores candidate replicas using ContextManifest identity, KV state lifecycle, scope filters, placement hints, and budget pressure.
 ---
 
-**Manifest-aware routing** is the placement decision the **Cache-Aware Router** makes for every admitted ModelCall. It chooses execution placement using continuity, context reuse value, and economics — not blind load-balancing or raw prefix hash. The router consumes the admitted [ContextManifest](/docs/concepts/context/context-manifests) and the [KV Index](/docs/concepts/routing/kv-index), and produces a selected route, fallback routes, and an explanation.
+**Manifest-aware routing** is the placement decision the **Cache-Aware Router** makes for every admitted ModelCall. It chooses execution placement by scoring continuity, context reuse value, and economics. Every dispatch goes to the replica that maximizes downstream value. The router consumes the admitted [ContextManifest](/docs/concepts/context/context-manifests) and the [KV Index](/docs/concepts/routing/kv-index), and produces a selected route, fallback routes, and an explanation.
 
 The router runs *after* admission and *before* substrate dispatch:
 
@@ -11,13 +11,15 @@ The router runs *after* admission and *before* substrate dispatch:
 admission → ▶▶ routing ◀◀ → substrate execution
 ```
 
+Admission decides whether a request runs and in what shape; routing decides where it runs.
+
 ## What the router optimizes
 
 The router scores candidates against a multi-input objective:
 
 | Input | Effect on score |
 |---|---|
-| Cache hit potential (legacy `stable_prefix_id` lookup) | + when the prefix matches a warm replica. |
+| Cache hit potential (`stable_prefix_id` prefix-tier lookup) | + when the prefix matches a warm replica. |
 | Manifest reuse estimate (`stable_context_id` match across breakpoint tiers) | + when the manifest matches at deeper breakpoints. |
 | Expected prefill savings tokens | + proportional to `manifest.token_counts.stable_tokens` reused. |
 | Rehydrate / restore cost (KV state) | − when restore is needed. |
@@ -37,7 +39,7 @@ The router scores candidates against a multi-input objective:
 
 | Manifest field | Used for |
 |---|---|
-| `stable_prefix_id` | Pass 4 prefix-tier lookup. |
+| `stable_prefix_id` | Prefix-tier identity lookup. |
 | `stable_context_id` | Manifest-tier identity. |
 | Breakpoint digests (tools / system / history-prefix / summary) | Multi-tier cache reuse scoring. |
 | `model_id`, `model_family`, `tokenizer_fingerprint`, `renderer_version` | Hard scope filters — incompatible replicas excluded. |
@@ -134,12 +136,9 @@ Content-Type: application/json
 
 Overrides are recorded as `ks.route.override_applied` events with the operator and reason.
 
-## What manifest-aware routing is not
+## How the router thinks
 
-- **Not load balancing.** The router is not a generic least-loaded chooser. It is a continuity-and-economics planner.
-- **Not the same as admission.** Admission decides whether a request runs and in what shape. Routing decides where it runs.
-- **Not synthetic.** Every signal is a real substrate event from the [KV Event System](/docs/concepts/events/state) and the [KV Index](/docs/concepts/routing/kv-index). The router does not estimate cache state from heuristics.
-- **Not KV-only.** Routing scores manifest-tier reuse alongside KV-tier reuse. A manifest match without KV is still valuable.
+The router is a continuity-and-economics planner. Every signal it consumes is a real substrate event from the [KV Event System](/docs/concepts/events/state) and the [KV Index](/docs/concepts/routing/kv-index). It scores manifest-tier reuse alongside KV-tier reuse — a manifest match on a replica with cold KV still beats a fully cold replica because the runtime saves on logical reconstruction.
 
 ## See also
 

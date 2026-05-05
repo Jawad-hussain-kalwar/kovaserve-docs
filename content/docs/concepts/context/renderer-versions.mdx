@@ -1,35 +1,35 @@
 ---
 title: Renderer versions and tokenizer fingerprints
-description: How GCM v2 stamps every ContextManifest with a renderer version and a tokenizer fingerprint, why both are needed for compatibility-aware identity, and how routing and resume behave under mismatches.
+description: How GCM stamps every ContextManifest with a renderer version and a tokenizer fingerprint, why both are needed for compatibility-aware identity, and how routing and resume behave under mismatches.
 ---
 
 Two compatibility fields stamp every [ContextManifest](/docs/concepts/context/context-manifests) at assembly time: **`renderer_version`** and **`tokenizer_fingerprint`**. Together they make the manifest's `stable_context_id` *compatibility-aware* — two manifests with identical segment content but different renderer or tokenizer produce different stable identities, which is what keeps cache reuse, resume, and routing correct across model and renderer roll-forwards.
 
-The fields are produced by **GCM v2** at manifest assembly time and consumed by the [Cache-Aware Router](/docs/concepts/routing/manifest-aware-routing), the [Checkpoint Manager](/docs/concepts/recovery/checkpoints), and the [resume flow](/docs/concepts/recovery/resume-flow).
+The fields are produced by the **Global Context Manager (GCM)** at manifest assembly time and consumed by the [Cache-Aware Router](/docs/concepts/routing/manifest-aware-routing), the [Checkpoint Manager](/docs/concepts/recovery/checkpoints), and the [resume flow](/docs/concepts/recovery/resume-flow).
 
 ## What they are
 
 | Field | What it identifies |
 |---|---|
-| `renderer_version` | The version of the context renderer that turned the canonical-ordered [ContextSegments](/docs/concepts/context/context-segments) into the bytes the substrate sees. A pure function from `(segments, version) → bytes`. |
+| `renderer_version` | The version of the context renderer that turned the canonical-ordered [ContextSegments](/docs/concepts/context/context-segments) into the bytes the model receives. A pure function from `(segments, version) → bytes`. |
 | `tokenizer_fingerprint` | A hash of the tokenizer assets. Identifies the exact tokenization that produced the manifest's `token_counts`. |
 
 Both are deterministic: assembling the same segments under the same renderer and tokenizer produces the same bytes, the same token counts, and the same digests every time.
 
 ## Why both are needed
 
-The substrate's KV cache and prompt-cache reuse only work when the bytes seen by the model are byte-identical to a prior call. Two things can change those bytes without any change to the segment content:
+The inference engine's KV cache and prompt-cache reuse only work when the bytes seen by the model are byte-identical to a prior call. Two things can change those bytes without any change to the segment content:
 
 - **Renderer roll-forward.** A new renderer version may add a separator, change a role tag's spelling, or normalize whitespace differently. The segments are the same; the bytes are not.
 - **Tokenizer change.** A new tokenizer fingerprint may split or merge tokens differently, changing token counts even when the bytes are identical.
 
-If `stable_context_id` were computed from segment content alone, two calls under different renderers or tokenizers would collide on identity, the router would direct the second to a "warm" replica that actually holds incompatible cache, and the substrate would silently miss the cache. Stamping both fields into the identity makes mismatches *visible* — the second call computes a different `stable_context_id`, gets routed independently, and fills its own cache.
+If `stable_context_id` were computed from segment content alone, two calls under different renderers or tokenizers would collide on identity, the router would direct the second to a "warm" replica that actually holds incompatible cache, and the inference engine would silently miss the cache. Stamping both fields into the identity makes mismatches *visible* — the second call computes a different `stable_context_id`, gets routed independently, and fills its own cache.
 
 ## How they're computed
 
 ### `renderer_version`
 
-The renderer is a versioned, internal component of GCM v2. Versions are integers (`v1`, `v2`, `v3`, …); each release pins a deterministic mapping from segments to bytes. The deployment's active renderer version is recorded on every manifest at assembly time.
+The renderer is a versioned, internal component of GCM. Versions are monotonically increasing labels (`v1`, `v2`, `v3`, …); each release pins a deterministic mapping from segments to bytes. The deployment's active renderer version is recorded on every manifest at assembly time.
 
 A new renderer version is introduced when:
 
@@ -73,7 +73,7 @@ hash(
 )
 ```
 
-A change in any input changes the output. `stable_prefix_id` is the legacy Pass 4 router identity, computed only over the stable prefix segments and used for prefix-tier cache lookups; it does not include renderer or tokenizer inputs because Pass 4 routing predates compatibility-aware identity. Both identities travel side by side on every manifest.
+A change in any input changes the output. `stable_prefix_id` is the prefix-tier identity, computed only over the stable-prefix segments and used for prefix-tier KV cache lookups; it does not include renderer or tokenizer inputs because the prefix-tier cache layer keys on segment content alone. Both identities travel side by side on every manifest and address different cache layers — `stable_prefix_id` for the prefix tier, `stable_context_id` for the manifest tier.
 
 ## Behavior under mismatch
 
@@ -82,7 +82,7 @@ The compatibility vector on a [Checkpoint](/docs/concepts/recovery/checkpoints) 
 | Mismatch | Behavior |
 |---|---|
 | `model_family` differs | Reject restore. The resumed Run cannot run on an incompatible family. |
-| `renderer_version` differs and the pair `(checkpoint, current)` is **on** the forward-compatible allow-list | KV restore proceeds, but the substrate is invoked with the older renderer for this Step's assembly so byte-equivalence holds. |
+| `renderer_version` differs and the pair `(checkpoint, current)` is **on** the forward-compatible allow-list | KV restore proceeds, but the inference path renders with the older renderer for this Step's assembly so byte-equivalence holds. |
 | `renderer_version` differs and the pair is **not** allow-listed | KV restore is skipped silently. Manifest replay proceeds under the current renderer; token counts are recomputed; the resumed Run runs correctly but pays a re-prefill cost. |
 | `tokenizer_fingerprint` differs | KV restore is skipped silently. The prompt is re-tokenized under the new fingerprint; manifest replay proceeds. |
 | `policy_scope` differs in a way that fails | Reject restore. |
@@ -103,7 +103,7 @@ A Checkpoint frozen under the old fingerprint resumes correctly by manifest repl
 
 ## Renderer registry
 
-The renderer registry is internal to GCM v2 and exposes:
+The renderer registry is internal to GCM and exposes:
 
 - The current active version per deployment.
 - Allow-listed forward-compatible pairs (`(from_version, to_version)`) for KV-restore compatibility.
@@ -111,12 +111,9 @@ The renderer registry is internal to GCM v2 and exposes:
 
 The registry is operator-facing; runtimes do not interact with it directly. Runtimes see only the `renderer_version` field on the manifest.
 
-## What renderer versions and fingerprints are not
+## Properties
 
-- **Not API-version selectors.** Runtimes do not request a renderer version; the deployment's active version is used. Backward compatibility is owned by the registry, not by client opt-in.
-- **Not a model identifier.** `model_id` and `model_family` are separate fields. A single model may run under multiple renderer versions over its lifetime; a single renderer version may serve multiple models.
-- **Not optional.** Both fields are required on every manifest. A manifest without both is rejected at write time.
-- **Not the same as cache-key versioning.** The substrate's KV cache may have its own internal versioning; the renderer version and tokenizer fingerprint are the *control-plane* identifiers that the router and Checkpoint Manager reason about.
+Both fields are required on every manifest; assembly fails if either is missing. `renderer_version` is set from the deployment's active version at assembly time — the registry owns version selection and forward-compatibility allow-listing — and `tokenizer_fingerprint` is set from the deployment's active tokenizer. They are control-plane identifiers, distinct from `model_id` / `model_family` (a single model may run under multiple renderer versions over its lifetime, and a single renderer version may serve multiple models) and distinct from any internal cache-key versioning the inference engine may maintain.
 
 ## See also
 

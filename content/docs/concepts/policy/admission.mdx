@@ -3,7 +3,7 @@ title: Admission
 description: The admission decision flow — how the Context Admission Service evaluates an assembled ContextManifest against the ContextBudget, applies advisory transformations, and produces the final admitted shape before GPU dispatch.
 ---
 
-**Admission** is the pre-dispatch evaluation that decides whether an assembled [ContextManifest](/docs/concepts/context/context-manifests) may proceed to substrate execution, and if so, in what shape. It is owned by the **Context Admission Service** and runs on every ModelCall. The service consumes the manifest from GCM v2, evaluates it against the Run's [ContextBudget](/docs/concepts/policy/context-budgets), applies any required transformations, and returns the admitted shape.
+**Admission** is the pre-dispatch evaluation that decides whether an assembled [ContextManifest](/docs/concepts/context/context-manifests) may proceed to substrate execution, and if so, in what shape. It is owned by the **Context Admission Service** and runs on every ModelCall. The service consumes the assembled manifest, evaluates it against the Run's [ContextBudget](/docs/concepts/policy/context-budgets), applies any required transformations, and returns the admitted shape.
 
 Admission is the single point at which "can this run, and how" is decided. After admission, dispatch is unconditional — the substrate sees only manifests that admission has cleared.
 
@@ -13,12 +13,12 @@ Admission is the single point at which "can this run, and how" is decided. After
 1. Auth / scope resolution
 2. Run / Session resolution
 3. Context inputs gathered (history, artifact previews)
-4. GCM v2 assembles the ContextManifest
+4. ContextManifest assembled
 5. ▶▶ ContextBudget admission ◀◀          (this page)
-6. Run-level Budget pre-check on admitted manifest
-8. Step row created, bound to the manifest
-9. Cache-aware routing
-10. Substrate execution
+6. Run-level Budget pre-check on the admitted manifest
+7. Step is created, bound to the manifest
+8. Manifest-aware routing
+9. Substrate execution
 ```
 
 Admission runs *after* manifest assembly so it can score real token counts and real artifact byte counts. It runs *before* the run-level [Budget](/docs/concepts/policy/budgets) pre-check so cost is computed against the admitted shape, not the raw assembly.
@@ -81,7 +81,7 @@ After admission completes (with `ALLOW` or `WARN`), a final manifest row is writ
 - `admission.transformations[]` listing every transformation applied across re-admission rounds.
 - `admission.timestamp`.
 
-The original pre-transformation manifest, if any, remains addressable in the Context Manifest Registry — admission writes new rows, never mutates existing ones.
+The original pre-transformation manifest, if any, remains addressable in the Context Manifest Registry — admission writes a new manifest record on each round, never mutates an earlier one.
 
 ## Preflight admission
 
@@ -136,13 +136,7 @@ Preflight is useful for runtimes that want to plan transformations in advance (e
 | Transformation fails (artifact write failure, compactor unreachable) | `HARD_STOP` with `error.code = "admission_transformation_failed"`, HTTP `429`. |
 | Manifest assembly produced an invalid shape | Rejected with `error.code = "manifest_invalid"`, HTTP `400 Bad Request`. ModelCall is not created. |
 
-The canonical `HARD_STOP` rejection is HTTP `429 Too Many Requests` with `error.code = "context_budget_exceeded"` and an explanatory body — it is not a server error. Every v2 response also carries an `X-KS-Context-Budget-State` header so runtimes can observe the post-evaluation state without re-reading the budget.
-
-## What admission is not
-
-- **Not the same as routing.** Admission decides whether the request runs and in what shape. [Manifest-aware routing](/docs/concepts/routing/manifest-aware-routing) decides where it runs once admitted.
-- **Not the runtime's job to bypass.** Runtimes cannot opt out of admission; the only opt-out is to operate without a ContextBudget, which only the v1 anonymous path supports.
-- **Not retroactive.** A `HARD_STOP` does not cancel in-flight ModelCalls; it rejects the new admission attempt.
+The canonical `HARD_STOP` rejection is HTTP `429 Too Many Requests` with `error.code = "context_budget_exceeded"` and an explanatory body — a client-side rate signal, not a server error. Every response carries an `X-KS-Context-Budget-State` header so runtimes can observe the post-evaluation state without re-reading the budget.
 
 ## See also
 

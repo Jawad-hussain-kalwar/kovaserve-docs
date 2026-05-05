@@ -63,7 +63,7 @@ Neither offload nor compaction is sufficient (or applicable), but the manifest c
 
 ### `HARD_STOP` (terminal gate)
 
-The manifest cannot be admitted under any combination of available transformations within the re-admission cap. The request is rejected before GPU dispatch with HTTP `429 Too Many Requests` and `error.code = "context_budget_exceeded"`. The ModelCall row is **not** created. The pre-rejection manifest is recorded for audit but no `model_call_id` references it. Every v2 response carries an `X-KS-Context-Budget-State` header so runtimes can observe the post-evaluation state.
+The manifest cannot be admitted under any combination of available transformations within the re-admission cap. The request is rejected before GPU dispatch with HTTP `429 Too Many Requests` and `error.code = "context_budget_exceeded"`. The ModelCall is **not** created. The pre-rejection manifest is recorded for audit but no `model_call_id` references it. Every response carries an `X-KS-Context-Budget-State` header so runtimes can observe the post-evaluation state.
 
 `HARD_STOP` is a terminal *gate* — for the rejected request. The ContextBudget itself remains live; the next ModelCall on the same Run starts a fresh admission cycle in `ACTIVE`.
 

@@ -36,7 +36,7 @@ Subjects: `ks.checkpoint.*`. Persisted in the `execution_events` JetStream strea
 }
 ```
 
-`trigger` ∈ `runtime` (Layer 3 trigger rule), `manual` (operator), `budget_warning` (Budget threshold), `policy_advisory` (PolicyScope-driven, before risky tool call), `periodic`. `trigger_reason` is a free-form descriptor for human consumption — `before_file_write`, `pre_test_run`, `pre_unsafe_shell`, `analysis_phase_complete`.
+`trigger` ∈ `runtime` (managed runtime trigger rule), `manual` (operator), `budget_warning` (Budget threshold), `policy_advisory` (PolicyScope-driven, before risky tool call), `periodic`. `trigger_reason` is a free-form descriptor for human consumption — `before_file_write`, `pre_test_run`, `pre_unsafe_shell`, `analysis_phase_complete`.
 
 ### `ks.checkpoint.validated`
 

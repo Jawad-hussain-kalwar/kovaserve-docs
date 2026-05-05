@@ -3,9 +3,9 @@ title: Budgets
 description: The Budget entity — Run-level execution control over cost, tokens, steps, time, and tool count, evaluated as an active control object before every Step admission.
 ---
 
-A **Budget** is a Run-level execution control object that bounds cost, tokens, steps, time, or tool count for a single [Run](/docs/concepts/run-hierarchy/runs). Budgets are **active** — they evaluate before every Step admission and produce explicit decisions (`ALLOW`, `WARN`, `DEGRADED_ALLOWED`, `HARD_STOP`) — not passive billing records.
+A **Budget** is a Run-level execution control object that bounds cost, tokens, steps, time, or tool count for a single [Run](/docs/concepts/run-hierarchy/runs). Budgets are **active** — they evaluate before every Step admission and produce explicit decisions: `ALLOW`, `WARN`, `DEGRADE`, or `HARD_STOP`.
 
-Budgets are produced and consumed by the **Metering / Cost / Budget Layer**. Every non-anonymous Run carries exactly one Budget; the Budget is bound at Run creation and immutable thereafter.
+Budgets are tracked by metering and evaluated on every Step admission. Every non-anonymous Run carries exactly one Budget; the Budget is bound at Run creation and immutable thereafter.
 
 ## Dimensions
 
@@ -19,7 +19,7 @@ A Budget can constrain any subset of these dimensions. Limits left unset are unb
 | Wall time | `time_limit_seconds` | `time_used_seconds` |
 | Tool calls | `tool_limit` | `tools_used` |
 
-Cost values are 4-decimal-digit strings (`"0.0420"`) per ADR-025. Token counts are real measurements from the substrate, never client-side estimates. The `tool_limit` dimension caps the count of tool invocations made during the Run; tool consumption is recorded on every `TOOL_EXECUTE` Step admission and counted against the limit alongside cost, tokens, steps, and time.
+Cost values are 4-decimal-digit strings (`"0.0420"`) so partial-cent accounting survives cache discounts and forecast updates. Token counts are real measurements from the substrate, never client-side estimates. The `tool_limit` dimension caps the count of tool invocations made during the Run; tool consumption is recorded on every `TOOL_EXECUTE` Step admission and counted against the limit alongside cost, tokens, steps, and time.
 
 ## Run-level vs context-level
 
@@ -30,7 +30,7 @@ Budgets are distinct from [ContextBudgets](/docs/concepts/policy/context-budgets
 | Governs | Cost / tokens / steps / time / tool count | Active context size |
 | Scope | Whole Run | Per ModelCall |
 | Decision moment | Step admission | Manifest admission, before GPU dispatch |
-| Decisions | `ALLOW` / `WARN` / `DEGRADED_ALLOWED` / `HARD_STOP` | `ALLOW` / `WARN` / `OFFLOAD_REQUIRED` / `COMPACT_REQUIRED` / `DEGRADE` / `HARD_STOP` |
+| Decisions | `ALLOW` / `WARN` / `DEGRADE` / `HARD_STOP` | `ALLOW` / `WARN` / `OFFLOAD_REQUIRED` / `COMPACT_REQUIRED` / `DEGRADE` / `HARD_STOP` |
 
 Both are evaluated. The Run-level Budget runs *after* ContextBudget admission, against the *admitted* manifest's token counts and cost estimate (not raw client estimates).
 
@@ -82,7 +82,7 @@ Content-Type: application/json
 }
 ```
 
-The Budget appears on the Run row and on every event tagged to the Run:
+The Budget appears on the Run and on every event tagged to the Run:
 
 ```json
 {
@@ -114,13 +114,6 @@ The Budget appears on the Run row and on every event tagged to the Run:
 | `ks.budget.hard_stop` | Limit reached; subsequent admissions reject. |
 
 See [budget events](/docs/concepts/events/budget) for the full taxonomy and envelope.
-
-## What Budgets are not
-
-- **Not billing records.** Budgets are control objects. Billing comes from metering against real consumed values.
-- **Not raise-able.** A Run's Budget is bound at creation and immutable.
-- **Not retroactive.** A Budget that crosses `HARD_STOP` does not cancel in-flight ModelCalls; it rejects subsequent Step admissions.
-- **Not a substitute for [PolicyScope](/docs/concepts/policy/policy-scopes).** Budgets bound resource consumption; PolicyScope bounds *what* a Run is allowed to do.
 
 ## See also
 

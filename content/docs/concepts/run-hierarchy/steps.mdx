@@ -22,7 +22,7 @@ A Step is a thin row by design — it points at the things that did the work, ra
 | `created_at` / `started_at` / `completed_at` | Lifecycle timestamps. `completed_at` is set when the Step reaches a terminal state. |
 | `metadata` | Open key-value bag for runtime-supplied annotations the Canonical Execution Service does not interpret. |
 
-A Step does **not** carry prompts, tool outputs, model responses, or accumulated context on the row itself. Those live on the [ContextManifest](/docs/concepts/context/context-manifests) (per ModelCall), on [ContextArtifacts](/docs/concepts/context/context-artifacts) (for offloaded payloads), and on tool result records — never inlined onto the Step.
+Prompts, tool outputs, model responses, and accumulated context live on the [ContextManifest](/docs/concepts/context/context-manifests) (per ModelCall), on [ContextArtifacts](/docs/concepts/context/context-artifacts) (for offloaded payloads), and on tool result records. The Step row points at this material rather than inlining it.
 
 ## When a Step is created
 
@@ -58,7 +58,7 @@ Steps that do not invoke the substrate (`OBSERVE`, `THINK`, `CHECKPOINT`, `PAUSE
 
 `ordinal` is the canonical ordering within a Run. It is monotonic, gap-free, and assigned at Step creation. Two Steps cannot share an ordinal; ordinals are not reused if a Step transitions to `FAILED`, `SKIPPED`, or `CANCELED`.
 
-`created_at` is also recorded but is not the ordering source — clock skew across a distributed control plane can produce timestamp collisions or near-collisions, while `ordinal` is allocated by the Canonical Execution Service inside a single transaction with the Step insert. Clients that reconstruct timelines should sort by `ordinal`, not `created_at`.
+`created_at` is also recorded; the ordering source is `ordinal`. Clock skew across a distributed control plane can produce timestamp collisions or near-collisions, while `ordinal` is allocated by the Canonical Execution Service inside a single transaction with the Step insert. Clients that reconstruct timelines sort by `ordinal`.
 
 Nested Steps reference their parent through `parent_step_id`. The runtime emits the parent Step first (e.g. a `TOOL_PLAN`), receives its ID, and then dispatches child Steps that point at it (`TOOL_EXECUTE` × N). Children appear after their parent in the ordinal sequence and may be interleaved with other top-level Steps as the runtime sees fit.
 
@@ -137,13 +137,6 @@ Authorization: Bearer ks_...
 Step types are validated at the application layer, not via a database `CHECK` constraint. The canonical set is large enough to cover the documented runtime semantics — the standard agent loop, workspace and process orchestration, reflection, durability and lineage, terminal markers, and context engineering — and new types can be introduced without a DDL change. See [Step types](/docs/concepts/run-hierarchy/step-types) for the full canonical list and what each type represents.
 
 A runtime that does not need a particular type can ignore it. A runtime that wants a custom type beyond the canonical set should propose it; KovaServe extends the enum rather than letting the surface fragment.
-
-## What a Step is not
-
-- **Not a transaction boundary.** A Step records progression, not durability. The durable safe-points are [Checkpoints](/docs/concepts/recovery/checkpoints), which bind to a specific Step but are not the Step itself.
-- **Not the cost unit.** ModelCalls inside a Step carry the cost. A Step's cost is the sum of its ModelCalls; a Step that owns zero ModelCalls has zero cost.
-- **Not a synchronization primitive.** Steps are recorded as work happens; they do not gate other Steps. A runtime that needs ordering between Steps enforces that itself.
-- **Not the runtime's plan.** The runtime decides what to do next; the Step records what was done. Plans, scratchpads, and intermediate reasoning live in [runtime-local state](/docs/concepts/runtime/runtime-local-state), not on the Step row.
 
 ## See also
 

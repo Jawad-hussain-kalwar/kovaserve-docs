@@ -3,11 +3,11 @@ title: Workers
 description: Lease-owned execution units in the KovaServe runtime — how a Worker claims a Run, materializes runtime-local state, drives Steps, and releases or renews its lease without ever holding state another Worker would need to resume.
 ---
 
-A **Worker** is the unit of execution in the KovaServe runtime. It claims a [Run](/docs/concepts/run-hierarchy/runs) under a time-bounded lease, materializes the Run's [runtime-local state](/docs/concepts/runtime/runtime-local-state), drives the Run forward through typed [Steps](/docs/concepts/run-hierarchy/steps), and either renews or releases its lease. Workers are stateless in the resume sense: anything required for resume is persisted outside Worker memory, so Worker loss never destroys progress.
+A **Worker** is the unit of execution in the KovaServe runtime. It claims a [Run](/docs/concepts/run-hierarchy/runs) under a time-bounded lease, materializes the Run's [runtime-local state](/docs/concepts/runtime/runtime-local-state), drives the Run forward through typed [Steps](/docs/concepts/run-hierarchy/steps), and either renews or releases its lease. Anything required for resume is persisted outside Worker memory, so Worker loss never destroys progress.
 
 ```
        Runnable Run                                    Worker pool
-   (Layer 2 entity)                              (Layer 3 lease holders)
+   (canonical entity)                            (runtime lease holders)
             │                                              │
             ├──── claim ────────────────────────────────▶ Worker A
             │                                              │
@@ -30,12 +30,12 @@ A **Worker** is the unit of execution in the KovaServe runtime. It claims a [Run
 | Claim runnable work | Pull from the runnable queue exposed by the [Runtime Orchestrator](/docs/concepts/runtime/runtime-architecture#runtime-orchestrator); take a lease bounded by a renewal interval. |
 | Materialize runtime state | Read [runtime-local state](/docs/concepts/runtime/runtime-local-state) for the Run — last safe checkpoint, planner scratchpad, active process handles, tool loop position, branch pointer. |
 | Execute Step transitions | For each Step, dispatch the action: model call through `POST /v1/chat/completions`, tool invocation through the Tool Gateway, file or process operation in the [sandbox](/docs/concepts/runtime/sandboxes). |
-| Interact with Layer 2 | Issue [ModelCalls](/docs/concepts/run-hierarchy/model-calls), request [Checkpoints](/docs/concepts/recovery/checkpoints), report [CompactionRecords](/docs/concepts/context/compaction-records). |
-| Interact with sandboxes and tools | Mount workspaces, dispatch tool invocations, capture stdout/stderr into [WorkspaceArtifacts](/docs/concepts/runtime/workspace-artifacts). |
+| Interact with the control plane | Issue [ModelCalls](/docs/concepts/run-hierarchy/model-calls), request [Checkpoints](/docs/concepts/recovery/checkpoints), report [CompactionRecords](/docs/concepts/context/compaction-records). |
+| Interact with sandboxes and tools | Mount workspaces, dispatch tool invocations, capture stdout and stderr into [WorkspaceArtifacts](/docs/concepts/runtime/workspace-artifacts). |
 | Renew or release the lease | Renewal while making progress; release on Run pause, completion, or escalation. |
 | Emit runtime events | Emit `ks.tool.invocation.*`, `ks.process.*`, `ks.file.write.applied`, `ks.branch.created` and the rest of the [runtime event stream](/docs/concepts/events/runtime). |
 
-A Worker does not own canonical state. The Run row, the Step rows, the ModelCall rows, the ContextManifest rows, the Checkpoint rows — all of it lives in Layer 2's Postgres.
+Canonical state — the Run row, Step rows, ModelCall rows, ContextManifest rows, and Checkpoint rows — lives in the control plane's Postgres. Workers reference these entities by id and update them through the control-plane API.
 
 ## Lease ownership
 
@@ -50,8 +50,8 @@ Each Run is owned by exactly one Worker at any time. Ownership is enforced throu
 Renewal is the Worker's responsibility. A Worker that renews on time keeps the lease; a Worker that fails to renew loses the lease, and the Runtime Orchestrator hands the Run to another Worker. Lease loss never corrupts the Run because:
 
 - the Run's runtime-local state is persisted at every Step boundary
-- Step transitions are persisted in Layer 2 before they are considered complete
-- Checkpoints are durable in Layer 2 with logical-context-first restore
+- Step transitions are persisted in the control plane before they are considered complete
+- Checkpoints are durable in the control plane with logical-context-first restore
 
 The next Worker materializes from the persisted state and continues. See [resume flow](/docs/concepts/recovery/resume-flow) for the canonical ordering.
 
@@ -65,16 +65,16 @@ The fundamental invariant: a Worker may crash or lose its lease at any instant, 
    state delta                process handles, branch pointer)
 3. Execute the action        (model call, tool invocation, file op,
                               process start)
-4. Record the Step in        (Layer 2 Step row, ModelCall row if any,
-   Layer 2                    event emission)
+4. Record the Step in        (canonical Step row, ModelCall row if any,
+   the control plane          event emission)
 5. Evaluate checkpoint       (Checkpoint Integration Module decides
    triggers                   whether to drop a Checkpoint)
 6. Renew or release lease
 ```
 
-If the Worker crashes between step 2 and step 3, the next Worker reads the persisted runtime state, finds no Layer 2 Step recorded for it, and either retries (if the Step type allows) or escalates to a [resume from the previous Checkpoint](/docs/concepts/recovery/resume-flow).
+If the Worker crashes between step 2 and step 3, the next Worker reads the persisted runtime state, finds no canonical Step recorded for it, and either retries (if the Step type allows) or escalates to a [resume from the previous Checkpoint](/docs/concepts/recovery/resume-flow).
 
-If the Worker crashes between step 3 and step 4, the canonical ledger is missing the Step but the side-effect happened. The runtime's [retry policy](/docs/concepts/recovery/retries) determines the recovery — idempotent tools are reissued safely; non-idempotent ones escalate to Checkpoint resume.
+If the Worker crashes between step 3 and step 4, the canonical ledger is missing the Step but the side effect happened. The runtime's [retry policy](/docs/concepts/recovery/retries) determines the recovery — idempotent tools are reissued safely; non-idempotent ones escalate to Checkpoint resume.
 
 ## Worker pool
 
@@ -128,11 +128,11 @@ A Worker that hits `LOST` is reaped from the pool; a fresh Worker comes up to re
 
 ## Resource isolation
 
-A Worker's resource boundary is the [sandbox](/docs/concepts/runtime/sandboxes) it dispatches Step actions into. The Worker process itself runs in a constrained environment, but the bulk of resource consumption — file I/O, process execution, tool exec — happens inside the sandbox. The sandbox enforces cpu, memory, time, disk, and network policy. Workers cannot escape sandbox boundaries.
+A Worker's resource boundary is the [sandbox](/docs/concepts/runtime/sandboxes) it dispatches Step actions into. The Worker process itself runs in a constrained environment, and the bulk of resource consumption — file I/O, process execution, tool execution — happens inside the sandbox. The sandbox enforces cpu, memory, time, disk, and network policy.
 
 ## Failure classification
 
-When a Worker hits a non-recoverable error and the Run's [retry policy](/docs/concepts/recovery/retries) does not cover it, the Worker writes a terminal `FAIL` Step with a failure class on its metadata — see [failure classification](/docs/concepts/runtime/runtime-execution-semantics#failure-classification) — and releases the lease. The Run transitions to `FAILED`. No Worker retries a Run after `FAILED`; recovery is an explicit operator or runtime action through `POST /v1/ks/runtime/runs/{id}/resume` from a Checkpoint.
+When a Worker hits a non-recoverable error and the Run's [retry policy](/docs/concepts/recovery/retries) does not cover it, the Worker writes a terminal `FAIL` Step with a failure class on its metadata — see [failure classification](/docs/concepts/runtime/runtime-execution-semantics#failure-classification) — and releases the lease. The Run transitions to `FAILED`. Recovery from `FAILED` is an explicit operator or runtime action through `POST /v1/ks/runtime/runs/{id}/resume` from a Checkpoint.
 
 ## See also
 

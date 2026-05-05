@@ -34,8 +34,10 @@ Run                                  (1..N checkpoints)
 └── Checkpoint
     ├── context_manifest_id          (frozen ContextManifest snapshot)
     ├── state_handles[]              (typed; see state-handles)
-    ├── compatibility_vector         (model family, tokenizer fp,
-    │                                 renderer version, scope)
+    ├── compatibility_vector         (model id, model family,
+    │                                 tokenizer fp, renderer version,
+    │                                 quantization, tensor parallel config,
+    │                                 policy scope)
     ├── storage_refs[]               (S3 / MinIO URIs for artifacts and
     │                                 KV exports)
     └── run_ref / step_ref / session_ref / branch_from_ref
@@ -71,9 +73,11 @@ Each Checkpoint records a compatibility vector validated on every restore:
 | `model_family` | Coarse compatibility class (e.g. `qwen3-coder`). |
 | `tokenizer_fingerprint` | Hash of the tokenizer assets. Mismatches force manifest replay. |
 | `renderer_version` | The context renderer version. Forward-compatible renderers are explicitly allow-listed. |
+| `quantization` | The quantization regime in effect when KV state was exported. KV restore requires an exact match; mismatches skip KV silently and proceed with manifest replay. |
+| `tensor_parallel_config` | The tensor-parallel topology of the producing replica. KV restore requires a compatible topology; mismatches skip KV silently and proceed with manifest replay. |
 | `policy_scope` | The [PolicyScope](/docs/concepts/policy/policy-scopes) under which the Checkpoint was created. The resuming Run must be under a compatible scope. |
 
-A mismatch on `model_family` or `policy_scope` rejects restore outright. Mismatches on `tokenizer_fingerprint` or `renderer_version` cause KV restore to be skipped while manifest replay proceeds. See [renderer versions](/docs/concepts/context/renderer-versions) for the detail of how each field is computed and validated.
+A mismatch on `model_family` or `policy_scope` rejects restore outright. Mismatches on `tokenizer_fingerprint`, `renderer_version`, `quantization`, or `tensor_parallel_config` cause KV restore to be skipped while manifest replay proceeds. See [renderer versions](/docs/concepts/context/renderer-versions) for the detail of how each field is computed and validated.
 
 ## ID format
 
@@ -110,12 +114,11 @@ Both fields flow end-to-end: accepted on `POST /v1/chat/completions`, persisted 
 ### Create a Checkpoint
 
 ```http
-POST /v1/ks/checkpoints
+POST /v1/ks/runs/01J8X9Y2Z3K4M5N6P7Q8R9S0T1/checkpoints
 Authorization: Bearer ks_...
 Content-Type: application/json
 
 {
-  "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
   "step_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T5",
   "include_kv": true
 }
@@ -163,12 +166,6 @@ curl https://api.kovaserve.com/v1/chat/completions \
 
 The gateway resolves the Checkpoint, runs the restore plan, and binds the new Run to the same Session as the original — the resumed Run is the next Run in the Session's run history.
 
-## What Checkpoints are not
-
-- **Not a substitute for [Sessions](/docs/concepts/continuity/sessions).** Sessions provide multi-run continuity at the conversational level; Checkpoints provide point-in-time durability within or across Runs. A Session may host many Checkpoints; a Checkpoint is always anchored to a Run.
-- **Not a transaction log.** Checkpoints are explicit safe-points, not a continuous record of every Step.
-- **Not coupled to a node.** A Checkpoint is portable across replicas in the same deployment by design. KV restore is opportunistic; manifest replay is universal.
-
 ## See also
 
 - [Checkpoint state machine](/docs/concepts/recovery/checkpoint-state-machine) — the full FSM
@@ -177,4 +174,4 @@ The gateway resolves the Checkpoint, runs the restore plan, and binds the new Ru
 - [Branches](/docs/concepts/recovery/branches) · [Branch flow](/docs/concepts/recovery/branch-flow) — forking from a Checkpoint
 - [Renderer versions](/docs/concepts/context/renderer-versions) — how the compatibility vector is computed
 - [Context manifests](/docs/concepts/context/context-manifests) — the frozen snapshot a Checkpoint anchors
-- [`POST /v1/ks/checkpoints`](/docs/api/checkpoints/create) · [`POST /v1/ks/checkpoints/{id}/restore`](/docs/api/checkpoints/restore)
+- [`POST /v1/ks/runs/{id}/checkpoints`](/docs/api/checkpoints/create) · [`POST /v1/ks/runs/{id}/resume`](/docs/api/runs/resume)

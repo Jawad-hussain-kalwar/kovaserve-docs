@@ -5,7 +5,7 @@ description: How source and output segments chain across one or more CompactionR
 
 **Compaction lineage** is the graph formed by chaining [CompactionRecords](/docs/concepts/context/compaction-records) through their source and output [ContextSegments](/docs/concepts/context/context-segments). Where a single record describes one compaction event, lineage describes the full ancestry of any compacted segment back to the original raw context — across one hop, ten hops, or as many compactions as a long-running Run accumulates.
 
-Lineage is owned by the **Compaction Lineage Service**. It is not a separate entity; it is a traversal pattern over the record-and-segment graph, with explicit rules about what survives across retention windows and what consumers can reconstruct from the graph.
+Lineage is owned by the **Compaction Lineage Service**. It is a traversal pattern over the record-and-segment graph, with explicit rules about what survives across retention windows and what consumers can reconstruct from the graph.
 
 ## The graph
 
@@ -133,14 +133,13 @@ The graph is scoped at the tenant/project level: a record under one `(tenant, pr
 
 The [resume flow](/docs/concepts/recovery/resume-flow) validates that every `compaction_record_id` referenced from a frozen manifest snapshot resolves. If lineage is intact at depth 1, the resumed Run sees the same compacted segments the captured Run saw — full byte equivalence. If lineage is truncated past depth 1, the manifest is still resumable (the leaf compacted segments are intact), but the resumed Run cannot re-compact further from the original sources without first re-creating them.
 
-This is the operational meaning of "logical context first, KV optimization second": logical context is recoverable from the manifest's segments, which are recoverable from the artifact store, with compaction lineage as the optional but available history.
+Resume reconstructs logical context from the manifest's segments and the artifact store; KV cache restore is layered on top when available but is not required for the resumed Run to proceed. Compaction lineage is the addressable history that lets resume re-derive a compacted segment from its sources whenever the chain remains intact.
 
-## What compaction lineage is not
+## Properties of the lineage graph
 
-- **Not an implicit graph.** Every edge is an explicit `compaction_record_id` or `source_segment_ids` reference. There is no graph-recovery process that reconstructs lineage from heuristics.
-- **Not a global catalog.** Lineage is scoped to `(tenant, project)`. Cross-scope traversal returns 404 at scope boundaries.
-- **Not free.** The `with_compaction_lineage` retention extension keeps source segments and artifacts alive; tenants pay for the storage as part of standard metering.
-- **Not the same as version history.** Artifacts have their own version history (`name + version`); compaction lineage is the relationship between *segments*, not between artifact versions.
+Every edge in the graph is an explicit `compaction_record_id` or `source_segment_ids` reference, written at the time the compaction was registered. The graph is scoped to `(tenant, project)`, so traversal terminates at scope boundaries with `404`. The `with_compaction_lineage` retention extension keeps source segments and source artifacts alive while any record references them, and that storage is billed through standard metering.
+
+Compaction lineage tracks the relationship between *segments*. [ContextArtifacts](/docs/concepts/context/context-artifacts) carry their own `name + version` history, which is a separate axis: a record may reference an artifact at a specific version, and that version remains addressable for the lifetime of the record.
 
 ## See also
 

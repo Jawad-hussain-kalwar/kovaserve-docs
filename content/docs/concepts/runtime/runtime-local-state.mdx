@@ -3,10 +3,10 @@ title: Runtime-local state
 description: The persistent runtime-side state — planner scratchpad, active process handles, tool loop position, workspace refs, branch pointers, last safe checkpoint — that lives outside Worker memory so lease loss never destroys progress.
 ---
 
-**Runtime-local state** is the durable, runtime-side state a [Worker](/docs/concepts/runtime/workers) reads on claim and writes at every Step boundary. It is the bridge between an in-flight [Run](/docs/concepts/run-hierarchy/runs) and the canonical Layer 2 ledger: Layer 2 records *what happened* (Steps, ModelCalls, ContextManifests, Checkpoints), and runtime-local state records *where the runtime was* — the planner's intermediate notes, the live process handles, the tool loop position, the active branch pointer, the last safe checkpoint to fall back to.
+**Runtime-local state** is the durable, runtime-side state a [Worker](/docs/concepts/runtime/workers) reads on claim and writes at every Step boundary. It is the bridge between an in-flight [Run](/docs/concepts/run-hierarchy/runs) and the canonical control-plane ledger: the control plane records *what happened* (Steps, ModelCalls, ContextManifests, Checkpoints), and runtime-local state records *where the runtime was* — the planner's intermediate notes, the live process handles, the tool loop position, the active branch pointer, the last safe checkpoint to fall back to.
 
 ```
-┌─ Layer 2 (canonical ledger) ─────────────────────┐
+┌─ Control plane (canonical ledger) ───────────────┐
 │  Run / Step / ModelCall / ContextManifest /      │
 │  Checkpoint / CompactionRecord                   │
 │  ────────────────────────────────────────────    │
@@ -35,9 +35,9 @@ description: The persistent runtime-side state — planner scratchpad, active pr
 └──────────────────────────────────────────────────┘
 ```
 
-The contract is simple: anything required for resume must live in runtime-local state. A Worker may crash or lose its lease at any instant, and the next Worker reconstructs a consistent view by replaying runtime-local state and the Layer 2 ledger.
+The contract is simple: anything required for resume lives in runtime-local state. A Worker may crash or lose its lease at any instant, and the next Worker reconstructs a consistent view by replaying runtime-local state alongside the canonical ledger.
 
-The [Runtime State Store](/docs/concepts/runtime/runtime-architecture#runtime-state-store) is the [Layer 3 subsystem](/docs/concepts/runtime/runtime-architecture) that owns these rows.
+The [Runtime State Store](/docs/concepts/runtime/runtime-architecture#runtime-state-store) is the [runtime subsystem](/docs/concepts/runtime/runtime-architecture) that owns these rows.
 
 ## Fields
 
@@ -63,13 +63,14 @@ Runtime-local state is written **before the Step's side effect** so a crash mid-
 2. Persist runtime-local       (CAS on `version`; row is now ahead of the action)
    state delta
 3. Execute the action          (model call, tool invocation, file op, process start)
-4. Record Step in Layer 2      (canonical ledger now agrees with state)
+4. Record Step in the          (canonical ledger now agrees with state)
+   control plane
 5. (optional) Trigger checkpoint
 ```
 
 If the Worker crashes between (2) and (3), the next Worker sees runtime-local state ahead of the canonical ledger and consults the [retry policy](/docs/concepts/recovery/retries) — the Step type and the action determine whether to redo, observe, or roll back to the last safe checkpoint.
 
-If the Worker crashes between (3) and (4), the side effect happened but Layer 2 has no row for it. Idempotent actions are safely re-executed; non-idempotent actions escalate to a [resume](/docs/concepts/recovery/resume-flow) from `last_safe_checkpoint_id`.
+If the Worker crashes between (3) and (4), the side effect happened but the canonical ledger has no row for it. Idempotent actions are safely re-executed; non-idempotent actions escalate to a [resume](/docs/concepts/recovery/resume-flow) from `last_safe_checkpoint_id`.
 
 ## CAS and lease loss
 
@@ -87,11 +88,13 @@ WHERE  run_id = $3
 
 A Worker whose lease has been silently reassigned will see zero rows updated and abort the Step. This is the runtime's defense against split-brain — two Workers cannot simultaneously commit conflicting state to the same Run.
 
-## What is *not* runtime-local state
+## Where related state lives
 
-- **Canonical execution rows.** Steps, ModelCalls, ContextManifests, Checkpoints — these are Layer 2.
-- **Context bytes.** Tool outputs, file diffs, retrieved documents go to [ContextArtifact](/docs/concepts/context/context-artifacts) or [WorkspaceArtifact](/docs/concepts/runtime/workspace-artifacts) storage, not to runtime-local state.
-- **Workspace bytes.** The Workspace's filesystem state lives in the [sandbox](/docs/concepts/runtime/sandboxes); snapshots live in object storage as `workspace_snapshot` WorkspaceArtifacts. Runtime-local state holds *references* to these, not the bytes.
+Runtime-local state holds the runtime-side cursor on a Run. Other state lives next to it:
+
+- **Canonical execution rows** — Steps, ModelCalls, ContextManifests, Checkpoints — live in the control-plane ledger.
+- **Context bytes** — tool outputs, file diffs, retrieved documents — live in [ContextArtifact](/docs/concepts/context/context-artifacts) and [WorkspaceArtifact](/docs/concepts/runtime/workspace-artifacts) storage.
+- **Workspace bytes** — the Workspace's filesystem state — live in the [sandbox](/docs/concepts/runtime/sandboxes), with snapshots stored in object storage as `workspace_snapshot` WorkspaceArtifacts. Runtime-local state holds *references* to these, not the bytes themselves.
 
 ## Inspection
 

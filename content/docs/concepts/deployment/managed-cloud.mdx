@@ -92,7 +92,7 @@ By default, hosted storage covers everything the control plane needs:
 
 - **Hosted Postgres** — canonical entity persistence (Runs, Sessions, Steps, ModelCalls, ContextManifests, Budgets, Checkpoints, PolicyScopes, usage records).
 - **Hosted Redis** — rate-limit counters, idempotency cache, hot-path lookups.
-- **Hosted NATS JetStream** — `ks.>` event subjects with bounded retention; `kv_events` substrate stream with 24-hour retention.
+- **Hosted NATS JetStream** — the `ks.>` execution event stream and the `kv_events` substrate stream, with file-backed retention configured for the deployment.
 - **Hosted MinIO** — Context Artifact Store, KV export bundles, [WorkspaceArtifact](/docs/concepts/runtime/workspace-artifacts) bytes, checkpoint blobs.
 
 Customers who want object storage in their own bucket configure it on the Project. The control plane writes ContextArtifact and Checkpoint bytes to the customer-supplied bucket while retaining the manifest and metadata in hosted Postgres.
@@ -114,7 +114,7 @@ The rounding contract preserves `gross = net + savings` exactly across rows and 
 
 Managed cloud supports partner fleets as first-class. A neocloud or AI infrastructure partner registers a fleet through the runtime-binding API, and customer Runs whose [PolicyScope](/docs/concepts/policy/policy-scopes) routes them there land on the partner's GPUs while the canonical control plane stays hosted by KovaServe. The partner sees the same dashboard, the same event taxonomy, and the same metering surface as a fully hosted fleet.
 
-This is the path neoclouds use to launch [managed agents](/docs/concepts/managed-agents) on top of their existing capacity without standing up the control plane themselves.
+This is the path neoclouds use to launch [managed agents](/docs/concepts/managed-agents) on top of their existing capacity while KovaServe operates the control plane.
 
 ## When to choose managed cloud
 

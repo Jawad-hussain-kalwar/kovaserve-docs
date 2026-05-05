@@ -1,9 +1,9 @@
 ---
 title: Runtime events
-description: The runtime stream — Layer 3 runtime activity events covering tool invocations, process lifecycle, file writes, and branch creation.
+description: The runtime stream — managed runtime activity events covering tool invocations, process lifecycle, file writes, and branch creation.
 ---
 
-The **runtime events** stream covers Layer 3 runtime activity: tool invocations, process lifecycle, file writes, and branch creation. It is the runtime-native projection of "what the agent did" beyond model calls — the surface the runtime UI uses to draw a coding agent's timeline alongside the [execution](/docs/concepts/events/execution) and [routing](/docs/concepts/events/routing) layers.
+The **runtime events** stream covers managed runtime activity: tool invocations, process lifecycle, file writes, and branch creation. It is the runtime-native projection of "what the agent did" beyond model calls — the surface the runtime UI uses to draw a coding agent's timeline alongside the [execution](/docs/concepts/events/execution) and [routing](/docs/concepts/events/routing) layers.
 
 Subjects: `ks.tool.*`, `ks.process.*`, `ks.file.*`, `ks.branch.*`. Persisted in the `execution_events` JetStream stream. Consumed via [`GET /v1/ks/events/runtime`](/docs/api/events/runtime).
 
@@ -118,7 +118,7 @@ Tools that produce no process or file activity emit only the two `ks.tool.invoca
 
 ## Common consumers
 
-- **Coding-agent timeline UI.** Renders tool calls, process spawns, file diffs, and branch points alongside model calls for the runtime wedge UX.
+- **Coding-agent timeline UI.** Renders tool calls, process spawns, file diffs, and branch points alongside model calls for the managed runtime UI.
 - **Workspace audit.** `ks.file.write.applied` events are the audit log for workspace mutations — every mutation has an addressable diff artifact.
 - **Branch lineage view.** `ks.branch.created` populates the branch tree visualization; consumers walk `from_checkpoint_id` → `branched_run_id` to render lineage.
 - **Tool-policy feedback.** `ks.tool.invocation.completed` outcomes (especially `blocked`) feed the tool-governance dashboard for [PolicyScope](/docs/concepts/policy/policy-scopes) tuning.

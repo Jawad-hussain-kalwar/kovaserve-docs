@@ -90,12 +90,6 @@ Multiple branches from the same Checkpoint are permitted and run independently. 
 
 Branches sharing a [Session](/docs/concepts/continuity/sessions) are subject to the same rules as any concurrent Runs against a shared Session — the most recently bound Run becomes the Session's `current_run_id`, and ordering of independent branches is the runtime's responsibility.
 
-## What branches are not
-
-- **Not a clone of the parent's row.** The child has a fresh `run_id`, fresh timestamps, fresh execution events. It references the parent through `branch_from`; it does not duplicate it.
-- **Not a substitute for [retries](/docs/concepts/recovery/retries).** A retry adds a new Step within the same Run for transient failures. A branch creates a new Run for divergent trajectories.
-- **Not free.** Each branch creates its own budget consumption and its own observability surface. The control plane does not silently coalesce branches that converge.
-
 ## Wire shape
 
 ```http

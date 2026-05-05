@@ -29,7 +29,7 @@ A **Workspace** is the structured filesystem a [Run](/docs/concepts/run-hierarch
 └────────────────────────────────────────────────────────────┘
 ```
 
-The Workspace / Artifact Manager is the [Layer 3 subsystem](/docs/concepts/runtime/runtime-architecture#workspace--artifact-manager) that owns the lifecycle.
+The Workspace / Artifact Manager is the [runtime subsystem](/docs/concepts/runtime/runtime-architecture#workspace--artifact-manager) that owns the lifecycle.
 
 ## What a Workspace records
 
@@ -57,7 +57,7 @@ A Workspace's source binding determines what the workspace looks like at provisi
 |---|---|
 | `git` | `git clone <url>` + `git checkout <ref>`. The resolved commit hash is recorded so the Workspace is reproducible regardless of subsequent ref movement. |
 | `tarball` | A previously registered [WorkspaceArtifact](/docs/concepts/runtime/workspace-artifacts) of type `workspace_snapshot`. |
-| `branch` | Seeded from a parent Workspace's snapshot (set by the [branch flow](/docs/concepts/recovery/branch-flow); not a directly-creatable type). |
+| `branch` | Seeded from a parent Workspace's snapshot. Provisioned by the [branch flow](/docs/concepts/recovery/branch-flow). |
 | `empty` | Empty `/workspace`. Used by document-review and ops-style runs that build the workspace from tool outputs. |
 
 ## Read/write policy
@@ -180,12 +180,14 @@ A Workspace's archival is governed by the project's snapshot retention setting a
 
 The Workspace itself is created implicitly when a Run is created with a `workspace.source` block — there is no separate "create workspace" call in the common path.
 
-## What a Workspace is not
+## Workspaces and adjacent concepts
 
-- **Not a [ContextArtifact](/docs/concepts/context/context-artifacts).** ContextArtifacts hold raw context bytes (tool outputs, file diffs, retrieved documents) referenced *from* context segments. A Workspace is the runtime's filesystem; its bytes become ContextArtifacts only when a `FILE_READ` brings them into context.
-- **Not a Git working tree.** The Git binding is one source type. Workspaces also support tarballs, branches, and empty roots.
-- **Not a long-lived shared mount.** Two Runs do not share a live Workspace. Cross-Run continuity goes through Session-scoped persistence + snapshots, not concurrent access.
-- **Not the sandbox.** The Workspace is what is mounted *into* a [sandbox](/docs/concepts/runtime/sandboxes); the sandbox is the execution boundary around it.
+A Workspace sits next to several related entities; the relationships are explicit:
+
+- A Workspace holds the runtime's filesystem state. Bytes from the Workspace enter context only when a `FILE_READ` brings them into a [ContextSegment](/docs/concepts/context/context-segments), at which point the bytes are catalogued as a [ContextArtifact](/docs/concepts/context/context-artifacts).
+- A Workspace's source is one of `git`, `tarball`, `branch`, or `empty` — Git is one of several source types.
+- Each Run has a Workspace bound to itself; cross-Run continuity flows through Session-scoped persistence and snapshots, not through concurrent shared mounts.
+- A Workspace is mounted *into* a [sandbox](/docs/concepts/runtime/sandboxes); the sandbox is the execution boundary around it.
 
 ## See also
 

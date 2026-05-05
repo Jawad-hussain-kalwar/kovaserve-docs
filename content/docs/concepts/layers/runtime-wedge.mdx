@@ -3,7 +3,7 @@ title: Runtime wedge
 description: Layer 3 — KovaServe's focused runtime for coding, terminal, and tool-heavy long-running agents. Built on the Layer 2 control plane, never inventing parallel context-engineering primitives. The home of CodeRuns.
 ---
 
-The **runtime wedge** is Layer 3 of the KovaServe layered model — a focused runtime product built on the [Layer 2 control plane](/docs/concepts/layers/control-plane) for one class of workload: coding agents, terminal agents, tool-heavy long-running agents, and filesystem and process-heavy loops. It exists because tighter coupling between runtime semantics and control-plane semantics produces clearly better outcomes for this wedge than a [BYO runtime](/docs/concepts/deployment/byo-runtime) integration could achieve. It is intentionally narrow — not a general-purpose orchestrator, not a broad agent platform, not the company. The product surface that runs on the wedge is [CodeRuns](/docs/concepts/managed-agents/coderuns), with [OpsRuns](/docs/concepts/managed-agents/opsruns) and [DocRuns](/docs/concepts/managed-agents/docruns) as adjacent SKUs in the same shape.
+The **runtime wedge** is Layer 3 of the KovaServe layered model — a focused runtime product built on the [Layer 2 control plane](/docs/concepts/layers/control-plane) for one class of workload: coding agents, terminal agents, tool-heavy long-running agents, and filesystem and process-heavy loops. It exists because tighter coupling between runtime semantics and control-plane semantics produces clearly better outcomes for this wedge than a [BYO runtime](/docs/concepts/deployment/byo-runtime) integration could achieve. The product surface that runs on the wedge is [CodeRuns](/docs/concepts/managed-agents/coderuns), with [OpsRuns](/docs/concepts/managed-agents/opsruns) and [DocRuns](/docs/concepts/managed-agents/docruns) as adjacent SKUs in the same shape.
 
 ```
 ┌─ Layer 3 — runtime wedge ─────────────────────────────────────────────┐
@@ -68,7 +68,7 @@ Routes new `Run`s onto available [`Workers`](/docs/concepts/runtime/workers) und
 
 ### Worker Manager
 
-Manages the Worker pool. Workers claim runnable work, materialize runtime state, execute step transitions, interact with Layer 2 for model calls and checkpoints, interact with sandboxes and tools, renew or release leases, and emit runtime events. A Worker is **never the sole holder of state needed for resume** — everything required for resume is persisted in the [Runtime State Store](/docs/concepts/runtime/runtime-local-state) outside Worker memory, so Worker reassignment is safe and lease loss does not destroy progress.
+Manages the Worker pool. Workers claim runnable work, materialize runtime state, execute step transitions, interact with Layer 2 for model calls and checkpoints, interact with sandboxes and tools, renew or release leases, and emit runtime events. Everything required for resume is persisted in the [Runtime State Store](/docs/concepts/runtime/runtime-local-state) outside Worker memory; Worker reassignment is safe and progress survives lease loss.
 
 ### Sandbox Manager
 
@@ -84,7 +84,7 @@ Manages the [`Sandbox`](/docs/concepts/runtime/sandboxes) lifecycle. The wedge i
 | Optional persistence | Sandboxes can persist across the lifetime of a Run. |
 | Branchable | Sandboxes can branch from a snapshot point so [branch flow](/docs/concepts/recovery/branch-flow) carries workspace state. |
 
-v1 sandboxes are container-based.
+Sandboxes are container-based.
 
 ### Tool Registry and Tool Gateway
 
@@ -182,9 +182,9 @@ The wedge uses **typed step progression** — the canonical `StepType` enum, dra
 
 Validation is application-level (TEXT column with enum check), so new types extend the canonical list without DDL changes. The wedge may also surface a `process_waiting` runtime *event* (`ks.process.waiting`) without a corresponding StepType — events and step types are separate enumerations. See [step types](/docs/concepts/run-hierarchy/step-types) and [runtime execution semantics](/docs/concepts/runtime/runtime-execution-semantics).
 
-## What the wedge owns vs. does not own
+## Where things live
 
-The boundary is precise — and is enforced by what the wedge persists vs. what it resolves through Layer 2.
+The boundary is enforced by what the wedge persists vs. what it resolves through Layer 2.
 
 | Layer 3 owns | Layer 2 owns |
 |---|---|
@@ -198,7 +198,7 @@ The boundary is precise — and is enforced by what the wedge persists vs. what 
 | [Retry / resume / branch](/docs/concepts/recovery/branches) UX for the wedge | Run [state machine](/docs/concepts/run-hierarchy/run-state-machine) transitions |
 | Runtime-native [timeline](/docs/concepts/runtime/runtime-observability) UX | Event taxonomy and [event envelope](/docs/concepts/events/event-envelope) |
 
-The wedge **never invents parallel context-engineering primitives**. When it needs to compact context, it produces a `CompactionRecord` through the canonical API. When it needs to offload a tool result, it writes a `ContextArtifact`. The Layer 2 surface is what makes the wedge *thin*.
+When the wedge needs to compact context, it produces a `CompactionRecord` through the canonical API. When it needs to offload a tool result, it writes a `ContextArtifact`. The Layer 2 surface is what makes the wedge *thin*.
 
 ## API surface
 
@@ -232,14 +232,6 @@ The wedge participates in the canonical [event taxonomy](/docs/concepts/events) 
 | `ks.branch.created` | A branch lineage was created from a checkpoint or stable point. |
 
 Combined with the canonical execution and checkpoint events, these power the runtime-native timeline.
-
-## What the wedge is not
-
-The wedge has a clear boundary against three nearby categories.
-
-- **Not a general-purpose orchestrator.** The wedge is narrow on purpose — coding, terminal, tool-heavy, file-heavy, long-running. Other workloads use [BYO runtime mode](/docs/concepts/deployment/byo-runtime) or another platform.
-- **Not a context-engineering platform.** The wedge consumes Layer 2 context primitives. It does not own prompt composition, planner logic, retrieval strategy, or agent memory authoring.
-- **Not the company.** The wedge is a focused product on top of the [control plane](/docs/concepts/layers/control-plane). The company center is Layer 2; the wedge is one productized surface.
 
 ## Product packaging
 

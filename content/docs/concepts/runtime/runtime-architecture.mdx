@@ -1,11 +1,11 @@
 ---
 title: Runtime architecture
-description: The Layer 3 runtime architecture — eleven subsystems that turn KovaServe's canonical execution model into an opinionated runtime for coding, terminal, and tool-heavy long-running agents, without inventing parallel context-engineering primitives.
+description: The KovaServe runtime architecture — eleven subsystems that turn the canonical execution model into a coherent runtime for coding, terminal, and tool-heavy long-running agents.
 ---
 
-The **KovaServe runtime** is the Layer 3 product that sits on top of the Layer 2 control plane and turns canonical [Runs](/docs/concepts/run-hierarchy/runs), [Steps](/docs/concepts/run-hierarchy/steps), [ContextManifests](/docs/concepts/context/context-manifests), and [Checkpoints](/docs/concepts/recovery/checkpoints) into a coherent runtime experience for the wedge — coding agents, terminal agents, tool-heavy long-running agents, and filesystem/process-heavy loops. It is the subject of the [managed runtime mode](/docs/concepts/deployment/managed-runtime); this page describes its internal architecture.
+The **KovaServe runtime** sits on top of the [Layer 2](/docs/concepts/layers) control plane and turns canonical [Runs](/docs/concepts/run-hierarchy/runs), [Steps](/docs/concepts/run-hierarchy/steps), [ContextManifests](/docs/concepts/context/context-manifests), and [Checkpoints](/docs/concepts/recovery/checkpoints) into a coherent runtime experience for coding agents, terminal agents, tool-heavy long-running agents, and filesystem and process-heavy loops. It is the subject of the [managed runtime mode](/docs/concepts/deployment/managed-runtime); this page describes its internal architecture.
 
-The runtime is intentionally focused. It does not aim to be a general-purpose orchestrator. It exists where tighter coupling between runtime semantics and control-plane semantics produces clearly better outcomes than a [BYO runtime](/docs/concepts/deployment/byo-runtime) integration could achieve.
+The runtime is intentionally focused. It is the surface where tight coupling between runtime semantics and control-plane semantics produces a coherent product experience — pause, resume, branch, retry, sandbox-bound execution, structured workspaces, and a runtime-native timeline, all driven from canonical control-plane entities.
 
 ```
 ┌─ Layer 3 — KovaServe runtime ─────────────────────────────────────────────────┐
@@ -27,12 +27,14 @@ The runtime is intentionally focused. It does not aim to be a general-purpose or
 │           │                          ▼                                        │
 │           │                   Runtime State Store                             │
 │           │                                                                   │
-│           ├──▶ Checkpoint Integration Module ──▶ (Layer 2 Checkpoint Mgr)     │
+│           ├──▶ Checkpoint Integration Module ──▶ (canonical Checkpoint Mgr)   │
 │           ├──▶ Retry / Resume / Branch Manager                                │
 │           └──▶ Timeline / Event Projection Service                            │
 │                                                                               │
-│   Runtime SDK (Python)         ◀── @kova.run, @kova.session, @kova.budget,    │
-│                                    @kova.step                                 │
+│   Runtime SDK (Python)         ◀── KovaClient, KovaControlClient,             │
+│                                    ContextBuilder, ArtifactClient,            │
+│                                    ContextBudgetClient,                       │
+│                                    kovaserve.adapters.langgraph               │
 └───────────────────────────────────────────────────────────────────────────────┘
                           │ canonical entities
                           ▼
@@ -43,7 +45,7 @@ The runtime is intentionally focused. It does not aim to be a general-purpose or
 
 ## Subsystems
 
-The runtime is composed of eleven Layer 3 subsystems.
+The runtime is composed of eleven subsystems.
 
 ### Runtime API Service
 
@@ -51,19 +53,19 @@ The runtime's public HTTP surface. Hosts `POST /v1/ks/runtime/runs`, the pause/r
 
 ### Runtime Orchestrator
 
-Routes new Runs onto available [Workers](/docs/concepts/runtime/workers) under lease-based ownership. Owns the runtime-side decisions: which Worker claims which Run, when a Worker's lease is renewed, when a Run is reassigned. The orchestrator never holds canonical state — that lives in Layer 2.
+Routes new Runs onto available [Workers](/docs/concepts/runtime/workers) under lease-based ownership. Owns the runtime-side decisions: which Worker claims which Run, when a Worker's lease is renewed, when a Run is reassigned. Canonical state stays in the control plane; the orchestrator only holds the runtime-side cursor on it.
 
 ### Worker Manager
 
-Manages the Worker pool — claim runnable work, materialize runtime state, execute step transitions, interact with Layer 2 for model calls and checkpoints, interact with sandboxes and tools, renew or release leases, emit runtime events. A Worker is never the sole holder of state needed for resume; everything required for resume is persisted in [runtime-local state](/docs/concepts/runtime/runtime-local-state) outside Worker memory.
+Manages the Worker pool — claim runnable work, materialize runtime state, execute step transitions, call into the control plane for model calls and checkpoints, dispatch sandboxes and tools, renew or release leases, and emit runtime events. Everything required for resume is persisted in [runtime-local state](/docs/concepts/runtime/runtime-local-state) outside Worker memory, so reassignment after lease loss reconstructs a consistent view.
 
 ### Sandbox Manager
 
-Manages the [sandbox](/docs/concepts/runtime/sandboxes) lifecycle. The runtime is process- and file-heavy by design, so isolated execution environments are first-class. Responsibilities include shell/process execution, workspace mounting, policy-limited file and network access, output capture, resource accounting, optional persistent run sandboxes, and branchable sandboxes from snapshot points. v1 sandboxes are container-based.
+Manages the [sandbox](/docs/concepts/runtime/sandboxes) lifecycle. The runtime is process- and file-heavy by design, so isolated execution environments are first-class. Responsibilities include shell and process execution, workspace mounting, policy-limited file and network access, output capture, resource accounting, persistent run sandboxes, and branchable sandboxes from snapshot points. Sandboxes are container-based.
 
 ### Tool Registry and Tool Gateway
 
-The wedge-specific [tool invocation](/docs/concepts/runtime/tool-invocations) layer. Built-in tool classes — shell/command, file, repo/git, test/build, HTTP/API, structured external — covering the curated set of `file_read`, `file_write`, `shell`, `search`, `git`, and `test_runner` tools the runtime ships with, alongside any custom tools registered for an agent spec. The Tool Gateway dispatches each invocation, enforces sandbox boundaries, and emits `ks.tool.invocation.*` events. Layer 3 owns wedge-specific invocation semantics; Layer 2 owns global policy enforcement (`tool_policy_ref` on the resolved [PolicyScope](/docs/concepts/policy/policy-scopes)) and budget enforcement (`tool_limit` on the resolved [Budget](/docs/concepts/policy/budgets)).
+The runtime [tool invocation](/docs/concepts/runtime/tool-invocations) layer. Built-in tool classes — shell and command, file, repo and git, test and build, HTTP and API, and structured external tools — cover the curated set of `file_read`, `file_write`, `shell`, `search`, `git`, and `test_runner` tools the runtime ships with, alongside any custom tools registered for an agent spec. The Tool Gateway dispatches each invocation, enforces sandbox boundaries, and emits `ks.tool.invocation.*` events. The runtime owns tool registration, dispatch, and runtime-side invocation semantics; the control plane owns global policy enforcement (`tool_policy_ref` on the resolved [PolicyScope](/docs/concepts/policy/policy-scopes)) and budget enforcement (`tool_limit` on the resolved [Budget](/docs/concepts/policy/budgets)).
 
 ### Workspace / Artifact Manager
 
@@ -75,7 +77,7 @@ Holds [runtime-local state](/docs/concepts/runtime/runtime-local-state): planner
 
 ### Checkpoint Integration Module
 
-Layered on top of the Layer 2 [Checkpoint Manager](/docs/concepts/recovery/checkpoints). Defines the wedge-aware trigger rules: before risky file mutations, before unsafe shell actions, after stable analysis phases, on budget warning, manual checkpoints, periodic checkpoints. The actual checkpoint capture goes through the canonical Layer 2 path — what the runtime adds is the *when*. Checkpoints attach a `runtime_state` [StateHandle](/docs/concepts/recovery/state-handles) to the canonical record so resume can reconstitute the runtime view.
+Layered on top of the canonical [Checkpoint Manager](/docs/concepts/recovery/checkpoints). Defines the runtime-aware trigger rules: before risky file mutations, before unsafe shell actions, after stable analysis phases, on budget warning, manual checkpoints, and periodic checkpoints. The actual checkpoint capture goes through the canonical control-plane path — what the runtime adds is the *when*. Checkpoints attach a `runtime_state` [StateHandle](/docs/concepts/recovery/state-handles) to the canonical record so resume can reconstitute the runtime view.
 
 ### Retry / Resume / Branch Manager
 
@@ -87,25 +89,25 @@ Projects the canonical [Step](/docs/concepts/run-hierarchy/steps), [ModelCall](/
 
 ### Runtime SDK
 
-Python-first SDK that emits the canonical entities through ergonomic decorators — `@kova.run`, `@kova.session`, `@kova.budget`, `@kova.step`. The SDK is a thin authoring surface; it does not replace the runtime API but makes the common case concise.
+The Python-first SDK that authors and operates Runs against the runtime. `KovaClient` wraps inference with the canonical `kovaserve` extension envelope; `KovaControlClient` covers control-plane CRUD for runs, budgets, manifests, artifacts, and tenants; `ContextBuilder`, `ArtifactClient`, and `ContextBudgetClient` cover context shape, offload, and admission; `kovaserve.adapters.langgraph` is the LangGraph integration. The SDK surfaces the same APIs the runtime uses internally — anything an agent author can do through the SDK, the runtime does through the same paths.
 
-## What the runtime owns vs. does not own
+## Ownership boundary
 
-The boundary is precise — and is enforced by what the runtime persists vs. what it resolves through Layer 2.
+The boundary is precise — and is enforced by what the runtime persists locally vs. what it resolves through the control plane.
 
-| Layer 3 owns | Layer 2 owns |
+| The runtime owns | The control plane owns |
 |---|---|
-| Agent definition model | Canonical Run / Session / Step / ModelCall persistence and FSMs |
+| Agent definition model | Canonical Run, Session, Step, and ModelCall persistence and state machines |
 | Worker lease and assignment | [PolicyScope](/docs/concepts/policy/policy-scopes), tenant resolution, [Budget](/docs/concepts/policy/budgets) and [ContextBudget](/docs/concepts/policy/context-budgets) admission |
 | [Sandbox](/docs/concepts/runtime/sandboxes) lifecycle | Routing across the substrate fleet |
 | [Tool registration and invocation](/docs/concepts/runtime/tool-invocations) semantics | Global policy and budget enforcement |
 | [Workspace](/docs/concepts/runtime/workspaces) and [WorkspaceArtifact](/docs/concepts/runtime/workspace-artifacts) model | [ContextManifest](/docs/concepts/context/context-manifests), [ContextSegment](/docs/concepts/context/context-segments), [ContextArtifact](/docs/concepts/context/context-artifacts), [CompactionRecord](/docs/concepts/context/compaction-records) |
 | [Runtime-local state](/docs/concepts/runtime/runtime-local-state) | Canonical entity persistence |
-| Checkpoint trigger rules at runtime boundaries | [Checkpoint Manager](/docs/concepts/recovery/checkpoints) capture, validation, restore |
-| [Retry / resume / branch](/docs/concepts/recovery/branches) UX for the wedge | Run [state machine](/docs/concepts/run-hierarchy/run-state-machine) transitions |
+| Checkpoint trigger rules at runtime boundaries | [Checkpoint Manager](/docs/concepts/recovery/checkpoints) capture, validation, and restore |
+| [Retry, resume, and branch](/docs/concepts/recovery/branches) UX | Run [state machine](/docs/concepts/run-hierarchy/run-state-machine) transitions |
 | Runtime-native [timeline](/docs/concepts/runtime/runtime-observability) UX | Event taxonomy and [event envelope](/docs/concepts/events/event-envelope) |
 
-The runtime never invents parallel context-engineering primitives. When it needs to compact context, it produces a [CompactionRecord](/docs/concepts/context/compaction-records) through the canonical API. When it needs to offload a tool result, it writes a [ContextArtifact](/docs/concepts/context/context-artifacts). The Layer 2 surface is what makes the runtime *thin*.
+When the runtime compacts context, it produces a [CompactionRecord](/docs/concepts/context/compaction-records) through the canonical API. When the runtime offloads a tool result, it writes a [ContextArtifact](/docs/concepts/context/context-artifacts). The control-plane surface is what keeps the runtime thin.
 
 ## Wire shape — runtime API
 
@@ -125,7 +127,7 @@ The runtime exposes a small surface over the canonical control plane:
 
 ## Deployment
 
-The runtime ships as part of the same Helm chart as the Layer 2 control plane. On [managed cloud](/docs/concepts/deployment/managed-cloud) the runtime workers and sandboxes run inside the hosted cluster; on [private deployment](/docs/concepts/deployment/private-deployment) they run inside the customer's Kubernetes cluster, on the same nodes (or on dedicated runtime-pool nodes) as the rest of the control plane.
+The runtime ships as part of the same Helm chart as the control plane. On [managed cloud](/docs/concepts/deployment/managed-cloud) the runtime workers and sandboxes run inside the hosted cluster; on [private deployment](/docs/concepts/deployment/private-deployment) they run inside the customer's Kubernetes cluster, on the same nodes — or on dedicated runtime-pool nodes — as the rest of the control plane.
 
 ## See also
 

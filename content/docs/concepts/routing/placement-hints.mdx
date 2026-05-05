@@ -5,7 +5,7 @@ description: The PlacementHint entity — execution preferences supplied by runt
 
 A **PlacementHint** is an execution preference supplied by the runtime or by an operator that the [Cache-Aware Router](/docs/concepts/routing/manifest-aware-routing) considers as a **soft** input to scoring. Hints express intent — "prefer this node", "prefer the replica that warmed the prior turn", "avoid this region" — without overriding hard scope filters or substrate health constraints.
 
-Hints are KovaServe's mechanism for runtimes to communicate placement intent without taking over the routing decision. The router treats them as scoring weights, not as commands.
+Hints are KovaServe's mechanism for runtimes to communicate placement intent. The router treats them as scoring weights and combines them with continuity, economics, and policy signals to choose a replica.
 
 ## What hints carry
 
@@ -105,12 +105,9 @@ A long-running batch Run that prefers cache reuse over latency benefits from `la
 
 `prefer_session_affinity: true` is the most common hint. It causes the router to score the Session's most-recently-used replica higher, capturing the common case where conversational continuity benefits from sticky placement. The hint is soft — a heavily loaded prior replica yields to a fresh cold one when the queue cost outweighs reuse.
 
-## What PlacementHints are not
+## Lifecycle and persistence
 
-- **Not a routing command.** Hints are inputs; the router decides.
-- **Not a policy bypass.** Hints cannot widen `context_share_scope`, override `data_boundary`, or escape model ACLs.
-- **Not retroactive.** Hints apply to the request that carries them. Subsequent requests reset to no hint unless the runtime re-supplies.
-- **Not durable.** Hints are not persisted on the Run row beyond the request's audit event payload.
+Hints are scoped to the request that carries them. Each subsequent request restates whichever hints the runtime still wants applied; absent hints contribute nothing to scoring. Hints land on the routing audit event payload for the request and are not persisted on the Run row.
 
 ## See also
 

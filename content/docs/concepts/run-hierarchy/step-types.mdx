@@ -18,7 +18,7 @@ A runtime emits Step types that match its semantics and ignores the rest. A Lang
 | Terminal markers | `COMPLETE`, `FAIL` |
 | Context engineering | `COMPACT` |
 
-The canonical enum has 15 values. The control plane reads the type as a `TEXT` column with application-level validation; widening the catalog is a Pydantic schema change, never a DDL change.
+The canonical enum has 15 values. The control plane reads the type as a `TEXT` column with application-level validation; widening the catalog is a Pydantic schema change rather than a DDL change.
 
 ## Standard agent loop
 
@@ -64,7 +64,7 @@ The runtime recorded an observation about the current state — a tool result in
 
 The runtime recorded a deliberation Step — a chain-of-thought boundary, a planning pause, a self-critique. May or may not own a ModelCall depending on whether the runtime invokes the substrate to do the thinking.
 
-Both `OBSERVE` and `THINK` are decorative in the sense that the control plane does not act on them — they exist so timelines and audit views can show *why* a Run made a particular move, not just *what* it did.
+Both `OBSERVE` and `THINK` are runtime-emitted progression markers the control plane preserves verbatim — they exist so timelines and audit views can show *why* a Run made a particular move alongside *what* it did.
 
 ## Durability and lineage
 
@@ -110,13 +110,13 @@ A compaction operation occurred — either runtime-produced or run by a KovaServ
 
 ## Validation and extension
 
-Step type validation is performed at the application layer. The Step row stores the type as a `TEXT` column with an enum check enforced by the Pydantic schema and the Canonical Execution Service. New canonical types extend the enum without DDL changes — adding `COMPACT` to the catalog never required a migration to widen a database constraint.
+Step type validation is performed at the application layer. The Step row stores the type as a `TEXT` column with an enum check enforced by the Pydantic schema and the Canonical Execution Service. New canonical types extend the enum without DDL changes — `COMPACT` was added to the catalog as a Pydantic schema change.
 
 Runtimes that need a Step type beyond the canonical set should propose it. KovaServe extends the canonical enum rather than letting the surface fragment, so timelines, dashboards, and audit consumers always interpret the same names the same way.
 
 ## Step type vs. runtime event
 
-Step types and runtime events are **separate enumerations**. A Step type is a row inserted into the Step table; a runtime event is a message published on the event stream. Some runtime events have a corresponding Step type (`ks.tool.invocation.started` ↔ `TOOL_EXECUTE`); others do not (`ks.process.waiting` records process state without inserting a Step). Clients reading timelines should treat the two surfaces as complementary, not redundant.
+Step types and runtime events are **separate enumerations**. A Step type is a row inserted into the Step table; a runtime event is a message published on the event stream. Some runtime events have a corresponding Step type (`ks.tool.invocation.started` ↔ `TOOL_EXECUTE`); others stand alone (`ks.process.waiting` records process state without inserting a Step). Clients reading timelines treat the two surfaces as complementary.
 
 ## See also
 

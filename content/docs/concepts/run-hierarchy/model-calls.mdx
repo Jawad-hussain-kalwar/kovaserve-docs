@@ -25,12 +25,12 @@ ModelCalls are owned by the **Canonical Execution Service**. The service inserts
 | `gross_cost_cents` | Cost the call would have incurred without any cache reuse. |
 | `cache_savings_cents` | `gross_cost_cents - cost_cents`. The identity `gross = net + savings` always holds. |
 | `ttft_ms` / `total_ms` | Real time-to-first-token and total latency from the substrate. |
-| `stable_prefix_id` | The legacy prefix-cache identity used by the cache-aware router. Computed once at manifest assembly, written to both the ContextManifest and the ModelCall row, and never recomputed thereafter. |
+| `stable_prefix_id` | The prefix-cache identity used by the cache-aware router. Computed once at manifest assembly, written to both the ContextManifest and the ModelCall row, and stable thereafter. |
 | `traceparent` | W3C trace context for OpenTelemetry correlation. Recorded in `metadata`. |
 | `metadata` | Open key-value bag for runtime annotations the Canonical Execution Service does not interpret. |
 | `created_at` | When the row was inserted — after the substrate completed. |
 
-A ModelCall does **not** record prompts, messages, completion text, or reasoning content. Those live on the bound ContextManifest (input shape) and on the substrate's response payload (output, returned to the caller and not durably stored on the ModelCall row). What the row preserves is the relationship between the manifest, the substrate, and the cost.
+Prompts, messages, completion text, and reasoning content live on the bound ContextManifest (input shape) and on the substrate's response payload (output, returned to the caller). The ModelCall row preserves the relationship between the manifest, the substrate, and the cost.
 
 ## The `context_manifest_id` FK is load-bearing
 
@@ -72,7 +72,7 @@ A Step with zero ModelCalls has zero cost — its presence on the timeline is in
 
 ## Token accounting
 
-Token counts on a ModelCall are **real measurements from the substrate**, never client-side estimates. Three values matter:
+Token counts on a ModelCall are **real measurements from the substrate**. Three values matter:
 
 - **`prompt_tokens`** — total tokens the model saw on input.
 - **`completion_tokens`** — total tokens the model produced.
@@ -160,13 +160,6 @@ Two events on the execution stream make a ModelCall observable:
 | `ks.model_call.completed` | Substrate returns; the ModelCall row is inserted. |
 
 Each event carries `run_id`, `step_id`, `model_call_id`, `context_manifest_id`, `model_id`, `node_id`, and `tenant_id` / `project_id` in its envelope.
-
-## What a ModelCall is not
-
-- **Not a request.** A request is the gateway-level transaction that may produce one or several ModelCalls (parallel structured-output calls, side-channel reasoning calls, retries against a fallback model). The ModelCall is the substrate-level record.
-- **Not the cost authority for the Run.** The Run's accumulated cost is the sum of its ModelCalls, but the **metering record** is the canonical billing surface. ModelCalls are the per-call detail; metering is the rolled-up source of truth for budgets and chargeback.
-- **Not the prompt or response.** The bound ContextManifest carries the input shape; the response payload is returned to the caller. The ModelCall row carries the relationship and the accounting, not the content.
-- **Not retriable in place.** A failed substrate call inserts a ModelCall row that records the failure; a retry is a new ModelCall under a (possibly new) Step. The row is the durable evidence of what happened.
 
 ## See also
 

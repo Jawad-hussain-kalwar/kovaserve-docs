@@ -114,12 +114,11 @@ A more-specific level can narrow but not widen. A Project policy that adds a mod
 
 The resolved values are denormalized onto the Run row at creation time. Subsequent changes at any level do not retroactively modify in-flight Runs — see [PolicyScope](/docs/concepts/policy/policy-scopes) for the freezing semantics.
 
-## What tenancy is not
+## Tenancy and authorization
 
-- **Not authorization on its own.** Tenancy scopes resources. [PolicyScope](/docs/concepts/policy/policy-scopes) decides whether the authenticated identity is allowed to act on those resources.
-- **Not network isolation.** Tenancy is a logical model. Network-level isolation (VPC, region pinning) is a deployment property carried in `data_boundary` on the resolved PolicyScope.
-- **Not user identity.** A Key is a service credential. End-user identity is the application's concern; KovaServe records the Key that produced each request and the application is responsible for mapping users to Keys.
-- **Not editable on a live Run.** A Run's resolved `(tenant_id, project_id, environment_id, key_id)` is frozen at creation. Re-parenting is not an operation.
+Tenancy scopes resources. [PolicyScope](/docs/concepts/policy/policy-scopes) decides whether the authenticated identity is allowed to act on them. Network-level isolation (VPC, region pinning) is a deployment property carried in `data_boundary` on the resolved PolicyScope; the four-level hierarchy itself is the logical model that those deployment topologies realize. End-user identity belongs to the application — KovaServe records the [Key](/docs/concepts/tenancy/keys) that produced each request, and the application maps users to Keys.
+
+The resolved `(tenant_id, project_id, environment_id, key_id)` is frozen on a Run at creation. New tenancy decisions take effect on the next Run.
 
 ## See also
 

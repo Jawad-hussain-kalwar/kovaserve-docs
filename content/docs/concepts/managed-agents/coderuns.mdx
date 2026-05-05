@@ -5,7 +5,7 @@ description: Managed coding and technical agents on the Agentic Execution Cloud 
 
 **CodeRuns** is the managed-agent SKU for running coding and technical agents as durable, governed executions on the Agentic Execution Cloud. A CodeRun receives a software engineering task, reads the repository, runs tools, makes file changes, checkpoints before risky actions, recovers from failure, respects budget, blocks unsafe commands, and produces a final diff with a complete execution timeline.
 
-CodeRuns is the first reference workload — the proof that managed agents are a product category, not a demo. It is intentionally narrow: software engineering work, sandbox-heavy, file-mutating, tool-heavy, long-running. The SKU is the proof; the company is the broader [Agentic Execution Cloud](/docs/concepts/managed-agents).
+CodeRuns is one of three reference SKUs on the [Agentic Execution Cloud](/docs/concepts/managed-agents). The SKU is shaped for software engineering work — sandbox-heavy, file-mutating, tool-heavy, long-running.
 
 ```
             task                                                final diff
@@ -38,7 +38,7 @@ A CodeRun is a durable run that performs software engineering work against a cus
 8. **Recover or branch.** If a step fails, the CodeRun resumes from the last checkpoint paying only for the new work. If a different approach is wanted, a branch from a checkpoint creates a parallel CodeRun lineage.
 9. **Complete.** The CodeRun finishes with a final diff (or a final patch artifact), a full execution timeline, the cost per completed run, and a policy-clean audit trail.
 
-A CodeRun is what *production-ready* coding agents look like. The execution boundary is the product — the repository, the sandbox, the tools, the budget, the recovery, the audit trail are all governed by the platform, not bolted onto the agent code.
+A CodeRun is what production-ready coding agents look like. The execution boundary is the product — the repository, the sandbox, the tools, the budget, the recovery, and the audit trail are all governed by the platform.
 
 ## Use cases
 
@@ -50,7 +50,7 @@ A CodeRun is what *production-ready* coding agents look like. The execution boun
 | Migration assistance | Applies a defined migration across the codebase — framework upgrade, dependency replacement, lint rule rollout — with checkpoints between each batch and a final patch covering all changes. |
 | CI failure investigation | Pulls the CI log, reproduces the failure inside the sandbox, traces it to the offending change, proposes a fix or escalates with a structured report. |
 
-These are not exhaustive — they are the workloads the CodeRuns SKU is shipped against and proven on.
+These are the workloads the CodeRuns SKU ships against and is proven on.
 
 ## What CodeRuns is built on
 
@@ -115,12 +115,6 @@ If the CodeRun fails, the same surfaces are available for the partial work plus 
 A CodeRun is **branchable**. From any checkpoint or stable point, an operator (or another agent) can create a parallel CodeRun that starts from the same workspace state, the same context manifest, and the same runtime-local state — but with different inputs, a different budget, or a different prompt.
 
 This is what makes the SKU *replayable*: a coding agent that produced a controversial diff can be re-run with stricter policy; a migration that worked in one batch can be branched per repository; a failed investigation can be branched to try an alternative hypothesis without losing the original.
-
-## What CodeRuns is not
-
-- **Not a coding-agent framework.** CodeRuns is a managed-agent SKU; the framework underneath (the planner, the prompt, the tool list) is the *configuration*, not the product.
-- **Not unbounded.** Every CodeRun runs under a budget, a context budget, a policy scope, and a sandbox. There is no path to a runaway loop.
-- **Not the company.** [CodeRuns is one of three reference SKUs](/docs/concepts/managed-agents). [OpsRuns](/docs/concepts/managed-agents/opsruns) and [DocRuns](/docs/concepts/managed-agents/docruns) cover the other reference workloads. The Agentic Execution Cloud is the company.
 
 ## See also
 

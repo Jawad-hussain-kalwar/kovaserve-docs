@@ -5,7 +5,7 @@ description: The Step FSM — six statuses, one linear path from PENDING to a te
 
 The **Step state machine** is the lifecycle every [Step](/docs/concepts/run-hierarchy/steps) travels from creation to termination. It has six statuses and a strict, linear shape: a Step starts in `PENDING`, moves to `STARTED` when work begins, and ends in exactly one of four terminal statuses — `SUCCEEDED`, `FAILED`, `SKIPPED`, or `CANCELED`.
 
-The FSM is intentionally simple. Steps are not transactions and not synchronization primitives; they are typed progression markers. Their state machine records *whether the marker fired* and *how it resolved*, nothing more. The richer lifecycle of long-running execution — pauses, resumes, checkpoints, branches — lives on the [Run state machine](/docs/concepts/run-hierarchy/run-state-machine).
+The FSM is intentionally simple. Steps are typed progression markers; their state machine records *whether the marker fired* and *how it resolved*. The richer lifecycle of long-running execution — pauses, resumes, checkpoints, branches — lives on the [Run state machine](/docs/concepts/run-hierarchy/run-state-machine).
 
 ## The graph
 
@@ -24,7 +24,7 @@ Two non-substrate paths are legal:
 - A `PENDING` Step can transition directly to `SKIPPED` if the runtime decides the Step should not execute (e.g. a `TOOL_PLAN` whose plan resolves to "no tool needed").
 - A `PENDING` Step can transition directly to `CANCELED` if the owning Run is canceled before the Step is admitted to execution.
 
-A `STARTED` Step always reaches one of the four terminal statuses. There is no path back to `PENDING`, and there is no `RESUMED` status — a Step is a single-shot record. If work resumes, a new Step is emitted.
+A `STARTED` Step always reaches one of the four terminal statuses. A Step is a single-shot record; resumed work emits a new Step.
 
 ## Statuses
 
@@ -46,13 +46,13 @@ Work is in progress. For substrate-bound Steps (`MODEL_CALL`, `TOOL_PLAN`), this
 
 The Step's work completed successfully. For substrate-bound Steps, all owned ModelCalls landed and recorded usage. For runtime Steps, the action completed without error. `completed_at` is set; `ks.step.completed` is published with the terminal status.
 
-A `SUCCEEDED` `MODEL_CALL` Step does **not** imply the model produced a useful response — only that the substrate executed and the [ModelCall](/docs/concepts/run-hierarchy/model-calls) row was recorded. The runtime decides whether the response was useful and emits subsequent Steps accordingly.
+A `SUCCEEDED` `MODEL_CALL` Step records that the substrate executed and the [ModelCall](/docs/concepts/run-hierarchy/model-calls) row was written. The runtime decides whether the response was useful and emits subsequent Steps accordingly.
 
 ### `FAILED` (terminal)
 
 The Step's work failed. For substrate-bound Steps, this covers substrate errors, admission-time rejections that escaped the pre-Step gates, and routing failures with no viable fallback. For runtime Steps, this covers the runtime's own classification of failure — a tool that errored, a `FILE_WRITE` blocked by workspace policy, a process that violated its sandbox.
 
-A `FAILED` Step does **not** automatically fail the Run. The runtime decides whether to retry (a new Step), branch off a Checkpoint, or surface the failure as terminal via a `FAIL` Step. The [Run state machine](/docs/concepts/run-hierarchy/run-state-machine) only moves to `FAILED` when failure is unrecoverable at the Run level.
+A `FAILED` Step leaves the Run free to recover. The runtime decides whether to retry (a new Step), branch off a Checkpoint, or surface the failure as terminal via a `FAIL` Step. The [Run state machine](/docs/concepts/run-hierarchy/run-state-machine) moves to `FAILED` only when failure is unrecoverable at the Run level.
 
 ### `SKIPPED` (terminal)
 
@@ -68,7 +68,7 @@ The Step was decided not to execute, with no failure semantics. Reached only fro
 
 The Step was canceled before completion. Reachable from both `PENDING` (Run canceled before Step started) and `STARTED` (Run canceled mid-Step). When canceled from `STARTED`, in-flight ModelCalls are allowed to settle so cost attribution stays accurate; the resulting ModelCall rows are recorded under the canceled Step.
 
-Cancellation propagates from the Run, never from another Step. There is no inter-Step cancellation primitive.
+Cancellation flows from the Run to its Steps. Run cancellation is the single source of cancellation across the Step lifecycle.
 
 ## Step status vs. Run status
 
@@ -86,7 +86,7 @@ The terminal-state guarantee on the Run implies the same on its Steps: when the 
 
 ## Failure recovery is a new Step
 
-The Step state machine has no retry transition by design. A `FAILED` Step is the durable record of what happened; a retry is a new Step. This keeps the timeline honest:
+Retries always create a new Step. The original `FAILED` Step is the durable record of what happened, and the retry has its own ordinal, its own creation time, and its own ModelCalls. This keeps the timeline honest:
 
 - The original failure is queryable forever.
 - The retry has its own `ordinal`, its own `created_at`, and its own ModelCalls.
@@ -115,7 +115,7 @@ Three events on the execution stream make Step transitions observable:
 | `PENDING → STARTED` | `ks.step.started` |
 | `STARTED | PENDING → SUCCEEDED | FAILED | SKIPPED | CANCELED` | `ks.step.completed` |
 
-`ks.step.completed` carries the terminal status in its payload. There is intentionally no per-terminal-status event — consumers filter on the payload, not on the event subject.
+`ks.step.completed` carries the terminal status in its payload. All terminal transitions emit the same subject; consumers filter on the payload.
 
 Each event carries `run_id`, `step_id`, `ordinal`, `step_type`, the transition's previous and new statuses, and `tenant_id` / `project_id` for tenant-safe filtering.
 

@@ -57,7 +57,7 @@ A SKU is the bundle of *what kind of task* the agent does plus *which tools, san
 
 ## The first-party SKU set
 
-KovaServe ships three reference SKUs, picked because each represents a distinct shape of agentic work and proves a different set of platform capabilities. None of them is the company — they are the proof workloads.
+KovaServe ships three reference SKUs, each shaped to a distinct kind of agentic work and exercising a different set of platform capabilities. They are designed to be adopted as-is, extended for a customer's domain, or rebranded by a partner.
 
 | SKU | Workload shape | Use cases |
 |---|---|---|
@@ -92,7 +92,7 @@ A managed agent is reachable through whatever surface its operator chooses to ex
 - An enterprise platform team's internal portal, where business units submit tasks against pre-approved agents.
 - An AI-native SaaS product's API, where the customer's user submits a task and the product translates it into a managed run.
 
-Underneath, the consumer surface posts a task into the agent's `POST /v1/ks/runtime/runs` endpoint or its OpenAI-compatible inference endpoint with the [`kovaserve` envelope](/docs/api/inference/extension-envelope) and waits for the `COMPLETED` outcome. The completed run carries its full execution history, its cost per completed run, and its outputs.
+Underneath, the operator's backend posts a task into the agent's `POST /v1/ks/runtime/runs` endpoint or its OpenAI-compatible inference endpoint with the [`kovaserve` envelope](/docs/api/inference/extension-envelope) and waits for the `COMPLETED` outcome. The completed run carries its full execution history, its cost per completed run, and its outputs.
 
 ## Cost per completed run is the metric
 
@@ -103,14 +103,6 @@ The headline metric for every managed-agent SKU is [cost per completed run](/doc
 - per-deployment, for the buyer (what do my managed agents cost this month?)
 
 This is the metric that makes managed agents a *product*: priced and governed in the same shape across every customer, every workload, every deployment.
-
-## What a managed agent is not
-
-- **Not an inference endpoint.** A token-priced API call is not a managed agent. Managed agents complete tasks; tasks span many calls and many tools.
-- **Not a fixed workflow.** Managed agents reason inside a controlled execution boundary; they are not statically defined DAGs.
-- **Not a bespoke implementation.** A SKU is a *repeatable product* — the same SKU runs across customers with their own data, their own policies, and their own deployment.
-- **Not a coding-agent product.** [CodeRuns](/docs/concepts/managed-agents/coderuns) is the first reference workload. The SKU model — and the company — is broader.
-- **Not a SaaS lock-in.** Managed agents run on managed cloud, on partner clouds, on private deployments, and on sovereign clouds. Same SKU, different topology.
 
 ## Building your own SKU
 

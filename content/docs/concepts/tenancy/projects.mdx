@@ -97,7 +97,7 @@ Project-level totals are sums over `usage_records` rows tagged with the Project'
 | Per-Run breakdown | `GET /v1/ks/metering/usage?scope=project&project_id=...&group_by=run` |
 | JSONL export | `GET /v1/ks/metering/export?scope=project&project_id=...` |
 
-`scope=project` with an unknown `project_id` returns `200` with zero counts, not `404` — see [ADR-023 error semantics](/docs/concepts/cost/cost-model#aggregation).
+`scope=project` with an unknown `project_id` returns `200` with zero counts rather than `404` — see [cost-model aggregation](/docs/concepts/cost/cost-model#aggregation) for the full error envelope.
 
 ## Archival
 
@@ -111,14 +111,11 @@ A Project can be moved to `ARCHIVED`. The effect is structural:
 | New Keys | Cannot be issued against an Archived Project. |
 | Existing Keys | Continue to authenticate but every admission attempt rejects. |
 
-Archival is reversible: an ARCHIVED Project can be moved back to ACTIVE. Existing data — Sessions, Runs, ContextArtifacts — is not touched.
+Archival is reversible: an ARCHIVED Project can be moved back to ACTIVE. Existing data — Sessions, Runs, ContextArtifacts — is preserved across archival.
 
-## What a Project is not
+## Project as a scope
 
-- **Not the tenancy root.** The Tenant is the tenancy root; the Project is one level beneath.
-- **Not a deployment.** A Project's Runs may execute against multiple deployments (per Environment) — see [environments](/docs/concepts/tenancy/environments).
-- **Not a cache key.** The cache namespace is computed from `(tenant_id, project_id, context_share_scope)` plus the manifest's `stable_context_id`. The Project ID alone does not key cache lookups; it scopes them.
-- **Not deletable in-place.** Projects are archived, not deleted. Hard deletion of historical data follows the data-retention contract on the Tenant, not a Project-level operation.
+A Project sits one level beneath the Tenant in the tenancy root and one level above Environments. Its Runs execute against deployments selected per [Environment](/docs/concepts/tenancy/environments), and the Project ID scopes cache lookups rather than keying them — the cache namespace is computed from `(tenant_id, project_id, context_share_scope)` together with the manifest's `stable_context_id`. Hard deletion of historical data follows the data-retention contract on the Tenant.
 
 ## See also
 

@@ -8,7 +8,7 @@ The KovaServe runtime drives a [Run](/docs/concepts/run-hierarchy/runs) forward 
 This page describes the *semantics* of that loop — what the runtime guarantees, what each phase does, and what the contract is between Worker, sandbox, control plane, and substrate.
 
 ```
-            ┌────────────── canonical Run state machine (Layer 2) ──────────────┐
+            ┌────────── canonical Run state machine (control plane) ───────────┐
 Run.status: │ CREATED ─▶ READY ─▶ RUNNING ─▶ ... ─▶ COMPLETED | FAILED | ...   │
             └───────────────────────────────────────────────────────────────────┘
                               ▲                  ▲
@@ -29,18 +29,18 @@ Run.status: │ CREATED ─▶ READY ─▶ RUNNING ─▶ ... ─▶ COMPLETED 
 
 ## The progression model
 
-Every Run is a sequence of Steps, and every Step has a type drawn from the [canonical enum](/docs/concepts/run-hierarchy/step-types) maintained in the control plane's `schemas/execution.py`. The runtime uses that enum directly — it does not invent a parallel one.
+Every Run is a sequence of Steps, and every Step has a type drawn from the [canonical Step types](/docs/concepts/run-hierarchy/step-types) maintained by the control plane. The runtime uses that set directly.
 
 | Group | Step types | Who emits |
 |---|---|---|
 | Standard agent loop | `MODEL_CALL`, `TOOL_PLAN`, `TOOL_EXECUTE` | Every runtime |
 | Workspace and process | `FILE_READ`, `FILE_WRITE`, `PROCESS_START` | KovaServe runtime in sandbox-bound modes |
-| Reflection markers | `OBSERVE`, `THINK` | Optional, runtime's choice |
-| Durability and lineage | `CHECKPOINT`, `PAUSE`, `RESUME`, `BRANCH` | Runtime + control plane |
+| Reflection markers | `OBSERVE`, `THINK` | Optional, at the runtime's choice |
+| Durability and lineage | `CHECKPOINT`, `PAUSE`, `RESUME`, `BRANCH` | Runtime and control plane |
 | Terminal | `COMPLETE`, `FAIL` | Runtime |
 | Context engineering | `COMPACT` | Runtime, when participating |
 
-Validation is application-level — Step type is a `TEXT` column with an enum check — so new types extend the canonical list without a DDL migration. Step types are an enumeration distinct from the [event taxonomy](/docs/concepts/events); a runtime *event* like `ks.process.waiting` does not require its own Step type.
+The Step type set is extensible — new types can be added without a schema migration. Step types are a separate enumeration from the [event taxonomy](/docs/concepts/events); a runtime *event* such as `ks.process.waiting` flows through the event stream on its own without requiring a corresponding Step type.
 
 ## The Worker loop
 
@@ -60,7 +60,7 @@ The Worker decides the next Step type and dispatches the corresponding action:
 
 | Phase | Action |
 |---|---|
-| `MODEL_CALL` | Build the prompt, dispatch through `POST /v1/chat/completions` with the canonical `kovaserve` extension envelope. The control plane assembles the [ContextManifest](/docs/concepts/context/context-manifests), runs [admission](/docs/concepts/policy/admission), routes through the [Cache-Aware Router](/docs/concepts/routing/manifest-aware-routing), executes on the substrate, and records the [ModelCall](/docs/concepts/run-hierarchy/model-calls). The Worker receives the response and the cost breakdown. |
+| `MODEL_CALL` | Build the prompt and dispatch through `POST /v1/chat/completions` with the canonical `kovaserve` extension envelope. The control plane assembles the [ContextManifest](/docs/concepts/context/context-manifests), runs [admission](/docs/concepts/policy/admission), routes through the [Cache-Aware Router](/docs/concepts/routing/manifest-aware-routing), executes on the substrate, and records the [ModelCall](/docs/concepts/run-hierarchy/model-calls). The Worker receives the response and the cost breakdown. |
 | `TOOL_PLAN` | A `MODEL_CALL` whose response is structured tool selection. Often paired with a child `TOOL_EXECUTE` Step. |
 | `TOOL_EXECUTE` | Dispatch the chosen [tool invocation](/docs/concepts/runtime/tool-invocations) through the Tool Gateway. Large tool outputs may land in a [ContextArtifact](/docs/concepts/context/context-artifacts). |
 | `FILE_READ` / `FILE_WRITE` | File operations against the [workspace](/docs/concepts/runtime/workspaces). Subject to workspace read/write policy; diffs surface as [WorkspaceArtifacts](/docs/concepts/runtime/workspace-artifacts). |
@@ -79,7 +79,7 @@ The [Checkpoint Integration Module](/docs/concepts/runtime/runtime-architecture#
 - before risky file mutations (`FILE_WRITE` against protected paths)
 - before unsafe shell actions (`PROCESS_START` of `rm`, `git push`, network calls without policy)
 - after stable analysis phases (a `THINK` Step that completes a planning block)
-- on budget warning (the Layer 2 [Budget](/docs/concepts/policy/budgets) emitted `ks.budget.warning`)
+- on budget warning (the run-level [Budget](/docs/concepts/policy/budgets) emitted `ks.budget.warning`)
 - on schedule (periodic, configured per agent)
 - on explicit runtime request
 
@@ -97,9 +97,9 @@ Only safe and idempotent runtime steps retry in place. The default rules:
 |---|---|
 | `MODEL_CALL` | Retried automatically on transient substrate failures (timeouts, transient routing failures). The same [ContextManifest](/docs/concepts/context/context-manifests) is reused; idempotency keys at the [API level](/docs/api/idempotency) prevent double-billing on retried success. |
 | `TOOL_EXECUTE` against an idempotent tool | Retried in place. The runtime marks tools as idempotent at registration time. |
-| `TOOL_EXECUTE` against a non-idempotent tool | Not retried in place. The runtime escalates to a [resume](/docs/concepts/recovery/resume-flow) from the previous Checkpoint or fails the Run. |
-| `FILE_WRITE` | Not retried in place. Resumes from the last Checkpoint that preceded the write. |
-| `PROCESS_START` | Not retried in place. The process is considered observed; the runtime resumes from the previous Step. |
+| `TOOL_EXECUTE` against a non-idempotent tool | Escalates rather than retrying in place — the runtime [resumes](/docs/concepts/recovery/resume-flow) from the previous Checkpoint or fails the Run. |
+| `FILE_WRITE` | Escalates rather than retrying in place — resumes from the last Checkpoint that preceded the write. |
+| `PROCESS_START` | Escalates rather than retrying in place — the process is considered observed and the runtime resumes from the previous Step. |
 | `COMPACT` | Idempotent — keyed by `(source_manifest, source_segment_ids)`. |
 
 See [retries](/docs/concepts/recovery/retries) for the full retry contract and [resume flow](/docs/concepts/recovery/resume-flow) for the alternative path when in-place retry is unsafe.
@@ -127,19 +127,19 @@ Workers in modes that use a [sandbox](/docs/concepts/runtime/sandboxes) execute 
 
 The Worker treats the sandbox as the execution surface for `FILE_READ`, `FILE_WRITE`, `PROCESS_START`, and any tool that touches the workspace. Tool invocations whose tool class is purely outbound (HTTP/API) may run from the Worker side under the same governance — but the default for a sandbox-bound agent is sandbox-side execution.
 
-## Layer 2 round-trips
+## Control-plane round-trips
 
-Every Step that interacts with the substrate or with canonical context state goes through Layer 2 — never around it.
+Every Step that interacts with the substrate or with canonical context state goes through the control plane.
 
-| Action | Layer 2 surface |
+| Action | Control-plane surface |
 |---|---|
-| Issue a model call | `POST /v1/chat/completions` with `kovaserve` envelope |
+| Issue a model call | `POST /v1/chat/completions` with the `kovaserve` envelope |
 | Capture a checkpoint | [Checkpoint Manager](/docs/concepts/recovery/checkpoints) |
 | Record a CompactionRecord | [Compaction Lineage Service](/docs/concepts/context/compaction-records) |
 | Offload a tool result or file | [ContextArtifact Store](/docs/concepts/context/context-artifacts) |
 | Resolve a State Handle | [State Handle Registry](/docs/concepts/recovery/state-handles) |
 
-This is the property that makes the runtime composable. Anything a [BYO runtime](/docs/concepts/deployment/byo-runtime) sees through these APIs, the KovaServe runtime sees through them too — same contract, same guarantees.
+The runtime and a [BYO runtime](/docs/concepts/deployment/byo-runtime) integration consume the same APIs and receive the same contract and guarantees. Anything visible through these surfaces in one mode is visible through them in the other.
 
 ## Failure classification
 

@@ -5,7 +5,7 @@ description: Managed agents for IT, cloud, and security operations on the Agenti
 
 **OpsRuns** is the managed-agent SKU for IT, cloud, and security operations — incident investigations, log analysis, runbook execution, infrastructure diagnostics, and policy-controlled remediation. An OpsRun receives an operational task, pulls the relevant logs and metrics, walks the runbook, calls the diagnostic tools, gates any remediation behind explicit policy, recovers from intermediate failures, respects budget, and produces an auditable outcome.
 
-OpsRuns is the SKU that proves the platform on workloads where **policy and audit are non-negotiable** — where the wrong tool call has business consequences and every action needs to be explainable to a security or compliance reviewer.
+OpsRuns is shaped for workloads where **policy and audit are non-negotiable** — where the wrong tool call has business consequences and every action needs to be explainable to a security or compliance reviewer.
 
 ```
        incident / alert / ticket                            outcome + audit trail
@@ -36,7 +36,7 @@ The reference OpsRun flow:
 6. **Recover.** A failed step does not lose the investigation. The OpsRun resumes from the last checkpoint, paying only for the new work.
 7. **Complete.** The OpsRun ends with a structured outcome — root cause, evidence trail, actions taken (if any), recommendations, and a full policy audit.
 
-The point of an OpsRun is *not* automation for its own sake. It is **governed automation** — the kinds of investigations and remediations a team would otherwise do by hand, performed reliably under explicit budget and policy with an auditable trail.
+An OpsRun is **governed automation** — the kinds of investigations and remediations a team would otherwise do by hand, performed reliably under explicit budget and policy with an auditable trail.
 
 ## Use cases
 
@@ -109,12 +109,9 @@ OpsRuns is designed for environments where *every action must be explainable*. T
 - **Operator-in-the-loop gates.** Specific tool invocations or runbook steps can require explicit operator approval before proceeding. The OpsRun pauses at the gate and resumes when approval is recorded.
 - **Audit retention.** OpsRun timelines, evidence packs, and policy decisions are retained under the data-boundary and audit retention configured on the deployment's policy scope. The export endpoint produces a one-line-per-record JSONL stream suitable for SIEM ingestion or compliance archive.
 
-## What OpsRuns is not
+## Integration with existing operations tooling
 
-- **Not auto-remediation by default.** OpsRuns *can* remediate, but only when the policy scope explicitly allows it. The default is read-only diagnosis with recommendations.
-- **Not a logging product.** OpsRuns reads logs and metrics from the customer's existing observability surfaces; it does not replace them.
-- **Not a SOAR replacement.** OpsRuns covers the agent execution and governance surface. Customers with existing SOAR or runbook automation can dispatch OpsRuns from inside those systems and feed outcomes back.
-- **Not unbounded investigation.** Every OpsRun runs under a budget, a context budget, and a tool policy. A diagnostic that goes nowhere ends within its budget; a remediation that hits a gate stops at the gate.
+OpsRuns reads logs and metrics from the customer's existing observability surfaces. Customers with existing SOAR or runbook automation can dispatch OpsRuns from inside those systems and feed outcomes back — the OpsRun covers the agent execution and governance surface, and the surrounding tooling continues to own the rest of the operational lifecycle.
 
 ## See also
 

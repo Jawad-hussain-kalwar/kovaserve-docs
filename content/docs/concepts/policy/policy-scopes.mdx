@@ -5,7 +5,7 @@ description: The PolicyScope entity — the normalized governance binding that t
 
 A **PolicyScope** is the normalized governance binding that attaches to every [Run](/docs/concepts/run-hierarchy/runs), [ModelCall](/docs/concepts/run-hierarchy/model-calls), and [Checkpoint](/docs/concepts/recovery/checkpoints). It carries model ACLs, rate limits, share-scope rules, data boundary constraints, environment/deployment restrictions, and tool policy enrichment fields.
 
-PolicyScopes are owned by the **Policy / Governance Layer**. Every request resolves to exactly one PolicyScope through the tenant hierarchy; allow/deny/degrade decisions are explainable and auditable.
+Every request resolves to exactly one PolicyScope through the tenant hierarchy. Allow, deny, and degrade decisions are explainable and auditable.
 
 ## What a PolicyScope binds
 
@@ -15,7 +15,7 @@ PolicyScopes are owned by the **Policy / Governance Layer**. Every request resol
 | `rate_limits` | Per-tenant / project / environment rate limits in requests per second and tokens per second. |
 | `context_share_scope` | Cache and manifest reuse boundary: `none` / `project` / `tenant`. Controls cross-Run KV cache and manifest-tier reuse. The `tenant` enum value is the wire token for tenant-wide reuse. |
 | `data_boundary` | Artifact and context residency constraint: `tenant_local` / `region_local` / `unrestricted`. The `tenant_local` enum value pins residency to tenant-allocated storage. |
-| `tool_policy_ref` | Reference to a tool policy applied at admission. The tool policy is a closed Layer-2 enrichment field — it gates which tools the resolved scope may invoke and is evaluated alongside `model_acl`. |
+| `tool_policy_ref` | Reference to a tool policy applied at admission. The tool policy gates which tools the resolved scope may invoke and is evaluated alongside `model_acl`. |
 | `deployment_restrictions[]` | Deployment ids the scope may execute against; empty = all deployments in scope. |
 | `environment_restrictions[]` | Environment ids — typically `prod` / `staging` / `dev`. |
 | `degraded_mode_policy` | Whether `DEGRADE` admission decisions are accepted, rejected, or warn-only. |
@@ -42,7 +42,7 @@ Resolved PolicyScope (frozen on the Run)
 
 Each layer overlays the previous one — a more-specific layer can narrow but not widen. A Project policy that adds a model to the ACL when the Tenant policy excludes it has no effect; the Tenant exclusion wins.
 
-The resolved scope is denormalized onto the Run row so subsequent Steps and ModelCalls do not re-resolve.
+The resolved scope is recorded on the Run so subsequent Steps and ModelCalls do not re-resolve. API keys are issued bound to a PolicyScope at the project or environment layer — the key carries bearer identity, while the resolved scope carries the policy itself.
 
 ## Decision shape
 
@@ -66,7 +66,7 @@ The reuse boundary for cache and manifest-tier reuse:
 | `project` | Reuse across Runs in the same project. The default for managed cloud workloads. |
 | `tenant` | Reuse across Runs in the same tenant, across projects. Used for shared-tenant deployments. |
 
-`context_share_scope` is a hard scope filter on routing. The [Cache-Aware Router](/docs/concepts/routing/manifest-aware-routing) only considers replicas whose cache origin agrees with the resolved `context_share_scope`. A request from a `project`-scoped Run cannot route to a replica warmed by a different project even if the cache content would otherwise match.
+`context_share_scope` is a hard scope filter on routing. The [manifest-aware router](/docs/concepts/routing/manifest-aware-routing) only considers replicas whose cache origin agrees with the resolved `context_share_scope`. A request from a `project`-scoped Run cannot route to a replica warmed by a different project even if the cache content would otherwise match.
 
 ## `data_boundary`
 
@@ -128,13 +128,6 @@ Content-Type: application/json
 | [Resume](/docs/concepts/recovery/resume-flow) | The resumed Run must satisfy the Checkpoint's recorded scope. |
 
 A scope is monotonically narrowing across lineage. There is no path that widens scope without an out-of-band administrative grant.
-
-## What PolicyScopes are not
-
-- **Not API keys.** API keys are bound to a PolicyScope at issuance; the key is the bearer, the scope is the policy.
-- **Not [Budgets](/docs/concepts/policy/budgets).** Budgets bound resource consumption; PolicyScopes bound *what is allowed*.
-- **Not free-form.** The fields are closed; new policy dimensions require ADR-driven extension.
-- **Not retroactively mutable.** Scope changes apply to new Runs only; in-flight Runs run under the scope frozen at creation.
 
 ## See also
 

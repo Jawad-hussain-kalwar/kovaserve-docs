@@ -3,7 +3,7 @@ title: KovaServe runtime mode
 description: The opinionated managed runtime mode for coding, terminal, and tool-heavy long-running agents — workspace, sandbox, tool registry, checkpoint triggers, branch lineage, and a runtime-native timeline, all wired into the same canonical execution model.
 ---
 
-**KovaServe runtime mode** is the product mode where the runtime, the sandbox, the workspace, the tool gateway, and the checkpoint trigger rules all live inside KovaServe. It is the opinionated alternative to [BYO runtime mode](/docs/concepts/deployment/byo-runtime), built for the focused wedge — coding, terminal, tool-heavy, filesystem- and process-heavy long-running agents — where tighter coupling between runtime semantics and control-plane semantics produces clearly better outcomes.
+**KovaServe runtime mode** is the product mode where the runtime, the sandbox, the workspace, the tool gateway, and the checkpoint trigger rules all live inside KovaServe. It is the opinionated alternative to [BYO runtime mode](/docs/concepts/deployment/byo-runtime), built for coding, terminal, tool-heavy, and filesystem- or process-heavy long-running agents, where tighter coupling between runtime semantics and control-plane semantics produces clearly better outcomes.
 
 ```
 agent spec  ──▶  KovaServe runtime  ──▶  KovaServe control plane  ──▶  vLLM substrate
@@ -31,7 +31,7 @@ A team building a long-running coding agent picks this mode when the workspace, 
 
 ## What the runtime owns
 
-The [runtime architecture](/docs/concepts/runtime/runtime-architecture) breaks the runtime into the subsystems below. Each is a Layer 3 component that uses canonical Layer 2 entities — it does not invent parallel ones.
+The [runtime architecture](/docs/concepts/runtime/runtime-architecture) breaks the runtime into the subsystems below. Each is a Layer 3 component that uses the canonical Layer 2 entities directly.
 
 | Subsystem | Owns |
 |---|---|
@@ -60,7 +60,7 @@ The runtime uses **typed step progression** drawn from the canonical `StepType` 
 | Terminal | `COMPLETE`, `FAIL` |
 | Context engineering | `COMPACT` |
 
-See [step types](/docs/concepts/run-hierarchy/step-types) for the full reference. Validation is application-level, so new types extend the canonical list without DDL changes.
+See [step types](/docs/concepts/run-hierarchy/step-types) for the full reference. Validation is application-level, so the canonical list grows as the runtime evolves.
 
 ## Developer flow
 
@@ -114,7 +114,7 @@ Response:
 }
 ```
 
-The Run progresses through the canonical [12-state Run FSM](/docs/concepts/run-hierarchy/run-state-machine) — not a runtime-private state machine.
+The Run progresses through the canonical [12-state Run lifecycle](/docs/concepts/run-hierarchy/run-state-machine) — the same state machine every Run uses across both product modes.
 
 ## What the runtime adds on top of BYO mode
 
@@ -134,7 +134,7 @@ Everything BYO mode delivers is also delivered here. On top, the managed runtime
 
 ## Boundary with the control plane
 
-The runtime does not duplicate Layer 2. It uses the canonical entities directly:
+The runtime uses the canonical Layer 2 entities directly:
 
 - A runtime [Worker](/docs/concepts/runtime/workers) calling a model goes through the same `POST /v1/chat/completions` path that BYO mode uses, with the same `kovaserve` extension envelope. The runtime fills the envelope; the control plane records the [ModelCall](/docs/concepts/run-hierarchy/model-calls) under the right [Step](/docs/concepts/run-hierarchy/steps).
 - A runtime [Checkpoint](/docs/concepts/recovery/checkpoints) is a Layer 2 Checkpoint with a `runtime_state` [StateHandle](/docs/concepts/recovery/state-handles) attached. Restore goes through the same logical-context-first [resume flow](/docs/concepts/recovery/resume-flow).

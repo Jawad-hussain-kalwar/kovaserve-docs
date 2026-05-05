@@ -28,13 +28,13 @@ Properties:
 
 Entities that use bare ULIDs include `run_id`, `step_id`, `model_call_id`, `checkpoint_id`, `context_manifest_id`, `context_segment_id`, `context_artifact_id`, `compaction_record_id`, `budget_id`, `context_budget_id`, `policy_scope_id`, `state_handle_id`, `tenant_id`, `project_id`, `environment_id`, `key_id`, and `event_id` envelope fields.
 
-## Why bare, not prefixed
+## Why bare ULIDs
 
-Most entities do **not** carry an entity-type prefix (e.g. `run_01J8X9...`). The reasons:
+The bare-ULID convention gives KovaServe three benefits:
 
-- **Clients should not infer entity type from an ID.** The path the ID arrived on, the context it was returned in, or the API call being made carry the type. Prefixes encourage clients to parse the ID, which couples them to a representation that is not part of the contract.
+- **Stable client contracts.** The path the ID arrived on, the context it was returned in, or the API call being made carry the entity type. Clients address entities by ID + context.
 - **Storage and indexing efficiency.** A 26-character fixed-length string indexes more cheaply than a variable-length prefixed string and joins more cheaply across foreign keys.
-- **Cross-vendor convergence.** Vendors that use prefixes (`asst_`, `thread_`, `run_`) have ended up with prefix proliferation as their entity counts grew. KovaServe avoids that future cost.
+- **Forward-compatible identity.** The bare form scales as the entity catalog grows; new entity types adopt the same shape without prefix coordination.
 
 The single exception below is taken deliberately and only for one entity.
 
@@ -52,7 +52,7 @@ The 24-hex form is its own format, not a ULID with a prefix. Properties:
 
 - **Case-sensitive.** Lowercase canonical; uppercase is rejected on input.
 - **96 bits of entropy.** Sufficient for tenant-scoped uniqueness.
-- **Not lexicographically sortable by time.** Sessions are listed by `created_at`, not by ID.
+- **Sortable by `created_at`.** Session listings sort by creation time.
 
 This is the only entity whose ID format developers need to remember as different from the rest. Every other ID — `run_id`, `step_id`, `model_call_id`, `checkpoint_id`, `context_manifest_id` — is a bare 26-character Crockford ULID. See [Sessions](/docs/concepts/continuity/sessions#id-format) for the field's full semantics.
 
@@ -77,7 +77,7 @@ Malformed IDs return `400 Bad Request` with `error.code = "invalid_id"` before a
 
 ## ID generation
 
-IDs are generated server-side by the Canonical Execution Service (and by the relevant subsystem owner for non-execution entities) at insert time. Clients do not generate or supply IDs for KovaServe entities.
+IDs are generated server-side by the Canonical Execution Service (and by the relevant subsystem owner for non-execution entities) at insert time. All KovaServe entity IDs are server-generated.
 
 Two reasons:
 
@@ -124,7 +124,7 @@ This is the runtime's own identifier for the work — a LangGraph task ID, a Tem
 
 `external_run_id` is **idempotency-keyed per `(tenant_id, external_runtime, external_run_id)`**. Reusing an `external_run_id` under the same Tenant and runtime returns the existing Run rather than creating a duplicate. This makes it safe for runtimes that crash and replay their own work to call into KovaServe at the runtime's own granularity.
 
-`external_run_id` is not the same as the `Idempotency-Key` header. The header protects against duplicate HTTP requests in a short window; `external_run_id` protects against duplicate Runs across the runtime's whole lifetime.
+`external_run_id` and the `Idempotency-Key` header serve different purposes. The header protects against duplicate HTTP requests in a short window; `external_run_id` protects against duplicate Runs across the runtime's whole lifetime.
 
 ## Trace correlation
 
@@ -136,7 +136,7 @@ traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
 
 The header is honored if supplied; otherwise the gateway generates one. The trace ID is recorded on the [ModelCall](/docs/concepts/run-hierarchy/model-calls) and propagated across the gateway → Canonical Execution Service → GCM → Router → Layer 1 path, so a single trace stitches together the gateway request, the manifest assembly, the routing decision, and the substrate execution.
 
-`traceparent` is identity for **correlation across systems**. It is not how you address a Run, a Step, or a ModelCall — those have their own ULIDs. The trace ID and span IDs do not appear on entity rows directly; they live in event envelopes and on the `traceparent` field stored in `model_calls.metadata`.
+`traceparent` is identity for **correlation across systems**. Runs, Steps, and ModelCalls are addressed by their ULIDs; the trace ID and span IDs live in event envelopes and on the `traceparent` field stored in `model_calls.metadata`.
 
 ## Identity is tenant-scoped
 
@@ -144,8 +144,8 @@ Every KovaServe ID is scoped to its owning `(tenant_id, project_id)` pair. Cross
 
 The two consequences:
 
-- An ID alone is not an authorization token. The ID plus the API key's Tenant scope determines what the caller can see.
-- ID collisions across Tenants are not observable. Even if two Tenants somehow generated the same ULID (they will not, but the system does not rely on the assumption), neither would see the other's row.
+- **Authorization requires the API key's Tenant scope.** The ID identifies a row; the caller's scope determines whether the row is visible.
+- **Tenants are isolated.** Even if two Tenants generated the same ULID, each Tenant only sees rows in its own scope.
 
 ## See also
 

@@ -1,11 +1,11 @@
 ---
 title: Pricing snapshots
-description: The `input_price_snapshot`, `output_price_snapshot`, and `discount_snapshot` columns on `usage_records` — frozen rates that make every row self-contained for audit (ADR-022).
+description: The `input_price_snapshot`, `output_price_snapshot`, and `discount_snapshot` columns on `usage_records` — frozen rates that make every row self-contained for audit.
 ---
 
 A **pricing snapshot** is the trio of columns — `input_price_snapshot`, `output_price_snapshot`, `discount_snapshot` — that freeze the model-pricing rates onto every `usage_records` row at compute time. They make each row independently auditable: an auditor can re-derive `cost_cents` from the row alone, without consulting the `model_pricing` table.
 
-Pricing snapshots are how KovaServe handles forward-only re-pricing. Pricing changes do not rewrite history; new rates apply from the moment they land, and every prior row keeps the rate that produced its `cost_cents`. ADR-022 governs the contract.
+Pricing snapshots are how KovaServe handles forward-only re-pricing. Pricing changes do not rewrite history; new rates apply from the moment they land, and every prior row keeps the rate that produced its `cost_cents`.
 
 ## The three columns
 
@@ -21,9 +21,9 @@ The snapshots are written at insert time on the same row as `cost_cents`, `gross
 
 The `model_pricing` table carries the **current** rate for each model. Pricing changes overwrite the row; there is no `effective_from` / `effective_to` window and no separate history table. The snapshot columns substitute for that history at the level that matters — the audit record.
 
-ADR-022 chose this shape over a pricing-history table for three reasons:
+KovaServe chose this shape over a pricing-history table for three reasons:
 
-1. **Self-contained rows.** An auditor reading a single `usage_records` row can re-derive `cost_cents` without joining to a pricing-history table or reasoning about time windows. JSONL exports (ADR-024) carry the snapshots inline so external auditors can verify cost from the export alone.
+1. **Self-contained rows.** An auditor reading a single `usage_records` row can re-derive `cost_cents` without joining to a pricing-history table or reasoning about time windows. JSONL exports carry the snapshots inline so external auditors can verify cost from the export alone.
 2. **No time-windowed joins.** Aggregation queries over `usage_records` do not need `pricing_history JOIN ON time BETWEEN ...` — the snapshot is on the row and the query is a simple SUM.
 3. **Industry convention.** Stripe snapshots `unit_amount_decimal` per invoice line item; AWS Cost and Usage Reports snapshot `UnblendedRate` per line item. Every major billing system snapshots the rate on the usage record.
 
@@ -51,7 +51,7 @@ net_input = input_tokens - (cached_tokens * discount_snapshot)
 cost = net_input        * input_price_snapshot  / 1000 * 100
      + output_tokens    * output_price_snapshot / 1000 * 100
 
-# After HALF_UP quantization to 4-decimal cents (ADR-025):
+# After HALF_UP quantization to 4-decimal cents:
 assert quantized(gross) == row.gross_cost_cents
 assert quantized(cost)  == row.cost_cents
 assert row.gross_cost_cents - row.cost_cents == row.cache_savings_cents
@@ -86,7 +86,7 @@ JSONL export (`GET /v1/ks/metering/export`) emits one line per `usage_records` r
 }
 ```
 
-Decimal columns serialize as decimal-strings (ADR-025) so the recipient does not widen them to IEEE-754 floats and lose precision before re-deriving cost.
+Decimal columns serialize as decimal-strings so the recipient does not widen them to IEEE-754 floats and lose precision before re-deriving cost.
 
 ## Ordering and immutability
 
@@ -103,14 +103,7 @@ This is why the snapshots survive: the row is an audit record, not a working val
 
 ## Anonymous traffic
 
-The v1 anonymous path computes cost and writes snapshots on the same `usage_records` schema. An anonymous row has NULL `run_id`, `step_id`, `model_call_id`, but the snapshot columns are populated identically. JSONL export emits anonymous rows with the same field set; the only difference is the three execution-identity fields are missing.
-
-## What pricing snapshots are not
-
-- **Not the model_pricing table.** `model_pricing` is the live current-rate registry. The snapshots are the historical record of what was applied per row.
-- **Not per-Tenant rates.** A Tenant whose contract specifies a discounted rate has that rate written into the `model_pricing` row that applies to its calls; the snapshot mechanism is the same.
-- **Not editable.** Snapshot columns are immutable post-insert. Manual edits would break the audit identity that downstream systems depend on.
-- **Not present on pre-Slice 7.3 rows.** Rows that predate the snapshot contract were never re-snapshotted (forward-only backfill). Such rows are surfaced through the `cost_status` indicator.
+Calls without a `kovaserve` extension compute cost and write snapshots on the same `usage_records` schema. An anonymous row has NULL `run_id`, `step_id`, `model_call_id`, but the snapshot columns are populated identically. JSONL export emits anonymous rows with the same field set; the three execution-identity fields are simply absent.
 
 ## See also
 

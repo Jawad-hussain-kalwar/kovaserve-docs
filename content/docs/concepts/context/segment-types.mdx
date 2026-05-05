@@ -1,46 +1,46 @@
 ---
 title: Segment types
-description: The canonical `context_type` enum (ADR-003) — the six values, their canonical positions, and how they map onto the four storage tiers GCM v2 uses for prefix breakpoints.
+description: The canonical `context_type` enum — the six values, their canonical positions, and how they map onto the four storage tiers GCM uses for prefix breakpoints.
 ---
 
-The `context_type` field on every [ContextSegment](/docs/concepts/context/context-segments) names the segment's **canonical position** in a [ContextManifest](/docs/concepts/context/context-manifests). The set is closed and defined by ADR-003 — there are exactly six values, in a fixed canonical order. The order is deterministic and renderer-invariant: two assemblies that consume the same input set produce the same segment ordering, which is what makes the manifest's `stable_context_id` stable.
+The `context_type` field on every [ContextSegment](/docs/concepts/context/context-segments) names the segment's **canonical position** in a [ContextManifest](/docs/concepts/context/context-manifests). The set is a closed enum — there are exactly six values, in a fixed canonical order. The order is deterministic and renderer-invariant: two assemblies that consume the same input set produce the same segment ordering, which is what makes the manifest's `stable_context_id` stable.
 
 Runtimes provide *content*; GCM owns *position*. Runtimes do not influence the canonical position assigned to a segment.
 
 ## The six canonical types
 
 ```
-Position 1: system_prompt        ▸ never changes (model instructions)
-Position 2: persistent_context   ▸ rarely changes (RAG docs, tool definitions, activation handles)
-Position 3: summary              ▸ changes on compaction (compacted older history)
-Position 4: session_history      ▸ grows each turn (recent conversation)
+Position 1: persistent_context   ▸ rarely changes (tool definitions, RAG docs, activation handles)
+Position 2: system_prompt        ▸ never changes (model instructions)
+Position 3: session_history      ▸ grows each turn (recent conversation)
+Position 4: summary              ▸ changes on compaction (compacted older history)
 Position 5: agent_state          ▸ changes each agent step (scratchpad, tool plan)
 Position 6: tool_result          ▸ changes every request (latest tool output)
 ```
 
 | `context_type` | Carries | Volatility | `memory_class` (typical) |
 |---|---|---|---|
+| `persistent_context` | Runtime-supplied long-lived material — tool definitions, RAG documents, persistent instructions, [StateHandle](/docs/concepts/recovery/state-handles) references. | Stable. | `tenant`, `project`, or `global`. |
 | `system_prompt` | The system prompt the runtime supplied. | Stable. | `tenant` or `project`. |
-| `persistent_context` | Runtime-supplied long-lived material — RAG documents, tool definitions, persistent instructions, [StateHandle](/docs/concepts/recovery/state-handles) references. | Stable. | `tenant`, `project`, or `global`. |
-| `summary` | Output of compaction. Replaces a span of older `session_history` or `tool_result` segments. Always carries a `compaction_record_id`. | Changes on compaction events. | `session`. |
 | `session_history` | Verbatim turn history from the bound [Session](/docs/concepts/continuity/sessions), back to the most recent compaction point. | Grows each turn. | `session`. |
+| `summary` | Output of compaction. Represents the older history that has been compacted out of `session_history` and is rendered after the verbatim history as a reflective memory blurb. Always carries a `compaction_record_id`. | Changes on compaction events. | `session`. |
 | `agent_state` | The runtime's per-step state — scratchpad, planner output, tool plan, current draft. | Changes each agent step. | `ephemeral` or `session`. |
 | `tool_result` | A tool result that arrived since the last summarization point and is still inline. Large results are offloaded to a [ContextArtifact](/docs/concepts/context/context-artifacts) and the segment carries a preview. | Changes every request. | `session`. |
 
-## Stable prefix versus volatile tail
+## Stable prefix and the cacheable tail
 
 ```
-[ stable prefix ─────────────────── ][ volatile tail ──────────────────────────── ]
-  system_prompt  persistent_context    summary  session_history  agent_state  tool_result
+[ stable_prefix_id range ───── ][ further-cacheable ─────────── ][ volatile tail ── ]
+  persistent_context  system_prompt   session_history  summary   agent_state  tool_result
 ```
 
-Positions 1–2 form the **stable prefix** — if those segments have not changed, the substrate's KV cache is reusable. The legacy `stable_prefix_id` is computed over exactly this range (SHA-256 of the rendered token sequence for `system_prompt + persistent_context`). Positions 3–6 are **volatile** — expected to change call-to-call and appended after the cached prefix.
+Positions 1–2 form the **`stable_prefix_id` range** — if those segments have not changed, the prefix-tier KV cache is reusable. `stable_prefix_id` is computed over exactly this range (SHA-256 of the rendered token sequence for `persistent_context + system_prompt`). Positions 3–4 (`session_history`, `summary`) remain cacheable at finer-grained breakpoints in the four-tier structure described in [context manifests](/docs/concepts/context/context-manifests). Positions 5–6 (`agent_state`, `tool_result`) form the volatile tail, recomputed every call.
 
-This is why `summary` sits at position 3, not folded into `persistent_context`: a compaction event changes the summary, and including it in the stable prefix would invalidate KV cache on every compression.
+This is why `summary` sits at the last prefix tier rather than folded into `persistent_context`: a compaction event changes the summary, and including it in the `stable_prefix_id` range would invalidate the prefix-tier cache on every compression. Placing it at position 4 — after the verbatim `session_history` — keeps the most-stable prefix cacheable while still letting the model see a reflective summary of the older context the compaction replaced.
 
 ## The four storage tiers
 
-GCM v2's manifest table groups the six `context_type` values into **four prefix-tier buckets** so the [Cache-Aware Router](/docs/concepts/routing/manifest-aware-routing) and Anthropic-style prompt cache hints can find their reuse boundary on the same data structure:
+GCM's manifest table groups the six `context_type` values into **four prefix-tier buckets** so the [Cache-Aware Router](/docs/concepts/routing/manifest-aware-routing) and Anthropic-style prompt cache hints can find their reuse boundary on the same data structure:
 
 | Tier ordinal | Tier name | `context_type` values it carries |
 |---|---|---|
@@ -51,14 +51,14 @@ GCM v2's manifest table groups the six `context_type` values into **four prefix-
 
 The tier ordinal lives on the `context_manifest_segments` join row alongside the segment's `ordinal`. The volatile tail (`agent_state`, `tool_result`) is not bucketed into a stable tier — those segments are appended after the four-tier prefix and recomputed every call.
 
-## Position is canonical, not chosen
+## Position is canonical and derived
 
-GCM v2 assigns `context_type` based on input shape:
+GCM assigns `context_type` based on input shape:
 
 - A `messages` entry with `role: system` becomes `system_prompt`.
 - A runtime-supplied retrieval block, tool-definitions block, or [StateHandle](/docs/concepts/recovery/state-handles) reference becomes `persistent_context`.
-- A compaction output becomes `summary`.
 - A turn fetched from the [Session](/docs/concepts/continuity/sessions) Registry becomes `session_history`.
+- A compaction output becomes `summary`.
 - The runtime's per-step scratchpad, planner output, or current draft becomes `agent_state`.
 - A `messages` entry with `role: tool` becomes `tool_result`.
 
@@ -68,14 +68,14 @@ Runtimes do not pass `context_type` directly; it is derived. This is what keeps 
 
 Within a `context_type` the order is also deterministic:
 
-- `system_prompt` — single segment per manifest.
 - `persistent_context` — multiple segments allowed; ordered by the runtime's supplied order, which GCM preserves as long as digests match across calls.
-- `summary` — chronological, oldest first. Each carries `compaction_record_id`.
+- `system_prompt` — single segment per manifest.
 - `session_history` — turn order ascending. A long Session's history is broken into segments at turn boundaries so compaction can target precise spans.
+- `summary` — chronological, oldest first. Each carries `compaction_record_id`.
 - `agent_state` — runtime-supplied order; typically a single segment per call.
 - `tool_result` — turn order ascending.
 
-The order is enforced by GCM v2's serialization step, not by clients. Clients that supply inputs out of order have them re-ordered on their behalf.
+The order is enforced by GCM's serialization step, not by clients. Clients that supply inputs out of order have them re-ordered on their behalf.
 
 ## Mapping to wire `parts`
 
@@ -83,22 +83,26 @@ On the wire, segments serialize as `parts` (cross-vendor convergence — see [Co
 
 | `context_type` | `parts.type` |
 |---|---|
-| `system_prompt`, `persistent_context`, `summary`, `session_history`, `agent_state` | `text` |
+| `persistent_context`, `system_prompt`, `session_history`, `summary`, `agent_state` | `text` |
 | `tool_result` | `tool_result` |
 
 A wire `parts` array can be re-ingested into segments by reading `context_type` (when carried explicitly) or by inferring from `parts.type` plus position.
 
 ## Why the set is closed
 
-A closed `context_type` enum is what makes manifest identity reproducible. If runtimes could invent local types, two semantically identical assemblies would produce different `stable_context_id`s, which would defeat manifest-tier reuse and prevent cross-runtime cache sharing. New types are added through ADR-003 amendment, never through ad-hoc runtime extension.
+A closed `context_type` enum is what makes manifest identity reproducible. If runtimes could invent local types, two semantically identical assemblies would produce different `stable_context_id`s, which would defeat manifest-tier reuse and prevent cross-runtime cache sharing. New types enter the enum through a control-plane release, never through ad-hoc runtime extension.
 
-## What `context_type` is not
+## How `context_type` relates to neighbouring fields
 
-- **Not the wire type.** `parts.type` (`text`, `tool_use`, `tool_result`) is the wire shape; `context_type` is the canonical position. They are independent.
-- **Not memory class.** [`memory_class`](/docs/concepts/context/context-segments) (`ephemeral` / `session` / `user` / `tenant` / `global`) is a separate axis carrying retention intent. A `system_prompt` segment can be `tenant` class; a `session_history` segment is `session` class; the two fields move independently.
-- **Not the storage tier ordinal.** `context_type` is the typed position; the four-tier ordinal on `context_manifest_segments` is a bucketing of those types for prefix-cache reuse.
-- **Not a free-form tag.** The enum is closed.
-- **Not assigned by the runtime.** GCM v2 derives `context_type` from input shape; runtimes do not set it directly.
+`context_type` is the typed canonical position. It travels alongside three other fields that each describe a distinct axis of the segment:
+
+| Field | Axis |
+|---|---|
+| `parts.type` (`text`, `tool_use`, `tool_result`, …) | The wire shape used during serialization. |
+| `memory_class` (`ephemeral` / `session` / `user` / `tenant` / `global`) | Retention intent and reuse boundary. A `system_prompt` segment can be `tenant` class; a `session_history` segment is `session` class. |
+| `context_manifest_segments.tier` (`0` / `1` / `2` / `3`) | Cache-breakpoint bucketing of `context_type` values for prefix-cache reuse. |
+
+`context_type` itself is derived by GCM from input shape — runtimes supply content and structure on the request envelope and GCM produces the canonical typing — and the enum is closed by control-plane release.
 
 ## See also
 

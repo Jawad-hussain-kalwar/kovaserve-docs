@@ -3,7 +3,7 @@ title: Layered model
 description: KovaServe's three-layer architecture — open inference substrate at Layer 1, the licensed control plane at Layer 2, and the focused runtime wedge at Layer 3 — and the responsibility boundaries between them.
 ---
 
-KovaServe is a three-layer system. **Layer 1** is the open inference substrate that executes model computation and exposes execution mechanics, KV state lifecycle, and restore hooks. **Layer 2** is the licensed control plane — the semantic and commercial center — that turns substrate signals into continuity, checkpoints, routing, policy, budgets, observability, and managed/private portability. **Layer 3** is a focused runtime wedge for coding, terminal, and tool-heavy long-running agents, built on top of Layer 2 without inventing parallel context-engineering primitives. The layers share a single execution vocabulary: `Run`, `Session`, `Step`, `ModelCall`, `ContextManifest`, `Checkpoint`, `Budget`, `PolicyScope`, `StateHandle`.
+KovaServe is a three-layer system. **Layer 1** is the open inference substrate that executes model computation and exposes execution mechanics, KV state lifecycle, and restore hooks. **Layer 2** is the licensed control plane — the semantic and commercial center — that turns substrate signals into continuity, checkpoints, routing, policy, budgets, observability, and managed/private portability. **Layer 3** is a focused runtime wedge for coding, terminal, and tool-heavy long-running agents, built on top of Layer 2. The layers share a single execution vocabulary: `Run`, `Session`, `Step`, `ModelCall`, `ContextManifest`, `Checkpoint`, `Budget`, `PolicyScope`, `StateHandle`.
 
 ```
 ┌─ Layer 3 — KovaServe runtime wedge ───────────────────────────────────┐
@@ -24,7 +24,8 @@ KovaServe is a three-layer system. **Layer 1** is the open inference substrate t
 │   Cache-Aware Router · KV Index · KV Event System                     │
 │   Session Registry · Checkpoint Manager · State Handle Registry       │
 │   Tiering / State Manager · Policy / Governance                       │
-│   Metering / Cost / Budget · Tenant Management · Dashboard            │
+│   Metering / Cost / Budget · Tenant Management                        │
+│   Runtime Integration Adapters · Dashboard · SDK / CLI APIs           │
 │                                                                       │
 └────────────────────────────▲──────────────────────────────────────────┘
                              │ execution metadata envelope · KV events
@@ -52,16 +53,16 @@ The three-layer model reflects that split. Layer 1 stays aligned with the open e
 
 Layer 1 makes serving infrastructure visible and controllable enough for Layer 2 to reason about continuity, resumability, and execution economics using real substrate signals. It is intentionally substrate-focused — it carries semantics, it does not own them.
 
-| Layer 1 owns | Layer 1 does not own |
-|---|---|
-| Model execution mechanics | Canonical execution model |
-| Execution metadata propagation through the engine | Semantics of `run_id`, `session_id`, `checkpoint_id` |
-| KV cache lifecycle hooks (store, access, evict, promote, demote, restore, transfer) | Cluster-wide KV index |
-| Prefix/state visibility (hot, warm, cool, cold, partial) | Route scoring |
-| Restore / import / export primitives | Restore strategy and planning |
-| Tier movement integration (HBM, host RAM, NVMe, object) | Tier movement policy |
-| Scheduler/admission advisory cooperation | Admission decisions |
-| Node-local telemetry and `kv_events` emission | Cross-node aggregation |
+| Layer 1 owns |
+|---|
+| Model execution mechanics |
+| Execution metadata propagation through the engine |
+| KV cache lifecycle hooks (store, access, evict, promote, demote, restore, transfer) |
+| Prefix/state visibility (hot, warm, cool, cold, partial) |
+| Restore / import / export primitives |
+| Tier movement integration (HBM, host RAM, NVMe, object) |
+| Scheduler/admission advisory cooperation |
+| Node-local telemetry and `kv_events` emission |
 
 Layer 1 is the subject of [`execution-substrate`](/docs/concepts/layers/execution-substrate).
 
@@ -69,15 +70,15 @@ Layer 1 is the subject of [`execution-substrate`](/docs/concepts/layers/executio
 
 Layer 2 is the heart of KovaServe and the main commercial layer. It sits above the open substrate and below application/runtime layers, converting model serving and execution signals into continuity, checkpoints, routing, policy, budgets, governance, observability, and deployment portability. It is the canonical semantic center of the system — the layer of record for every entity in the canonical model.
 
-| Layer 2 owns | Layer 2 does not own |
-|---|---|
-| Canonical execution model — `Run` / `Session` / `Step` / `ModelCall` persistence and FSMs | Model execution mechanics |
-| Continuity-aware context normalization (`ContextManifest`, `ContextSegment`, `ContextArtifact`) | Prompt composition |
-| State index and route planning | Raw KV cache placement |
-| Checkpoints and logical-context-first restore planning | Per-engine state representation |
-| Budgets and `ContextBudget` admission | Application-level cost analytics |
-| Tenancy and chargeback | Identity provider implementation |
-| Dashboards, APIs, SDK support, and managed/private portability | Customer agent code |
+| Layer 2 owns |
+|---|
+| Canonical execution model — `Run` / `Session` / `Step` / `ModelCall` persistence and FSMs |
+| Continuity-aware context normalization (`ContextManifest`, `ContextSegment`, `ContextArtifact`) |
+| State index and route planning |
+| Checkpoints and logical-context-first restore planning |
+| Budgets and `ContextBudget` admission |
+| Tenancy and chargeback |
+| Dashboards, APIs, SDK support, and managed/private portability |
 
 Layer 2 is the subject of [`control-plane`](/docs/concepts/layers/control-plane).
 
@@ -85,17 +86,17 @@ Layer 2 is the subject of [`control-plane`](/docs/concepts/layers/control-plane)
 
 Layer 3 is a focused runtime product built on the Layer 2 control plane. It exists where tighter coupling between runtime semantics and control-plane semantics produces clearly better outcomes — coding agents, terminal agents, tool-heavy long-running agents, filesystem and process-heavy loops. It uses the canonical entities as its foundation and adds wedge-specific semantics on top, never inventing parallel context-engineering primitives.
 
-| Layer 3 owns | Layer 3 does not own |
-|---|---|
-| Agent definition model | Canonical execution truth |
-| Worker model and lease ownership | `PolicyScope` / `Budget` / `ContextBudget` |
-| Sandbox lifecycle (container-based, persistent, branchable) | Cluster-wide routing |
-| Tool registration and invocation semantics | Global policy and budget enforcement |
-| Workspace and `WorkspaceArtifact` model | `ContextManifest` / `ContextArtifact` / `CompactionRecord` |
-| Runtime-local state (planner scratchpad, tool loop position) | Canonical entity persistence |
-| Checkpoint trigger rules at runtime boundaries | Checkpoint capture, validation, restore |
-| Retry / resume / branch UX for the wedge | `Run` state machine transitions |
-| Runtime-native timeline UX | Event taxonomy and event envelope |
+| Layer 3 owns |
+|---|
+| Agent definition model |
+| Worker model and lease ownership |
+| Sandbox lifecycle (container-based, persistent, branchable) |
+| Tool registration and invocation semantics |
+| Workspace and `WorkspaceArtifact` model |
+| Runtime-local state (planner scratchpad, tool loop position) |
+| Checkpoint trigger rules at runtime boundaries |
+| Retry / resume / branch UX for the wedge |
+| Runtime-native timeline UX |
 
 Layer 3 is the subject of [`runtime-wedge`](/docs/concepts/layers/runtime-wedge).
 
@@ -143,11 +144,11 @@ Layer 2 is the system of record for every one of these. Layer 1 carries identifi
 
 Three load-bearing rules govern what goes where.
 
-**Substrate signals are real, not synthetic.** Routing, tiering, checkpointing, and economics rely on real Layer 1 events, not approximations. Layer 1 is what makes the control plane credible.
+**Substrate signals are real.** Routing, tiering, checkpointing, and economics run on real Layer 1 events emitted by the substrate. Layer 1 is what makes the control plane credible.
 
-**Context engineering lives at the execution boundary, not in the runtime.** Layer 2 owns segment identity, manifest durability, admission, offload, compaction lineage, retention, restore, governance, and observability. Runtimes own prompt composition, planner logic, retrieval strategy, and agent memory authoring. Layer 3 follows the same rule — it consumes Layer 2 context primitives, it does not duplicate them.
+**Context engineering lives at the execution boundary.** Layer 2 owns segment identity, manifest durability, admission, offload, compaction lineage, retention, restore, governance, and observability — the infrastructure-shaped primitives that benefit every runtime uniformly. Layer 3 reads the same Layer 2 primitives.
 
-**Managed and private deployments share one semantic model.** A `Run`, a `Checkpoint`, a `Budget`, a `PolicyScope`, and a `StateHandle` mean the same thing across [managed cloud](/docs/concepts/deployment/managed-cloud) and [private deployment](/docs/concepts/deployment/private-deployment). The architecture avoids hidden cloud-only assumptions; the layers are the same in both topologies.
+**Managed and private deployments share one semantic model.** A `Run`, a `Checkpoint`, a `Budget`, a `PolicyScope`, and a `StateHandle` mean the same thing across [managed cloud](/docs/concepts/deployment/managed-cloud) and [private deployment](/docs/concepts/deployment/private-deployment). The architecture is uniform across both topologies.
 
 ## See also
 

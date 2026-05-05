@@ -14,6 +14,7 @@ OPEN ─┬─▶ IDLE ─┬─▶ OPEN              (reactivation on new turn)
       │         ├─▶ RESUMABLE         (held for checkpoint-driven resume)
       │         ├─▶ ARCHIVED          (terminal)
       │         └─▶ EXPIRED           (terminal)
+      ├─▶ RESUMABLE                   (held for checkpoint-driven resume)
       ├─▶ ARCHIVED                    (terminal)
       └─▶ EXPIRED                     (terminal)
 
@@ -32,7 +33,7 @@ The Session is active. It accepts new turns, accepts new Run bindings, and react
 
 `current_run_id` may be set (a Run is bound) or `null` (no Run is currently bound, but the Session is ready to accept one). `last_accessed_at` advances on every turn append and on every `bind_run` call.
 
-**Transitions out:** `IDLE` (idle threshold elapsed with no bound non-terminal Run), `ARCHIVED` (explicit close), `EXPIRED` (TTL elapsed).
+**Transitions out:** `IDLE` (idle threshold elapsed with no bound non-terminal Run), `RESUMABLE` (checkpoint-driven hold while a Run is bound), `ARCHIVED` (explicit close), `EXPIRED` (TTL elapsed).
 
 ### `IDLE`
 

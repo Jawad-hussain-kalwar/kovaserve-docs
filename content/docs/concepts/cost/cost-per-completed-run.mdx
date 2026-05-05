@@ -1,36 +1,28 @@
 ---
 title: Cost per completed run
-description: The unit of value for managed agents on the Agentic Execution Cloud — what it costs to complete useful agent work, not what a token or request costs in isolation.
+description: The unit of value for managed agents on the Agentic Execution Cloud — what it costs to complete useful agent work.
 ---
 
-**Cost per completed run** is the unit of value for managed agents on KovaServe. It answers the question that matters in production: *what did it cost to finish this piece of work?* — not what a token cost, not what a model call cost, not what a GPU-second cost in isolation.
+**Cost per completed run** is the unit of value for managed agents on KovaServe. It answers the question that matters in production: *what did it cost to finish this piece of work?* The token, the model call, and the GPU-second are inputs the platform manages on the way to that answer.
 
 KovaServe is built so this number is always available, always attributable to a single managed run, and always defended against the runaway costs that happen when an agent loops, retries, or stalls without a control plane underneath it.
 
 ## Why the run is the unit
 
-Agents do work over time. A single business task — fix a failing test, review a contract, investigate an alert — spans many model calls, many tool actions, pauses, recoveries, and decisions. A token-level metric tells you how many tokens flowed; it does not tell you whether the task got done, what the path looked like, or whether the same task next month will cost more or less.
+Agents do work over time. A single business task — fix a failing test, review a contract, investigate an alert — spans many model calls, many tool actions, pauses, recoveries, and decisions. The completed run is the unit that captures all of that as a single business outcome with a single cost.
 
-Cost per completed run aligns the economic metric with the business outcome. The run starts with an objective; the run ends with a result; the cost is what the platform charged to bridge them. Everything else — token throughput, GPU utilization, cache hit rate — is an internal lever for *moving* this number, not a substitute for it.
+Cost per completed run aligns the economic metric with the business outcome. The run starts with an objective; the run ends with a result; the cost is what the platform charged to bridge them. Token throughput, GPU utilization, and cache hit rate are internal levers that move this number; the run cost is what the team and the customer see.
 
 ## What goes into the number
 
-A completed run rolls up every model call and every tool action it took:
+A completed run rolls up the per-call cost over every model call it took:
 
 ```
-cost_per_completed_run = SUM(
-    model_call_cost              over every model call in the run
-  + tool_invocation_cost         over every tool action in the run
-  + workspace_cost               for runtime-managed workspaces
-)
-                       − SUM(
-    cache_savings                from KV cache reuse across the run
-  + offloaded_segment_savings    from artifact offload, when priced
-  + compaction_savings           from summary-driven context shrinkage
-)
+cost_per_completed_run = SUM(cost_cents)         over every ModelCall in the run
+                       = SUM(gross_cost_cents) − SUM(cache_savings_cents)
 ```
 
-Every model call's slice is computed against frozen pricing — see [pricing snapshots](/docs/concepts/cost/pricing-snapshots) — so the number is reproducible and auditable. Cache savings are real: KovaServe measures `cached_tokens` from the substrate, not an estimate, and the saving lands on the run total the same way the gross cost does.
+Every model call's contribution is computed against frozen pricing — see [pricing snapshots](/docs/concepts/cost/pricing-snapshots) — so the number is reproducible and auditable. Cache savings are real — KovaServe measures `cached_tokens` from the substrate directly, and the saving lands on the run total the same way the gross cost does.
 
 The full breakdown is exposed on the run record and queryable at any time:
 
@@ -87,15 +79,7 @@ Cost per completed run is the headline. Two adjacent metrics show the levers:
 - **Cache reuse value** — the per-run cache savings, broken out so the team can see which workloads benefit most from KV reuse, manifest reuse, and stable-prefix routing.
 - **Run completion rate** — the share of runs that finished successfully versus failed, canceled, or hard-stopped. A budget that prevents runaway cost is only the right answer if the work still completes.
 
-Together they answer two questions that a token-level dashboard cannot: *did the agent do its job*, and *what did it cost to do it*.
-
-## What cost per completed run is not
-
-- **Not a token rate.** Tokens are the input; runs are the output. KovaServe shows both, but only the run-level number tracks the business outcome.
-- **Not a GPU utilization metric.** GPU efficiency is one of the levers that moves cost per completed run downward; it is not the metric itself.
-- **Not a SaaS subscription price.** Customers running KovaServe on private or neocloud infrastructure see the run cost computed from real consumption against frozen pricing — not a flat monthly fee.
-- **Not estimated.** Every component — token counts, cache savings, pricing — is real and snapshotted on the row.
-- **Not retroactively re-priced.** The cost a run shipped with is the cost the run keeps. New rates apply to new runs.
+Together they answer the two questions a managed-agent operator needs to answer every day: *did the agent do its job*, and *what did it cost to do it*.
 
 ## See also
 

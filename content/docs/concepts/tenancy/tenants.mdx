@@ -67,7 +67,7 @@ Cost, usage, and budget surfaces aggregate up the hierarchy. Tenant-level totals
 | Per-model breakdown | `GET /v1/ks/metering/usage?scope=tenant&group_by=model` |
 | JSONL export | `GET /v1/ks/metering/export?scope=tenant` |
 
-ADR-023 governs error semantics on these queries. `scope=tenant` returns `200` with zeros when there is no traffic in the requested period; the call does not 404.
+`scope=tenant` returns `200` with zero counts when there is no traffic in the requested period — see [cost-model aggregation](/docs/concepts/cost/cost-model#aggregation) for the full error envelope.
 
 ## Suspension
 
@@ -92,12 +92,9 @@ Suspension is set out-of-band by the platform operator. There is no API for self
 
 The Tenant's `default_model_acl` is a **hard ceiling**: a Project ACL cannot list a model not on the Tenant's ACL. The resolution rule (more-specific can narrow, never widen) makes this property robust regardless of how many overlay levels are involved.
 
-## What a Tenant is not
+## Lifecycle
 
-- **Not a tenant in network terms.** Network isolation (VPC, region pinning) is a deployment-topology concern. The Tenant is a logical entity inside a deployment.
-- **Not an end-user identity.** Keys are service credentials. End-user identity is mapped by the application; KovaServe records the Key.
-- **Not deletable.** Tenants are suspended, not deleted. The data retention surface is documented separately and is not a Tenant-level CRUD operation.
-- **Not the same as a Project.** A small customer with one application still has one Tenant with one Project beneath. The two levels exist independently because Tenants carry billing and Projects carry workloads.
+The Tenant lifecycle is a two-state surface: `ACTIVE` and `SUSPENDED`. Suspension is operational — data, exports, and read-only endpoints continue to serve while admission rejects. Tenants are reactivated by clearing the suspension out-of-band; the data retention surface is governed separately. A small customer with one application still has one Tenant with one Project beneath, since Tenants carry billing and Projects carry workloads — the levels exist independently for that reason.
 
 ## See also
 

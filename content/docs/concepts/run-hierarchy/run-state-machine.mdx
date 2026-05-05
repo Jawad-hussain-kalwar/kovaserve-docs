@@ -100,7 +100,7 @@ A `COMPLETED` Run cannot be re-opened. If more work is needed, a new Run is crea
 
 The Run failed in a way the system classifies as terminal — an unrecoverable substrate error, a resume that exhausted all restore options, a PolicyScope resolution that rejected the Run at setup, an explicit `FAIL` Step from the runtime. `completed_at` is set, the Budget is closed, and `ks.run.failed` is published.
 
-`FAILED` is distinct from a `FAILED`-status Step or ModelCall: the Run terminates only when failure is unrecoverable. A single ModelCall failure that the runtime retries does not move the Run to `FAILED`.
+`FAILED` is distinct from a `FAILED`-status Step or ModelCall: the Run terminates only when failure is unrecoverable at the Run level. A single ModelCall failure that the runtime retries leaves the Run in `RUNNING`.
 
 ### `CANCELED` (terminal)
 
@@ -114,7 +114,7 @@ The Run was canceled — by `POST /v1/ks/runs/{id}/cancel`, by a budget hard-sto
 - `completed_at` is set and is immutable.
 - New Steps and ModelCalls cannot be inserted under the Run.
 - The bound Budget is closed; further metering attempts targeting this Run are rejected.
-- The Run row remains queryable indefinitely for audit. Terminality is a guarantee about *future* writes, not a signal to delete the row.
+- The Run row remains queryable indefinitely for audit. Terminality is a guarantee about *future* writes; the row stays as the durable record.
 
 A bound [Session](/docs/concepts/continuity/sessions)'s `current_run_id` remains pinned to the terminal Run until a new Run binds in. This is intentional — it preserves a "last run" pointer that is useful for resume planning.
 

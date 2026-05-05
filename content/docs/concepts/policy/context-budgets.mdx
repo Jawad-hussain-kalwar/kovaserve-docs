@@ -5,7 +5,7 @@ description: The ContextBudget entity — per-Run admission control over active 
 
 A **ContextBudget** is a per-[Run](/docs/concepts/run-hierarchy/runs) admission control object that bounds active context size. It is evaluated against every assembled [ContextManifest](/docs/concepts/context/context-manifests) **before** GPU dispatch and produces explicit decisions: `ALLOW`, `WARN`, `OFFLOAD_REQUIRED`, `COMPACT_REQUIRED`, `DEGRADE`, or `HARD_STOP`.
 
-ContextBudget is KovaServe-novel — no vendor exposes context-token admission as a first-class API construct. It exists because a Run-level [Budget](/docs/concepts/policy/budgets) governing cost or step count is not enough to keep agent runs operationally bounded: the failure mode that matters most is the *active prompt* growing past what the model can handle or what the budget can afford.
+A Run-level [Budget](/docs/concepts/policy/budgets) governs cost, steps, time, and tool count. ContextBudget governs the dimension those cannot reach: the active prompt itself — the bytes and tokens that travel across the wire on every model call. Bounding it explicitly is what keeps long agent runs operationally stable.
 
 ## Dimensions
 
@@ -116,13 +116,6 @@ Limits cannot be raised on inheritance.
 | `ks.context.budget.compact_required` | `COMPACT_REQUIRED` decision. |
 | `ks.context.budget.degraded` | `DEGRADE` decision. |
 | `ks.context.budget.hard_stop` | `HARD_STOP` decision. |
-
-## What ContextBudgets are not
-
-- **Not a substitute for [Budgets](/docs/concepts/policy/budgets).** They govern different things; both must `ALLOW` for dispatch.
-- **Not a runtime concern.** The runtime supplies content; admission is owned by the Context Admission Service. Runtimes react to advisory decisions by transforming their input and retrying.
-- **Not silent.** Every decision is recorded on the manifest and emitted as an event.
-- **Not retroactive.** A `HARD_STOP` rejects the request before dispatch; it does not cancel in-flight ModelCalls.
 
 ## See also
 

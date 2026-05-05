@@ -23,7 +23,7 @@ Forward states form a strict line — each must reach the next before the chain 
 
 ### `REQUESTED`
 
-A Checkpoint has been requested at a Step boundary — either by the runtime (`POST /v1/ks/checkpoints`), by a runtime-supplied checkpoint trigger (before a risky tool call, on budget warning, on a periodic interval), or by an operator. No bytes have moved yet. The Checkpoint row exists; `state_handles` is empty; `storage_refs` is empty.
+A Checkpoint has been requested at a Step boundary — either by the runtime (`POST /v1/ks/runs/{id}/checkpoints`), by a runtime-supplied checkpoint trigger (before a risky tool call, on budget warning, on a periodic interval), or by an operator. No bytes have moved yet. The Checkpoint row exists; `state_handles` is empty; `storage_refs` is empty.
 
 `REQUESTED` is the only state in which a Checkpoint can be canceled cleanly; once `CAPTURING` begins, cancellation requires unwinding partial writes.
 
@@ -36,7 +36,7 @@ The Checkpoint Manager is freezing the manifest snapshot, gathering [StateHandle
 - The `ContextManifest` is snapshotted as a `context_manifest` StateHandle.
 - Referenced [ContextArtifacts](/docs/concepts/context/context-artifacts) are validated as readable; their object-storage URIs are recorded as `artifact_bundle` StateHandles.
 - Relevant [CompactionRecord](/docs/concepts/context/compaction-records)s are referenced.
-- KV cache export is requested from the Layer 1 Node Agent if the runtime asked for `include_kv: true`. Export is best-effort — failure to export KV does not fail the Checkpoint.
+- KV cache export is requested from the Layer 1 Node Agent if the runtime asked for `include_kv: true`. Export is best-effort — when it fails, the Checkpoint stays valid and resume falls through to manifest replay.
 - Runtime-local state, when present, is captured as a `runtime_state` StateHandle.
 
 The Run holding this Checkpoint is in `CHECKPOINTING` on the [Run state machine](/docs/concepts/run-hierarchy/run-state-machine) for the duration of capture.
@@ -91,11 +91,11 @@ A specific restore attempt failed. The Checkpoint itself is not poisoned: a `RES
 
 | Driver | Effect |
 |---|---|
-| `POST /v1/ks/checkpoints` | Creates the row in `REQUESTED`; capture begins immediately. |
+| `POST /v1/ks/runs/{id}/checkpoints` | Creates the row in `REQUESTED`; capture begins immediately. |
 | Runtime checkpoint trigger | Same as the explicit API — `REQUESTED` row, immediate capture. |
 | Capture worker completion | `CAPTURING → STORED` on success, `CAPTURING → CAPTURE_FAILED` on durability failure. |
 | Validation pass | `STORED → VALIDATED` on coherence success, `STORED → VALIDATION_FAILED` on hash / shape failure. |
-| Restore request (`kovaserve.checkpoint_id` on inference, or `POST /v1/ks/runs` with `restore_from`) | `VALIDATED → RESTORING` (or `RESTORED → RESTORING` on a subsequent restore). |
+| Restore request (`kovaserve.checkpoint_id` on inference, or `POST /v1/ks/runs/{id}/resume` with `checkpoint_id`) | `VALIDATED → RESTORING` (or `RESTORED → RESTORING` on a subsequent restore). |
 | Resumed Run reaches `RUNNING` | `RESTORING → RESTORED` when the last in-flight restore completes. |
 | Resumed Run lands in `FAILED` during restore | This restore attempt records `RESTORE_FAILED`; Checkpoint state moves to `RESTORED` if other restores are clean, otherwise back to `VALIDATED`. |
 
@@ -130,4 +130,4 @@ The Checkpoint Manager rejects any transition not listed below.
 - [State handles](/docs/concepts/recovery/state-handles) — the typed references captured during `CAPTURING`
 - [Resume flow](/docs/concepts/recovery/resume-flow) — `RECOVERING → RESUMING → RUNNING` from the resuming Run's side
 - [Run state machine](/docs/concepts/run-hierarchy/run-state-machine) — `CHECKPOINTING` and `RECOVERING / RESUMING`
-- [`POST /v1/ks/checkpoints`](/docs/api/checkpoints/create) · [`POST /v1/ks/checkpoints/{id}/restore`](/docs/api/checkpoints/restore)
+- [`POST /v1/ks/runs/{id}/checkpoints`](/docs/api/checkpoints/create) · [`POST /v1/ks/runs/{id}/resume`](/docs/api/runs/resume)

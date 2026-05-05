@@ -107,7 +107,7 @@ Environment-level totals are sums over `usage_records` rows tagged with the Envi
 | Per-day breakdown | `GET /v1/ks/metering/usage?scope=environment&environment_id=...&group_by=day` |
 | Per-Run breakdown | `GET /v1/ks/metering/usage?scope=environment&environment_id=...&group_by=run` |
 
-Like other scoped queries, an unknown `environment_id` for the authenticated Tenant returns `200` with zeros (ADR-023 error semantics carried through the cost model — see [cost-model aggregation](/docs/concepts/cost/cost-model#aggregation)).
+Like other scoped queries, an unknown `environment_id` for the authenticated Tenant returns `200` with zero counts — see [cost-model aggregation](/docs/concepts/cost/cost-model#aggregation) for the full error envelope.
 
 ## Inheritance
 
@@ -125,12 +125,9 @@ A more-specific Environment cannot widen any inherited limit. The narrowest reso
 
 An Environment can be moved to `ARCHIVED`. New admission rejects; in-flight Runs continue to completion; existing rows remain queryable; existing Keys for the Environment continue to authenticate but every admission attempt rejects with `error.code = "environment_archived"`.
 
-## What an Environment is not
+## Environment as a scope
 
-- **Not a deployment.** A deployment is a substrate placement — a cluster, region, or fleet. An Environment is a logical scope; multiple deployments can serve one Environment, and one deployment can host multiple Environments under different Tenants.
-- **Not a release stage.** Promotion between Environments is the application's concern. KovaServe does not orchestrate "promote staging to prod" — it isolates the runtime so the application can.
-- **Not a network boundary.** Network isolation is a deployment property carried in `data_boundary`. Environments are independent in the logical model regardless of network topology.
-- **Not free-form.** The `tier` field is closed (`prod`, `staging`, `dev`). The `name` field is a human-readable label and does not affect routing or policy.
+An Environment is a logical scope, distinct from a deployment: a deployment is a substrate placement — a cluster, region, or fleet — while an Environment is the stage that one or more deployments serve. Multiple deployments can serve one Environment, and one deployment can host Environments under different Tenants. Promotion between Environments is the application's concern; KovaServe isolates the runtime so the application can carry out promotion safely. Network isolation is a deployment property carried in `data_boundary`, so Environments remain independent in the logical model regardless of network topology. The `tier` field is closed (`prod`, `staging`, `dev`) and drives policy posture; the `name` is a human-readable label.
 
 ## See also
 

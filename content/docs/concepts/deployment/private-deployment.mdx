@@ -30,7 +30,7 @@ description: KovaServe's self-hosted, sovereign, and neocloud deployment topolog
 └─────────────────────────────────────────────────────────┘
 ```
 
-The deployment is single-tenant by topology — there is no shared multi-tenant control plane. The same APIs, the same wire shapes, the same event taxonomy, and the same dashboard are served from the customer's network. A workload that originated on managed cloud and migrates here keeps its IDs, its manifests, its checkpoints, and its [cost-per-completed-run](/docs/concepts/cost/cost-per-completed-run) accounting.
+The deployment is single-tenant by topology — the entire control plane runs inside the customer's network. The same APIs, the same wire shapes, the same event taxonomy, and the same dashboard are served from that network. A workload that originated on managed cloud and migrates here keeps its IDs, its manifests, its checkpoints, and its [cost-per-completed-run](/docs/concepts/cost/cost-per-completed-run) accounting.
 
 ## Topology
 
@@ -61,7 +61,7 @@ A customer running on a sovereign cloud points the chart at the cloud's managed 
 
 The substrate layer also runs inside the customer's network. Each GPU node hosts:
 
-- a **vLLM engine** with the KovaServe execution-metadata carrier patch
+- a **vLLM engine** with the KovaServe execution-metadata carrier extension
 - a **Node Agent** — gRPC server that exposes node telemetry, KV state lookups, and lifecycle hooks
 - an **Engine Adapter** — translates the canonical execution envelope into vLLM request shape
 - a **Transfer/Restore Worker** — moves KV state across HBM, host RAM, NVMe, and object tiers while preserving stable state identity
@@ -82,7 +82,7 @@ Private deployment is single-tenant by topology, but it still uses the four-leve
 | `context_share_scope` | Defaults to `project`. Adjustable per [PolicyScope](/docs/concepts/policy/policy-scopes) — sovereign deployments often pin it to `project` or `environment` to forbid cross-application reuse. |
 | `data_boundary` | Configurable per Project to constrain artifact and KV storage to specific buckets, regions, or volumes. |
 
-There is no cross-tenant concern *outside* the deployment because the deployment is the entire surface.
+Cross-tenant scoping is contained within the deployment because the deployment is the entire surface.
 
 ## Endpoints
 

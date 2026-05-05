@@ -134,7 +134,7 @@ Content-Type: application/json
 }
 ```
 
-The Compaction Lineage Service writes the output segment rows, the CompactionRecord row, and the `compaction_record_id` back-reference in a single transaction. The next manifest assembled by GCM v2 may then drop the source segments and include the output segment instead — admission re-runs against the reduced shape.
+The Compaction Lineage Service writes the output segment rows, the CompactionRecord row, and the `compaction_record_id` back-reference in a single transaction. The next manifest assembled by GCM may then drop the source segments and include the output segment instead — admission re-runs against the reduced shape.
 
 For `method: kovaserve_managed` the call is internal — the managed summarizer invokes the same atomic write path with `method: kovaserve_managed`, the model_id of the summarizer it ran, and `quality_flags` produced by its policy. Runtimes do not call `kovaserve_managed` from the wire; they observe the resulting record like any other.
 
@@ -162,7 +162,7 @@ This makes lineage replayable across the full retention window: a record from th
 
 ## Quality flags
 
-`quality_flags` is a method- and summarizer-specific JSON object. The Compaction Lineage Service does not enforce semantics on the flag values — it stores them. The runtime (under `runtime_reported`) or the managed summarizer policy (under `kovaserve_managed`) decides which flags to assert. KovaServe does not score or guarantee summary quality; it stores what the producer asserted and exposes it for downstream replay, observability, and re-compaction policies.
+`quality_flags` is a method- and summarizer-specific JSON object. The runtime (under `runtime_reported`) or the managed summarizer policy (under `kovaserve_managed`) asserts the flags; the Compaction Lineage Service stores them verbatim and exposes them for downstream replay, observability, and re-compaction policies. The producer of the summary owns its semantic fidelity; the lineage record carries the producer's assertions forward.
 
 Common conventions:
 
@@ -175,13 +175,9 @@ Common conventions:
 
 The flags are read by observability, by re-compaction policies, and by the `compaction-lineage` view in dashboards.
 
-## What CompactionRecords are not
+## Invariants
 
-- **Not a summarizer.** The Compaction Lineage Service stores lineage. Summary generation is either the runtime's job (`runtime_reported`) or the managed summarizer's job (`kovaserve_managed`); the record is the durable trace of the operation, not the operation itself.
-- **Not optional metadata.** Any compacted segment **must** carry `compaction_record_id`. A compacted segment without lineage is rejected at admission.
-- **Not chained automatically.** Re-compaction (compacting an already-compacted segment further) produces a fresh record whose sources include the prior output. The chain is explicit; there is no implicit transitive lineage.
-- **Not a quality contract.** KovaServe stores `quality_flags` as the producer asserted them. KovaServe does not score summaries, does not enforce flag semantics, and does not guarantee semantic fidelity — that responsibility lives with whoever produced the summary.
-- **Not free.** Source-segment retention extension under `with_compaction_lineage` increases storage; tenants pay for it through standard metering.
+Every compacted segment carries a `compaction_record_id`; admission rejects compacted segments without lineage. Re-compaction of an already-compacted segment produces a fresh record whose sources include the prior outputs — every chain hop is an explicit edge in the lineage graph. Source-segment retention extension under `with_compaction_lineage` is billed through standard metering.
 
 ## See also
 

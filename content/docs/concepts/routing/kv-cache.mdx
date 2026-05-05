@@ -3,7 +3,7 @@ title: KV cache
 description: KV cache fundamentals — what the substrate stores, how warmness and tier classes work, why prefix matching matters, and how the control plane reasons about cache state through events rather than synthetic estimates.
 ---
 
-The **KV cache** is the substrate-resident store of attention key/value tensors produced during prompt processing. When an input prefix matches material the model has already attended to, the substrate skips re-prefill on that prefix and starts generation faster. KV cache is the single largest performance lever in long-running AI execution, and the reason KovaServe routes on continuity rather than blind load.
+The **KV cache** is the substrate-resident store of attention key/value tensors produced during prompt processing. When an input prefix matches material the model has already attended to, the substrate skips re-prefill on that prefix and starts generation faster. KV cache is the single largest performance lever in long-running AI execution, and the reason KovaServe routes on continuity.
 
 This page covers the substrate-level fundamentals. The control-plane projection — how the [KV Index](/docs/concepts/routing/kv-index) tracks cache state and how [manifest-aware routing](/docs/concepts/routing/manifest-aware-routing) consumes it — lives on dedicated pages.
 
@@ -46,7 +46,7 @@ KV cache is only reusable when the *bytes* the model sees match a prior call exa
 
 KovaServe's [renderer versions and tokenizer fingerprints](/docs/concepts/context/renderer-versions) are stamped on every [ContextManifest](/docs/concepts/context/context-manifests) precisely because they decide whether two manifests have a chance at sharing cache. The router uses them as hard scope filters; mismatched replicas are not scored.
 
-The unit of reuse is a *prefix*. A request whose prompt diverges at token `k` reuses cache up to `k − 1` and pays full prefill from `k` onward. This is why KovaServe partitions manifests at canonical [breakpoints](/docs/concepts/context/segment-types) (tools / system / history-prefix / summary / active) — earlier breakpoints change less often than later ones, so prefix reuse is highest at the tools and system tiers.
+The unit of reuse is a *prefix*. A request whose prompt diverges at token `k` reuses cache up to `k − 1` and pays full prefill from `k` onward. This is why KovaServe partitions manifests at canonical [breakpoints](/docs/concepts/context/segment-types) (tools / system / history-prefix / summary) — earlier breakpoints change less often than later ones, so prefix reuse is highest at the tools and system tiers.
 
 ## Lifecycle events
 
@@ -72,7 +72,7 @@ Three classes of reuse drive KovaServe's economics, in increasing depth:
 
 | Class | Identity | Reuse boundary |
 |---|---|---|
-| Prefix-tier | `stable_prefix_id` (legacy) | A canonical prefix break (typically the system breakpoint). |
+| Prefix-tier | `stable_prefix_id` | A canonical prefix break (typically the system breakpoint). |
 | Manifest-tier | `stable_context_id` | The full manifest under canonical ordering — including renderer, tokenizer, scope. |
 | Session-affinity | Most-recent-replica from the bound Session | Continuity across a Session's turns. |
 
@@ -80,14 +80,15 @@ Prefix-tier reuse benefits any request that shares the leftmost breakpoints with
 
 ## Multi-tier breakpoints
 
-The five canonical breakpoints in a manifest each produce their own digest. The substrate's KV cache reuses up to the deepest matching breakpoint:
+The four canonical breakpoints in a manifest each produce their own digest. The substrate's KV cache reuses up to the deepest matching breakpoint:
 
 ```
 [ tools ][ system ][ history-prefix ][ summary ][ active ]
-   ▲         ▲           ▲              ▲          ▲
-   │         │           │              │          │
-   tools-tier digest matches more often than active-tier digest;
+   ▲         ▲           ▲              ▲
+   │         │           │              │
+   tools digest matches more often than summary digest;
    reuse value is highest at the leftmost breakpoints.
+   The active section follows the last breakpoint and is rendered fresh per call.
 ```
 
 A request matching `tools` and `system` but diverging at `history-prefix` reuses the first two and re-prefills the rest. The router scores each match independently to pick the candidate with the deepest reuse for the candidate's tier latency.
@@ -102,7 +103,7 @@ Movement is bounded by:
 - **Scope.** A prefix warmed under one `policy_scope.context_share_scope` is not transferable to a foreign-scope replica.
 - **Capacity.** Tier write quotas are honored to avoid thrashing.
 
-The transfer/restore work itself is owned by the Layer 1 sidecar (Transfer/Restore Worker), not by the control plane.
+The transfer/restore work itself is owned by the Layer 1 sidecar (Transfer/Restore Worker); the control plane plans, the substrate moves.
 
 ## Eviction and invalidation
 
@@ -116,16 +117,13 @@ The transfer/restore work itself is owned by the Layer 1 sidecar (Transfer/Resto
 
 Each cause emits the corresponding `kv.state.evicted` or `kv.state.invalidated` event so the [KV Index](/docs/concepts/routing/kv-index) can mirror the change.
 
-## Why KV cache is an optimization, not a correctness concern
+## KV cache as a latency optimization
 
-KovaServe's [resume flow](/docs/concepts/recovery/resume-flow) treats KV restore as a latency optimization layered on top of logical-context restore. A resumed Run that fails to restore KV simply re-prefills under the manifest replay path; correctness is identical. This is the practical meaning of the architecture's "logical context first" rule — every system that needs cache (routing, resume, tiering) must function when the cache is missing.
+KovaServe's [resume flow](/docs/concepts/recovery/resume-flow) treats KV restore as a latency optimization layered on top of logical-context restore. A resumed Run that loses KV simply re-prefills under the manifest replay path; correctness is identical. Every system that depends on cache — routing, resume, tiering — operates correctly when the cache is missing.
 
-## What the KV cache is not
+## Source of truth
 
-- **Not the source of truth.** [ContextManifests](/docs/concepts/context/context-manifests), [ContextSegments](/docs/concepts/context/context-segments), and [ContextArtifacts](/docs/concepts/context/context-artifacts) are the source of truth for what the model is thinking about. KV cache is an accelerator.
-- **Not portable across models.** A KV prefix is bound to a specific model and tokenizer.
-- **Not per-Run.** Cache state is per-replica, per-prefix. Many Runs across many Sessions can share a single hot prefix.
-- **Not synthetic.** The control plane never estimates cache state; only real substrate events populate the [KV Index](/docs/concepts/routing/kv-index).
+[ContextManifests](/docs/concepts/context/context-manifests), [ContextSegments](/docs/concepts/context/context-segments), and [ContextArtifacts](/docs/concepts/context/context-artifacts) carry the source of truth for what the model attends to; KV cache is the substrate-resident accelerator. A KV prefix is bound to a specific model and tokenizer, lives per-replica, and may be shared across many Runs and Sessions that resolve to the same `stable_prefix_id`. The control plane's view of cache state is populated entirely by real substrate events — every entry in the [KV Index](/docs/concepts/routing/kv-index) traces to a `kv.state.*` event.
 
 ## See also
 

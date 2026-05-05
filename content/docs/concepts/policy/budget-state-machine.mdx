@@ -5,7 +5,7 @@ description: The Budget FSM — `ACTIVE → WARNING → DEGRADED_ALLOWED | HARD_
 
 The **Budget state machine** is the lifecycle every [Budget](/docs/concepts/policy/budgets) travels from creation to closure. It has five states and three drivers: consumption against limits, admission decisions on each Step, and Run termination.
 
-The FSM is enforced by the **Metering / Cost / Budget Layer**. Illegal transitions are rejected at the service layer; `CLOSED` is terminal and frozen.
+Illegal transitions are rejected at the service layer; `CLOSED` is terminal and frozen.
 
 ## The graph
 
@@ -75,7 +75,7 @@ After `CLOSED`:
 
 ### Consumption updates
 
-Every Step admission updates consumed counters on every Budget dimension. The update is atomic with the Step row write; reads of the Budget always reflect counters consistent with the most recent admitted Step.
+Every Step admission updates consumed counters on every Budget dimension. The update is atomic with the Step admission; reads of the Budget always reflect counters consistent with the most recent admitted Step.
 
 | Update outcome | Possible state transition |
 |---|---|
@@ -92,7 +92,7 @@ The Budget pre-check is the second admission gate, evaluated against the *admitt
 |---|---|
 | `ALLOW` | Counters advance; state may transition by threshold. |
 | `WARN` | Counters advance; ensures `WARNING` if not already. |
-| `DEGRADED_ALLOWED` | Counters advance under reduced shape; transitions to `DEGRADED_ALLOWED` on first occurrence. |
+| `DEGRADE` | Counters advance under reduced shape; transitions to `DEGRADED_ALLOWED` on first occurrence. |
 | `HARD_STOP` | Step rejected; transitions to `HARD_STOP`. |
 
 ### Run termination

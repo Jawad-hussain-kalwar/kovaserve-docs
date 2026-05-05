@@ -60,7 +60,7 @@ Several pathways write artifacts:
 |---|---|
 | Runtime upload | The runtime calls `POST /v1/ks/context/artifacts` directly (typically for tool outputs, retrieved documents, or large user-supplied material) and references the resulting `id` from a segment in its next request. |
 | Admission-driven offload | [ContextBudget admission](/docs/concepts/policy/admission) returns `OFFLOAD_REQUIRED` for an oversized inline segment; the segment is rewritten to reference a freshly written artifact. |
-| Layer 3 workspace snapshots | The runtime wedge captures workspace state; snapshots become artifacts referenced from `runtime_state` [StateHandles](/docs/concepts/recovery/state-handles). |
+| Runtime workspace snapshots | The runtime captures workspace state; snapshots become artifacts referenced from `runtime_state` [StateHandles](/docs/concepts/recovery/state-handles). |
 | Compaction | A [CompactionRecord](/docs/concepts/context/compaction-records) optionally writes pre- and post-compaction transcripts as artifacts so the lineage can be replayed. |
 
 ## Versioning
@@ -143,12 +143,11 @@ Artifacts are owned by exactly one `(tenant_id, project_id)`. Cross-tenant acces
 
 The wire shape is identical in both modes. Migrating a workload from managed to private replays artifact references against the new bucket without changing the manifest layer.
 
-## What artifacts are not
+## Immutability and accounting
 
-- **Not arbitrary blob storage.** The artifact store is for context. General application blob storage (model weights, customer file uploads outside an agent run, build outputs) belongs to the customer's own object storage.
-- **Not mutable.** A given `(name, version)` pair is immutable. New content gets a new version; old versions remain addressable.
-- **Not free.** `byte_count` accumulates against the [ContextBudget](/docs/concepts/policy/context-budgets)'s `artifact_byte_limit`. Tenants with high artifact churn pay for storage as part of metering.
-- **Not auto-summarized.** The runtime (or the [CompactionRecord](/docs/concepts/context/compaction-records) producer) decides when to summarize an artifact; the Artifact Store does not infer summaries on its own.
+A given `(name, version)` pair is immutable. New content for the same logical name gets a new version; prior versions remain addressable until their retention expires. References from segments always carry both `id` and the bound `version`, so frozen manifests resolve to the exact bytes they were assembled against.
+
+`byte_count` accumulates against the [ContextBudget](/docs/concepts/policy/context-budgets)'s `artifact_byte_limit`, and artifact storage is billed through standard metering. Summarization of artifact contents is performed by the runtime or by a [CompactionRecord](/docs/concepts/context/compaction-records) producer; the Artifact Store keeps the bytes intact and addressable.
 
 ## See also
 

@@ -3,21 +3,21 @@ title: Context manifests
 description: The ContextManifest entity — the durable per-ModelCall record of context shape, identity, and accounting that anchors budgets, routing, checkpoints, and resume.
 ---
 
-A **ContextManifest** is the durable, per-[ModelCall](/docs/concepts/run-hierarchy/model-calls) record of the exact context that was sent to the substrate. It captures the segment list, token accounting, stable identities, renderer version, model id, tokenizer fingerprint, scope, and admission decision — everything needed to answer "what was this model call thinking about?" without replaying the original request.
+A **ContextManifest** is the durable, per-[ModelCall](/docs/concepts/run-hierarchy/model-calls) record of the exact context that was dispatched to the model. It captures the segment list, token accounting, stable identities, renderer version, model id, tokenizer fingerprint, scope, and admission decision — everything needed to answer "what was this model call thinking about?" without replaying the original request.
 
 Every successful ModelCall is bound to exactly one ContextManifest via `context_manifest_id` FK. Every [Checkpoint](/docs/concepts/recovery/checkpoints) freezes a manifest snapshot. The [Cache-Aware Router](/docs/concepts/routing/manifest-aware-routing) consults manifest identity when scoring placements. Every [Budget](/docs/concepts/policy/budgets) decision and [ContextBudget](/docs/concepts/policy/context-budgets) admission runs against an assembled manifest. The manifest is the **audit anchor** for the entire context-engineering subsystem.
 
-ContextManifests are produced by **GCM v2** (Global Context Manager) and stored in the **Context Manifest Registry**.
+ContextManifests are produced by the **Global Context Manager (GCM)** and stored in the **Context Manifest Registry**.
 
 ## Why a per-call durable record
 
-No vendor exposes a per-call durable manifest as a first-class entity. KovaServe ships one because every other context-engineering capability depends on having a stable answer to "what was the context?" that survives failures, redeployments, retention windows, and tokenizer migrations:
+KovaServe ships the manifest as a first-class entity because every other context-engineering capability depends on having a stable answer to "what was the context?" that survives failures, redeployments, retention windows, and tokenizer migrations:
 
 - Budgets and admission can only be enforced against a concrete shape.
 - Resume needs the exact prompt to reconstruct, not a regenerated approximation.
 - Routing decisions are only meaningful against an identity that the cache layer can recognize.
 - Compaction lineage needs source manifests that do not disappear when memory is recompacted.
-- Audit trails need a record that survives long after the substrate has evicted its working state.
+- Audit trails need a record that survives long after the inference engine has evicted its working state.
 
 The manifest is the single artifact every other context primitive references.
 
@@ -25,9 +25,12 @@ The manifest is the single artifact every other context primitive references.
 
 ```
 ContextManifest
-├── id, run_id, step_id, model_call_id, session_id, checkpoint_id?
-├── segments[]                  ▸ ordered ContextSegments (canonical ADR-003 order)
-├── stable_prefix_id            ▸ legacy router-tier identity
+├── id, run_id, session_id
+├── step_id?, model_call_id?, checkpoint_id?    ▸ bound after admission;
+│                                                  null on HARD_STOP and
+│                                                  on checkpoint-only snapshots
+├── segments[]                  ▸ ordered ContextSegments (canonical order)
+├── stable_prefix_id            ▸ prefix-tier identity for KV cache lookups
 ├── stable_context_id           ▸ compatibility-aware identity (digest cascade +
 │                                 renderer + model family + tokenizer fp +
 │                                 tenant / project / context scope)
@@ -50,7 +53,7 @@ ContextManifest
 └── created_at
 ```
 
-Every field is concrete on every manifest row — there are no nullable fields beyond the ones explicitly marked optional. A manifest is a complete description.
+A manifest is written once and immutable thereafter. Every field is set at write time; the optional fields above (`step_id`, `model_call_id`, `checkpoint_id`) reflect the manifest's binding to other entities and are populated when those bindings exist.
 
 ## Stable identities
 
@@ -58,14 +61,14 @@ Two identity fields travel on every manifest. Both are pure functions of the man
 
 | Identity | Purpose | Inputs |
 |---|---|---|
-| `stable_prefix_id` | Legacy router compatibility. The Pass 4 cache-aware router uses this to look up reusable KV cache prefixes. | Hash of the canonical-ordered stable segments. |
+| `stable_prefix_id` | Prefix-tier identity for KV cache lookups. The cache-aware router consults it to find reusable KV cache prefixes. | Hash of the canonical-ordered stable-prefix segments. |
 | `stable_context_id` | Compatibility-aware identity used for manifest-tier reuse, KV index lookups, and cross-call correlation. | Digest cascade across all segments + renderer version + model family + tokenizer fingerprint + scope. |
 
 Two requests that produce the same `stable_context_id` will route to the same warm placement. Two manifests that share `stable_prefix_id` but differ on `stable_context_id` (e.g. same prefix but different downstream segments) share the prefix tier of the cache but fan out at the manifest tier.
 
 ## Four storage tiers
 
-GCM v2 groups segments into **four prefix-tier buckets** on the `context_manifest_segments` join row, so different cache layers can find their own reuse boundary on the same data structure:
+GCM groups segments into **four prefix-tier buckets** on the `context_manifest_segments` join row, so different cache layers can find their own reuse boundary on the same data structure:
 
 ```
 tier 0       tier 1        tier 2              tier 3            volatile tail
@@ -76,16 +79,16 @@ tier 0       tier 1        tier 2              tier 3            volatile tail
    defs      prompt     history          summary     and latest tool output
 ```
 
-Tier 0 carries [`persistent_context`](/docs/concepts/context/segment-types) segments whose content is tool definitions; tier 1 carries `system_prompt`; tier 2 carries `session_history`; tier 3 carries `summary` segments. The volatile tail (`agent_state`, `tool_result`) is appended after the four-tier prefix and is recomputed every call. Pass 4 routing reuses the leftmost tiers; Anthropic-style prompt cache hints reuse tiers further right; manifest-tier reuse spans the full structure. Every tier produces its own digest, recorded on the manifest for downstream consumers.
+Tier 0 carries [`persistent_context`](/docs/concepts/context/segment-types) segments whose content is tool definitions; tier 1 carries `system_prompt`; tier 2 carries `session_history`; tier 3 carries `summary` segments. The volatile tail (`agent_state`, `tool_result`) is appended after the four-tier prefix and is recomputed every call. Prefix-tier routing reuses the leftmost tiers; Anthropic-style prompt cache hints reuse tiers further right; manifest-tier reuse spans the full structure. Every tier produces its own digest, recorded on the manifest for downstream consumers.
 
 ## Segment ordering
 
-Segments inside a manifest follow **canonical ordering** (ADR-003). The order is deterministic and renderer-invariant for the same input set, so two assemblies that consume the same inputs produce the same `stable_context_id`. The six canonical positions are:
+Segments inside a manifest follow **canonical ordering**. The order is deterministic and renderer-invariant for the same input set, so two assemblies that consume the same inputs produce the same `stable_context_id`. The six canonical positions are:
 
-1. `system_prompt` — the runtime-supplied system prompt.
-2. `persistent_context` — long-lived material (RAG documents, tool definitions, [StateHandle](/docs/concepts/recovery/state-handles) references).
-3. `summary` — compaction outputs replacing older history.
-4. `session_history` — verbatim turn history back to the most recent compaction point.
+1. `persistent_context` — long-lived material (tool definitions, RAG documents, [StateHandle](/docs/concepts/recovery/state-handles) references). Rendered first so the most-stable bytes anchor the cache prefix.
+2. `system_prompt` — the runtime-supplied system prompt.
+3. `session_history` — verbatim turn history back to the most recent compaction point.
+4. `summary` — compaction outputs that replace older history; rendered after the verbatim history so its mutation on each compaction event invalidates only the summary tier, not the cache prefix above it.
 5. `agent_state` — the runtime's per-step scratchpad, planner output, or current draft.
 6. `tool_result` — the latest tool result that has not yet been summarized.
 
@@ -167,12 +170,11 @@ Authorization: Bearer ks_...
 }
 ```
 
-## What ContextManifests are not
+## Boundaries with the runtime
 
-- **Not a prompt template.** GCM does not own prompt composition. The runtime supplies content; GCM normalizes shape, computes identity, and records the result.
-- **Not a retrieval framework.** GCM consumes references to retrieved content; retrieval strategy belongs to the runtime.
-- **Not regenerated on each read.** A manifest is written once and immutable thereafter. Re-admission produces a *new* manifest with its own id; the prior manifest stays addressable.
-- **Not the full prompt bytes.** The manifest stores segment metadata + identities. Large segment bodies are referenced via [ContextArtifacts](/docs/concepts/context/context-artifacts); inline segment bodies are stored on the [ContextSegment](/docs/concepts/context/context-segments) row.
+The runtime supplies content, retrieval strategy, and prompt intent on the request envelope; GCM normalizes shape, computes identity, persists the manifest, and records the admission outcome. Re-admission produces a *new* manifest with its own id and the prior manifest stays addressable, so timelines, checkpoints, and audit trails always resolve to the exact shape that was admitted.
+
+The manifest stores segment metadata and identities; large segment bodies live in [ContextArtifacts](/docs/concepts/context/context-artifacts) and inline segment bodies live on the [ContextSegment](/docs/concepts/context/context-segments) row. Reading a manifest yields the structure; resolving its segments yields the bytes.
 
 ## See also
 

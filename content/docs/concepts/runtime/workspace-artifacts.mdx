@@ -5,7 +5,7 @@ description: The catalog of byte-level outputs a runtime Run produces — stdout
 
 A **WorkspaceArtifact** is the runtime's first-class record of a byte-level output produced during a Run — a stdout capture, a stderr capture, a file diff, a patch, a test report, a tool result, a model output, a workspace snapshot, or a checkpoint note. WorkspaceArtifacts are what makes the [runtime timeline](/docs/concepts/runtime/runtime-observability) inspectable: every Step that produces or modifies bytes leaves an artifact behind, and the artifact is queryable, replayable, and (for snapshots) restorable.
 
-WorkspaceArtifacts are distinct from [ContextArtifacts](/docs/concepts/context/context-artifacts). ContextArtifacts are the canonical Layer 2 entity for *context bytes* — bytes that enter a [ContextManifest](/docs/concepts/context/context-manifests) by reference. WorkspaceArtifacts are the runtime's catalog of *what the Run did to its workspace* — outputs, mutations, snapshots, reports. A `FILE_WRITE` Step's diff is a WorkspaceArtifact (runtime-side); the same bytes, if subsequently inlined into a future model call, become or reference a ContextArtifact (context-side).
+WorkspaceArtifacts and [ContextArtifacts](/docs/concepts/context/context-artifacts) are two distinct catalogs. ContextArtifacts are the canonical control-plane entity for *context bytes* — bytes that enter a [ContextManifest](/docs/concepts/context/context-manifests) by reference. WorkspaceArtifacts are the runtime's catalog of *what the Run did to its workspace* — outputs, mutations, snapshots, reports. A `FILE_WRITE` Step's diff is a WorkspaceArtifact on the runtime side; the same bytes, when subsequently inlined into a future model call, are referenced through a ContextArtifact on the context side.
 
 ```
 ┌─ Run timeline ──────────────────────────────────────────────────────┐
@@ -26,7 +26,7 @@ WorkspaceArtifacts are distinct from [ContextArtifacts](/docs/concepts/context/c
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-The Workspace / Artifact Manager is the [Layer 3 subsystem](/docs/concepts/runtime/runtime-architecture#workspace--artifact-manager) that owns the catalog.
+The Workspace / Artifact Manager is the [runtime subsystem](/docs/concepts/runtime/runtime-architecture#workspace--artifact-manager) that owns the catalog.
 
 ## Artifact types
 
@@ -68,7 +68,7 @@ The shape mirrors the canonical [ContextArtifact](/docs/concepts/context/context
 WorkspaceArtifact bytes live in S3-compatible object storage under tenant-scoped paths:
 
 ```
-s3://<bucket>/orgs/<org_id>/projects/<project_id>/runs/<run_id>/artifacts/<artifact_id>
+s3://<bucket>/tenants/<tenant_id>/projects/<project_id>/runs/<run_id>/artifacts/<artifact_id>
 ```
 
 On [managed cloud](/docs/concepts/deployment/managed-cloud) the bucket is hosted MinIO unless the Project is configured with customer-supplied storage; on [private deployment](/docs/concepts/deployment/private-deployment) the bucket is the customer's own S3-compatible service. The [PolicyScope](/docs/concepts/policy/policy-scopes) `data_boundary` enforces region and residency constraints.
@@ -120,9 +120,9 @@ Authorization: Bearer ks_...
 
 ## Promotion to ContextArtifact
 
-When a tool result, a file read, or a model output enters a future [ContextManifest](/docs/concepts/context/context-manifests), the runtime promotes the WorkspaceArtifact into a [ContextArtifact](/docs/concepts/context/context-artifacts) — the bytes do not move (the same `storage_uri` is referenced), but a Layer 2 ContextArtifact row is created and the manifest's segment carries `artifact_ref_id` to it. This is how the runtime keeps the canonical context catalog and the runtime timeline aligned without copying bytes.
+When a tool result, a file read, or a model output enters a future [ContextManifest](/docs/concepts/context/context-manifests), the runtime promotes the WorkspaceArtifact into a [ContextArtifact](/docs/concepts/context/context-artifacts). The bytes stay where they are — the same `storage_uri` is referenced — and a control-plane ContextArtifact row is created so the manifest's segment can carry an `artifact_ref_id` to it. This keeps the canonical context catalog and the runtime timeline aligned without copying bytes.
 
-The reverse does not happen — Layer 2 ContextArtifacts (e.g. retrieved documents from a runtime's RAG path) are not WorkspaceArtifacts unless the runtime explicitly catalogs them.
+ContextArtifacts that originate on the control-plane side — for example, retrieved documents from a runtime's RAG path — appear in the runtime timeline only when the runtime explicitly catalogs them as WorkspaceArtifacts.
 
 ## Workspace snapshots
 
@@ -152,17 +152,19 @@ Retention rules are enforced by a periodic sweep that drops expired artifact row
 
 `stdout` and `stderr` artifacts can be streamed as they accumulate (long-running processes do not wait for the artifact to finalize). The same `GET /v1/ks/runtime/runs/{id}/artifacts/{artifact_id}` endpoint accepts an `Accept: text/event-stream` header and emits append events until the producing Step completes, then closes the stream.
 
-## What WorkspaceArtifacts are not
+## WorkspaceArtifacts on the timeline
 
-- **Not a context entry.** A WorkspaceArtifact is a timeline byte-record. Bytes enter context only when a [ContextSegment](/docs/concepts/context/context-segments) references the artifact (via promotion to a [ContextArtifact](/docs/concepts/context/context-artifacts)).
-- **Not a metric.** Tool reports and test reports are structured but they live on the timeline, not in metering. Cost and savings are recorded on the Run and on `usage_records`, not on the artifact catalog.
-- **Not implicit.** The runtime decides which outputs become artifacts. A `PROCESS_START` whose stdout is suppressed by tool policy does not produce an artifact.
+A few invariants govern what shows up in the catalog:
+
+- **A WorkspaceArtifact is a timeline byte-record.** Bytes enter context only when a [ContextSegment](/docs/concepts/context/context-segments) references the artifact through promotion to a [ContextArtifact](/docs/concepts/context/context-artifacts).
+- **Cost and savings live on the Run, not in the catalog.** Tool reports and test reports are structured records on the timeline; aggregate metering rolls up through the Run's `usage_records` and the metering API.
+- **The runtime decides which outputs become artifacts.** A `PROCESS_START` whose stdout is suppressed by tool policy is captured in the Step record without producing a stdout artifact.
 
 ## See also
 
 - [Workspaces](/docs/concepts/runtime/workspaces) — the structured filesystem artifacts are produced against
 - [Sandboxes](/docs/concepts/runtime/sandboxes) — the execution boundary that emits stdout, stderr, and process artifacts
 - [Tool invocations](/docs/concepts/runtime/tool-invocations) — tool outputs that become `tool_result` and `test_report` artifacts
-- [Context artifacts](/docs/concepts/context/context-artifacts) — the Layer 2 context catalog WorkspaceArtifacts promote into
+- [Context artifacts](/docs/concepts/context/context-artifacts) — the control-plane context catalog WorkspaceArtifacts promote into
 - [Checkpoints](/docs/concepts/recovery/checkpoints) · [Branch flow](/docs/concepts/recovery/branch-flow) — snapshots as `runtime_state` StateHandles
 - [Runtime observability](/docs/concepts/runtime/runtime-observability) — the timeline that surfaces the artifact catalog

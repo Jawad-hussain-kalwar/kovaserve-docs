@@ -3,7 +3,7 @@ title: KV index
 description: The KV Index Service — the near-real-time authoritative lookup of reusable substrate state, mapping stable identities to nodes, tiers, and freshness.
 ---
 
-The **KV Index Service** is the near-real-time authoritative lookup of reusable substrate state. It maps the stable identities computed by GCM v2 — `stable_prefix_id` and `stable_context_id` — to the nodes and storage tiers that hold the corresponding KV cache or [StateHandle](/docs/concepts/recovery/state-handles), and to freshness, completeness, and compatibility metadata.
+The **KV Index Service** is the near-real-time authoritative lookup of reusable substrate state. It maps the stable identities computed by the **Global Context Manager** — `stable_prefix_id` and `stable_context_id` — to the nodes and storage tiers that hold the corresponding KV cache or [StateHandle](/docs/concepts/recovery/state-handles), and to freshness, completeness, and compatibility metadata.
 
 The index is consumed by [manifest-aware routing](/docs/concepts/routing/manifest-aware-routing) to score candidate placements, and by the [resume flow](/docs/concepts/recovery/resume-flow) to plan KV restore. It is fed by the **KV Event System** — every entry is the projection of a real substrate event, never a synthetic approximation.
 
@@ -121,12 +121,9 @@ The index is backed by Redis for hot lookups and PostgreSQL for durable projecti
 
 The index is **eventually consistent** — a fresh `kv.state.stored` may take milliseconds to appear in lookups. Routing tolerates this: a missed warm location simply produces a colder routing decision, not a correctness violation.
 
-## What the KV index is not
+## Index and cache
 
-- **Not the cache itself.** The KV cache lives on substrate replicas. The index is the *map* to it.
-- **Not synchronous with substrate.** Index reads do not contact replicas. Truth is projected from events; operator confidence comes from event lag dashboards, not from re-querying nodes.
-- **Not a synthetic estimate.** No heuristic, no polling, no cron sweep populates the index. If the events stop, the index freezes.
-- **Not cross-tenant.** Scope filtering is enforced at lookup time.
+The KV cache lives on substrate replicas; the index is the *map* to it. Index reads resolve from projected event state — they do not contact replicas. Operator confidence comes from event-lag dashboards. Scope filtering is enforced at lookup time, so cross-tenant content is invisible to lookups regardless of underlying residency.
 
 ## See also
 

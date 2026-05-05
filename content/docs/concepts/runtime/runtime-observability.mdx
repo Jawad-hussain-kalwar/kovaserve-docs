@@ -1,11 +1,11 @@
 ---
 title: Runtime observability
-description: The runtime-native view of a Run — typed step timeline, model and tool actions, file diffs, checkpoint tree, branch lineage, failure classification, retry and resume reasons. Richer than BYO mode and a major Layer 3 surface.
+description: The runtime-native view of a Run — typed step timeline, model and tool actions, file diffs, checkpoint tree, branch lineage, failure classification, retry and resume reasons.
 ---
 
-**Runtime observability** is the Layer 3 surface that turns a Run's canonical execution record and its runtime artifacts into something a human or operator can read and act on. It is the runtime-native view of *what happened* — typed step timeline, model calls, tool invocations, file diffs, process actions, [WorkspaceArtifacts](/docs/concepts/runtime/workspace-artifacts), [Checkpoint](/docs/concepts/recovery/checkpoints) tree, [branch lineage](/docs/concepts/recovery/branch-flow), failure classification, retry and resume reasons.
+**Runtime observability** is the runtime surface that turns a Run's canonical execution record and its runtime artifacts into something a human or operator can read and act on. It is the runtime-native view of *what happened* — typed step timeline, model calls, tool invocations, file diffs, process actions, [WorkspaceArtifacts](/docs/concepts/runtime/workspace-artifacts), [Checkpoint](/docs/concepts/recovery/checkpoints) tree, [branch lineage](/docs/concepts/recovery/branch-flow), failure classification, and retry and resume reasons.
 
-This is one of Layer 3's distinguishing surfaces. A [BYO runtime](/docs/concepts/deployment/byo-runtime) integration sees the canonical run, step, modelcall, and event records, but the runtime-native timeline — the *coding-agent UX* — is what makes [KovaServe runtime mode](/docs/concepts/deployment/managed-runtime) materially better than running an opaque agent loop on top of a thin SDK.
+This is one of the runtime's distinguishing surfaces. A [BYO runtime](/docs/concepts/deployment/byo-runtime) integration sees the canonical run, step, modelcall, and event records; in [KovaServe runtime mode](/docs/concepts/deployment/managed-runtime) the runtime-native timeline adds the coding-agent UX on top of those same records — typed steps, inline artifacts, checkpoint trees, branch lineages, and budget burn — projected directly from the canonical event stream.
 
 ```
 ┌─ Run timeline view ──────────────────────────────────────────────────┐
@@ -23,7 +23,7 @@ This is one of Layer 3's distinguishing surfaces. A [BYO runtime](/docs/concepts
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
-The Timeline / Event Projection Service is the [Layer 3 subsystem](/docs/concepts/runtime/runtime-architecture) that produces these views.
+The Timeline / Event Projection Service is the [runtime subsystem](/docs/concepts/runtime/runtime-architecture) that produces these views.
 
 ## What the timeline shows
 
@@ -156,11 +156,13 @@ Operator surfaces depend on the resolved [PolicyScope](/docs/concepts/policy/pol
 
 The timeline is *projected* from the canonical event streams — `ks.run.*`, `ks.step.*`, `ks.model_call.*`, `ks.tool.invocation.*`, `ks.process.*`, `ks.file.write.applied`, `ks.checkpoint.*`, `ks.branch.created`, `ks.budget.*`, `ks.context.budget.*`, `ks.policy.*` — not from a separate timeline log. A consumer that wants the same data outside the runtime UI subscribes to the events directly and rebuilds whatever shape it wants.
 
-## What runtime observability is not
+## Runtime observability and adjacent surfaces
 
-- **Not a tracing replacement.** OpenTelemetry export is available separately ([guide](/docs/guides/opentelemetry-export)); the timeline is product UX, not a span store.
-- **Not a metrics dashboard.** Aggregate metering rolls up through the [cost-per-completed-run](/docs/concepts/cost/cost-per-completed-run) surface and the metering API; the timeline is per-Run.
-- **Not a substitute for evaluation.** Eval and quality scoring happen in separate surfaces; the timeline is what the Run *did*, not whether the Run *was good*.
+The timeline sits next to several related surfaces, each with its own role:
+
+- **Tracing.** OpenTelemetry export ships span data through the dedicated [tracing surface](/docs/guides/opentelemetry-export). The timeline is per-Run product UX rendered from the canonical event stream.
+- **Metrics.** Aggregate metering rolls up through the [cost-per-completed-run](/docs/concepts/cost/cost-per-completed-run) surface and the metering API. The timeline shows the per-Run breakdown that feeds those aggregates.
+- **Evaluation.** Eval and quality scoring live in separate surfaces. The timeline records what the Run *did*; eval surfaces score whether the Run was *good*.
 
 ## See also
 

@@ -23,7 +23,7 @@ CREATED ─▶ READY ─▶ RECOVERING ─▶ RESUMING ─▶ RUNNING
 | `RESUMING` | Active context reconstruction: KV import if planned and feasible, otherwise manifest replay. The first ModelCall of the resumed Run is admitted at the end of this window. |
 | `RUNNING` | Normal execution. The resumed Run is now indistinguishable from a fresh Run, except for the `restored_from` reference on its first Step. |
 
-`RECOVERING` and `RESUMING` together are the resume window. A resumed Run that lands in `FAILED` from either is recorded with the failed step recorded as part of the [Checkpoint state machine](/docs/concepts/recovery/checkpoint-state-machine) audit trail.
+`RECOVERING` and `RESUMING` together are the resume window. A resumed Run that lands in `FAILED` from either has the failure recorded on the [Checkpoint state machine](/docs/concepts/recovery/checkpoint-state-machine) audit trail.
 
 ## Restore order
 
@@ -58,7 +58,9 @@ The Checkpoint's compatibility vector is checked against the target deployment.
 | `model_id` | Allow if `model_family` matches — a minor version roll forward is supported. |
 | `tokenizer_fingerprint` | KV restore skipped silently; manifest replay proceeds. The resumed prompt is re-tokenized under the new fingerprint. |
 | `renderer_version` | KV restore skipped if outside the forward-compatible allow-list; manifest replay proceeds. |
-| `policy_scope` | Reject restore if scope does not satisfy the original. The same Checkpoint cannot be restored under a more permissive scope or a foreign tenant. |
+| `quantization` | KV restore skipped silently if the regime differs; manifest replay proceeds. |
+| `tensor_parallel_config` | KV restore skipped silently if the topology differs; manifest replay proceeds. |
+| `policy_scope` | Reject restore if scope does not satisfy the original. The resuming Run must run under a scope that is at most as permissive as the original. |
 
 Hard rejections produce `RUN_FAILED` with explicit reason. Soft rejections (KV-only) are recorded on the resume event but do not block the flow.
 
@@ -67,16 +69,16 @@ Hard rejections produce `RUN_FAILED` with explicit reason. Soft rejections (KV-o
 If a `kv_prefix` StateHandle is present, the Checkpoint Manager queries the [KV Index](/docs/concepts/routing/kv-index) for compatible replicas. Three outcomes are possible:
 
 - **Hot or warm replica found.** The KV import is scheduled at that replica. The router will prefer this placement.
-- **Only cold or evicted state found.** KV import is deferred; the planner falls through to manifest replay.
+- **Only cold or evicted state found.** KV import is skipped; the planner falls through to manifest replay.
 - **No replica found.** KV import is skipped entirely; manifest replay proceeds.
 
 KV restore is **never** required for correctness. Step 4 is allowed to fail in any way; the resume flow proceeds.
 
 ### 5. Reconstruct active context
 
-If KV restore was planned and the import succeeds at the target replica, the resumed Run begins with the imported KV state warm. If KV restore was skipped or failed, the resumed Run reconstructs the prompt from the manifest's segment list — every segment resolves either inline or via its `artifact_ref_id`, in canonical ADR-003 ordering, under the captured renderer version.
+If KV restore was planned and the import succeeds at the target replica, the resumed Run begins with the imported KV state warm. If KV restore was skipped or failed, the resumed Run reconstructs the prompt from the manifest's segment list — every segment resolves either inline or via its `artifact_ref_id`, in canonical render ordering, under the captured renderer version.
 
-This step always succeeds when steps 1–3 succeeded. It is the universal fallback path; the rest of the system is designed so this path is exercised on every restore on the staging plane regardless of KV availability, ensuring it does not bit-rot.
+This step always succeeds when steps 1–3 succeeded. Manifest replay is the always-available restore path; it does not depend on KV availability and is exercised on every restore.
 
 ### 6. Route and transition
 
@@ -102,16 +104,16 @@ The Checkpoint is in `RESTORING` for the entire window and moves to `RESTORED` w
 
 ## Wire shape
 
-Resume is triggered either through the inference path (`kovaserve.checkpoint_id` on `POST /v1/chat/completions`) or through the explicit Run-creation path:
+Resume is triggered either through the inference path (`kovaserve.checkpoint_id` on `POST /v1/chat/completions`) or through the explicit resume API. The path identifies the originating Run; the response carries the freshly created resumed Run.
 
 ```http
-POST /v1/ks/runs
+POST /v1/ks/runs/01J8X9Y2Z3K4M5N6P7Q8R9S0T1/resume
 Authorization: Bearer ks_...
 Content-Type: application/json
 
 {
+  "checkpoint_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T7",
   "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
-  "restore_from": "01J8X9Y2Z3K4M5N6P7Q8R9S0T7",
   "resume_marker": "step:7"
 }
 ```
