@@ -1,0 +1,180 @@
+---
+title: Branch a Run
+description: POST /v1/ks/runs/{id}/branch — fork a new Run lineage from a Checkpoint with inherited PolicyScope and a bounded copy of the parent Budget.
+---
+
+`POST /v1/ks/runs/{id}/branch` forks a new [Run](/docs/concepts/run-hierarchy/runs) lineage from a [Checkpoint](/docs/concepts/recovery/checkpoints) belonging to the parent Run. The child Run carries `branch_from` pointing back at the parent and `restored_from` pointing at the originating Checkpoint. It inherits the parent's [PolicyScope](/docs/concepts/policy/policy-scopes) and a bounded copy of its [Budget](/docs/concepts/policy/budgets); it executes its own Steps under fresh [ContextManifests](/docs/concepts/context/context-manifests) reconstructed from the Checkpoint.
+
+Branching is the primitive behind speculative exploration, what-if comparisons, and recovery forks. The parent and child Runs proceed independently after the branch — there is no return-value contract between them, no merge primitive, and no ambient sync. Each branch is an alternate continuation, not a sub-task.
+
+## What branch does
+
+1. **Validates the Checkpoint.** The Checkpoint must belong to the parent Run, must be in `VALIDATED` or `RESTORED`, and its compatibility vector (model family, tokenizer fingerprint, renderer version) must be satisfiable by the resolved deployment. See the [Checkpoint state machine](/docs/concepts/recovery/checkpoint-state-machine).
+2. **Reconstructs logical context.** The child Run's first ContextManifest is reconstructed from the Checkpoint's frozen manifest, segment refs, artifact refs, and compaction lineage — the [logical-context-first resume flow](/docs/concepts/recovery/resume-flow).
+3. **Creates the child Run.** A new Run row is created in `READY` (skipping `CREATED` because setup is already determined by the Checkpoint), with `branch_from` and `restored_from` pinned.
+4. **Inherits scope; bounds the budget.** The child's PolicyScope is the parent's PolicyScope (immutable). The child's Budget is a fresh Budget initialized from the parent's `cost_limit_cents`, `token_limit`, `step_limit`, `time_limit_seconds`, and `tool_limit` — clamped by any `budget_overrides` supplied on the branch request. The child's Budget consumption starts at zero.
+5. **Plans KV restore as an optimization.** When the Checkpoint carries a `kv_prefix` [StateHandle](/docs/concepts/recovery/state-handles), the [Cache-Aware Router](/docs/concepts/routing/manifest-aware-routing) considers it during placement. KV restore failure does not block branching — logical context is the primary capability.
+6. **Transitions the parent.** Branching does not stop the parent Run. The parent continues from where it was unless explicitly paused or completed before the branch call.
+
+## Endpoint
+
+```
+POST /v1/ks/runs/{run_id}/branch
+```
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_...` — see [Authentication](/docs/api/using-the-api/authentication). |
+| Path parameter | `run_id` — the **parent** Run ID. |
+| Content type | `application/json`. |
+| Idempotent | Yes, when `Idempotency-Key` is supplied — see [Idempotency](/docs/api/using-the-api/idempotency). |
+| Errors | Native envelope — see [Errors](/docs/api/using-the-api/errors). |
+
+## Request body
+
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `checkpoint_id` | string | yes | The [Checkpoint](/docs/concepts/recovery/checkpoints) to branch from. Must belong to the parent Run and be in `VALIDATED` or `RESTORED`. |
+| `session_id` | string \| null | no | Session to bind the child Run to. Defaults to the parent Run's `session_id`. Pass `null` (explicitly) to detach the child from any Session. The Session must be visible to the same Tenant. |
+| `external_run_id` | string \| null | no | External-runtime correlation ID for the child Run. |
+| `external_runtime` | string \| null | no | Originating runtime name for the child. Defaults to the parent's value. |
+| `budget_overrides` | object \| null | no | Optional clamp on the child's inherited Budget — `{ "cost_limit_cents": "5.0000", "token_limit": 100000, "step_limit": 50, "time_limit_seconds": 3600, "tool_limit": 200 }`. Each field is optional; missing fields inherit verbatim. Overrides may only **lower** the parent's limits, never raise them; raises return `400 invalid_request`. |
+| `metadata` | object \| null | no | Free-form metadata recorded on the child Run row. |
+
+```json
+{
+  "checkpoint_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0CK",
+  "external_run_id": "lg-task-9821-branch-a",
+  "budget_overrides": {
+    "cost_limit_cents": "1.0000",
+    "step_limit": 20
+  },
+  "metadata": {
+    "purpose": "alternative refactor strategy"
+  }
+}
+```
+
+## Response — `201 Created`
+
+The body is the new child Run row, in `READY`.
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9S0B1",
+  "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+  "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+  "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+  "policy_scope_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T3",
+  "budget_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0B4",
+  "context_budget_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0B5",
+  "branch_from": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+  "restored_from": "01J8X9Y2Z3K4M5N6P7Q8R9S0CK",
+  "status": "READY",
+  "model": "qwen3-coder-30b",
+  "external_run_id": "lg-task-9821-branch-a",
+  "external_runtime": "langgraph",
+  "step_count": 0,
+  "created_at": "2026-05-05T12:05:00Z",
+  "started_at": null,
+  "completed_at": null
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `branch_from` | string | The parent Run ID. |
+| `restored_from` | string | The Checkpoint the branch was created from. |
+| `status` | string | Always `READY` on a successful branch — the child is admissible immediately. |
+| `policy_scope_id` | string | Same value as the parent's PolicyScope. Inherited, immutable. |
+| `budget_id` | string \| null | The child's freshly initialized Budget. Distinct row from the parent's Budget. |
+| `context_budget_id` | string \| null | The child's ContextBudget, inherited or freshly initialized per project defaults. |
+
+The parent Run's row is unchanged. The parent's timeline gains a `ks.branch.created` event referencing the child. The parent's transition through `BRANCHING` is observable on its own timeline.
+
+### Headers
+
+```http
+HTTP/1.1 201 Created
+Content-Type: application/json
+X-Request-Id: 01J8X9Y2Z3K4M5N6P7Q8R9S0XX
+X-KS-Run-Id:  01J8X9Y2Z3K4M5N6P7Q8R9S0B1
+```
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `201 Created` | The branch was created. The body is the child Run. |
+| `400 Bad Request` | Malformed JSON, unknown fields, `budget_overrides` that exceed the parent's limits, or a `session_id` shape that is not `ses_<24hex>`. Codes: `invalid_request`, `invalid_id`. |
+| `401 Unauthorized` | Missing or invalid bearer token. |
+| `403 Forbidden` | The resolved PolicyScope blocks branching for this Project. Code: `model_access_denied`. |
+| `404 Not Found` | The parent Run does not exist or belongs to another Tenant; or the Checkpoint does not exist; or the supplied `session_id` does not resolve. Codes: `run_not_found`, `checkpoint_not_found`, `unknown_session`. |
+| `409 Conflict` | The Checkpoint does not belong to the parent Run, or is not in `VALIDATED` / `RESTORED`, or its compatibility vector cannot be satisfied. Codes: `checkpoint_not_branchable`, `checkpoint_incompatible`, `idempotency_conflict`. |
+| `422 Unprocessable Entity` | The body parsed but failed schema validation. |
+| `429 Too Many Requests` | Rate limit exceeded. Code: `rate_limited`. |
+
+## Examples
+
+```bash
+# Branch from a Checkpoint, inheriting the parent Budget verbatim
+curl -X POST https://api.kovaserve.com/v1/ks/runs/01J8X9Y2Z3K4M5N6P7Q8R9S0T1/branch \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "checkpoint_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0CK"
+  }'
+
+# Branch with a tighter cost ceiling and a new external correlation ID
+curl -X POST https://api.kovaserve.com/v1/ks/runs/01J8X9Y2Z3K4M5N6P7Q8R9S0T1/branch \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: 6c1f8a30-9b22-4f0e-9d6c-12c4f0a1b2c3" \
+  -d '{
+    "checkpoint_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0CK",
+    "external_run_id": "lg-task-9821-branch-a",
+    "budget_overrides": {
+      "cost_limit_cents": "1.0000",
+      "step_limit": 20
+    }
+  }'
+```
+
+```python
+from kovaserve import KovaClient
+
+kova = KovaClient(api_key="ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b")
+
+# Speculative exploration — branch three alternate continuations from one Checkpoint
+parent_id = "01J8X9Y2Z3K4M5N6P7Q8R9S0T1"
+checkpoint_id = "01J8X9Y2Z3K4M5N6P7Q8R9S0CK"
+
+branches = []
+for purpose in ("conservative", "balanced", "aggressive"):
+    child = kova.runs.branch(
+        run_id=parent_id,
+        checkpoint_id=checkpoint_id,
+        external_run_id=f"lg-task-9821-{purpose}",
+        budget_overrides={"cost_limit_cents": "1.0000"},
+        metadata={"purpose": purpose},
+    )
+    branches.append(child)
+    print(f"branched {purpose}: {child.id} (from {child.branch_from})")
+
+# Each child runs independently from here
+for child in branches:
+    kova.chat.completions.create(
+        model=child.model,
+        messages=[{"role": "user", "content": "Continue with this strategy."}],
+        kovaserve={"run_id": child.id},
+    )
+```
+
+## See also
+
+- [`POST /v1/ks/runs/{id}/cancel`](/docs/api/runs/cancel) — terminate a branch that no longer pulls its weight
+- [`GET /v1/ks/runs/{id}`](/docs/api/runs/get) · [`GET /v1/ks/runs?session_id=...`](/docs/api/runs/list) — navigate branch lineage by walking `branch_from` pointers
+- [Branches](/docs/concepts/recovery/branches) · [Branch flow](/docs/concepts/recovery/branch-flow) — the conceptual model behind this endpoint
+- [Checkpoints](/docs/concepts/recovery/checkpoints) · [Checkpoint state machine](/docs/concepts/recovery/checkpoint-state-machine) · [Resume flow](/docs/concepts/recovery/resume-flow)
+- [Budgets](/docs/concepts/policy/budgets) · [PolicyScopes](/docs/concepts/policy/policy-scopes) — the inherited control objects
+- [Idempotency](/docs/api/using-the-api/idempotency)

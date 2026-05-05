@@ -218,14 +218,14 @@ Living roadmap for `docs.kovaserve.com`. Source of structure for `content/docs/`
 
 ### Runs
 
-- [ ] `api/runs/create.mdx` — `POST /v1/ks/runs`
-- [ ] `api/runs/get.mdx` — `GET /v1/ks/runs/{id}`
-- [ ] `api/runs/list.mdx`
-- [ ] `api/runs/update.mdx` — `PATCH /v1/ks/runs/{id}`
-- [ ] `api/runs/cancel.mdx`
-- [ ] `api/runs/steps.mdx` — `GET /v1/ks/runs/{id}/steps`
-- [ ] `api/runs/timeline.mdx` — `GET /v1/ks/runs/{id}/timeline`
-- [ ] `api/runs/branch.mdx`
+- [x] `api/runs/create.mdx` — `POST /v1/ks/runs`
+- [x] `api/runs/get.mdx` — `GET /v1/ks/runs/{id}`
+- [x] `api/runs/list.mdx`
+- [x] `api/runs/update.mdx` — `PATCH /v1/ks/runs/{id}`
+- [x] `api/runs/cancel.mdx`
+- [x] `api/runs/steps.mdx` — `GET /v1/ks/runs/{id}/steps`
+- [x] `api/runs/timeline.mdx` — `GET /v1/ks/runs/{id}/timeline`
+- [x] `api/runs/branch.mdx`
 
 ### Sessions
 

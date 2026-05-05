@@ -1,0 +1,205 @@
+---
+title: Get a Run's timeline
+description: GET /v1/ks/runs/{id}/timeline — chronologically ordered execution events for a Run, paginated by event ID.
+---
+
+`GET /v1/ks/runs/{id}/timeline` returns the chronologically ordered stream of [execution events](/docs/concepts/events/execution) recorded under a [Run](/docs/concepts/run-hierarchy/runs) — every state transition, every routing decision, every policy check, every budget warning, every checkpoint operation, every context-engineering action. The timeline is the audit-grade reconstruction of what happened during a Run, in the order it happened.
+
+The timeline is broader than [`GET /v1/ks/runs/{id}/steps`](/docs/api/runs/steps): Steps describe *what was admitted* under the Run, while the timeline includes the events those Steps and the surrounding control plane emitted. A single `MODEL_CALL` Step typically produces a `ks.step.created`, a `ks.route.planned`, a `ks.route.selected`, a `ks.model_call.started`, and a `ks.model_call.completed` event in the timeline.
+
+## Endpoint
+
+```
+GET /v1/ks/runs/{run_id}/timeline
+```
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_...` — see [Authentication](/docs/api/using-the-api/authentication). |
+| Path parameter | `run_id` — bare 26-character Crockford ULID. |
+| Pagination | Cursor — see [Pagination](/docs/api/using-the-api/pagination). Ordering is ascending by `timestamp` (then `id` as a tiebreaker). |
+| Errors | Native envelope — see [Errors](/docs/api/using-the-api/errors). |
+
+## Query parameters
+
+| Parameter | Type | Default | Meaning |
+|---|---|---|---|
+| `limit` | integer | `200` | Maximum events to return. Capped at `1000`. Higher than other list endpoints because timelines are chatty. |
+| `after` | string \| null | `null` | Cursor — return events strictly after it in chronological order. |
+| `before` | string \| null | `null` | Cursor — return events strictly before it. Mutually exclusive with `after`. |
+| `event_type` | string \| null | `null` | Restrict to one [event type](/docs/concepts/events) — e.g., `ks.model_call.completed`, `ks.budget.warning`, `ks.context.budget.hard_stop`. |
+| `family` | string \| null | `null` | Restrict to one event family — `run`, `step`, `model_call`, `route`, `policy`, `budget`, `checkpoint`, `runtime`, `context`. Equivalent to `event_type` prefix matching on `ks.<family>.*`. |
+| `since` | string \| null | `null` | ISO-8601 timestamp — events with `timestamp >= since`. Convenience for follow-up polls. |
+
+## Response — `200 OK`
+
+```json
+{
+  "data": [
+    {
+      "id": "01J8X9Y2Z3K4M5N6P7Q8R9S0E1",
+      "event_type": "ks.run.created",
+      "timestamp": "2026-05-05T12:00:00.103Z",
+      "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+      "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+      "environment_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0EN",
+      "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+      "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+      "step_id": null,
+      "model_call_id": null,
+      "checkpoint_id": null,
+      "state_handle_id": null,
+      "node_id": null,
+      "model_id": "qwen3-coder-30b",
+      "trace_id": "0af7651916cd43dd8448eb211c80319c",
+      "payload": {
+        "model": "qwen3-coder-30b",
+        "policy_scope_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T3"
+      }
+    },
+    {
+      "id": "01J8X9Y2Z3K4M5N6P7Q8R9S0E2",
+      "event_type": "ks.step.created",
+      "timestamp": "2026-05-05T12:00:01.011Z",
+      "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+      "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+      "environment_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0EN",
+      "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+      "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+      "step_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0S1",
+      "model_call_id": null,
+      "checkpoint_id": null,
+      "state_handle_id": null,
+      "node_id": null,
+      "model_id": null,
+      "trace_id": "0af7651916cd43dd8448eb211c80319c",
+      "payload": { "step_type": "MODEL_CALL", "ordinal": 0 }
+    },
+    {
+      "id": "01J8X9Y2Z3K4M5N6P7Q8R9S0E3",
+      "event_type": "ks.route.selected",
+      "timestamp": "2026-05-05T12:00:01.062Z",
+      "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+      "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+      "environment_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0EN",
+      "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+      "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+      "step_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0S1",
+      "model_call_id": null,
+      "checkpoint_id": null,
+      "state_handle_id": null,
+      "node_id": "gpu-node-2",
+      "model_id": "qwen3-coder-30b",
+      "trace_id": "0af7651916cd43dd8448eb211c80319c",
+      "payload": {
+        "warmness": "warm",
+        "manifest_reuse_estimate": 0.81,
+        "rationale": "session_affinity + warm cache"
+      }
+    },
+    {
+      "id": "01J8X9Y2Z3K4M5N6P7Q8R9S0E4",
+      "event_type": "ks.model_call.completed",
+      "timestamp": "2026-05-05T12:00:04.512Z",
+      "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+      "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+      "environment_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0EN",
+      "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+      "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+      "step_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0S1",
+      "model_call_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0M1",
+      "checkpoint_id": null,
+      "state_handle_id": null,
+      "node_id": "gpu-node-2",
+      "model_id": "qwen3-coder-30b",
+      "trace_id": "0af7651916cd43dd8448eb211c80319c",
+      "payload": {
+        "prompt_tokens": 1240,
+        "completion_tokens": 482,
+        "cached_tokens": 980,
+        "ttft_ms": 184,
+        "total_ms": 2710,
+        "cost_cents": "0.0420",
+        "cache_savings_cents": "0.0192"
+      }
+    }
+  ],
+  "page": {
+    "next_cursor": "01J8X9Y2Z3K4M5N6P7Q8R9S0E4",
+    "prev_cursor": null,
+    "has_more": true,
+    "limit": 200
+  }
+}
+```
+
+### Event envelope
+
+Every event uses the [canonical envelope](/docs/concepts/events/event-envelope) — the same shape on the timeline endpoint as on the [event family endpoints](/docs/api/events/index).
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | string | Event ID — bare 26-character Crockford ULID. Use as a pagination cursor. |
+| `event_type` | string | Wire subject without the `ks.` prefix shown — full subject is `ks.<family>.<event>`. |
+| `timestamp` | string | ISO-8601 with millisecond precision and `Z` suffix. |
+| `tenant_id` / `project_id` / `environment_id` | string | Owning tenancy fields. |
+| `run_id` / `session_id` / `step_id` / `model_call_id` / `checkpoint_id` / `state_handle_id` | string \| null | Entity references. Populated when the event is bound to that entity; `null` otherwise. |
+| `node_id` / `model_id` | string \| null | Node and model context, when applicable. |
+| `trace_id` | string | W3C-compatible trace ID — the same value carried on the originating request's `traceparent` header, when present. |
+| `payload` | object | Event-type-specific structured data. The shape per `event_type` is documented on the corresponding [event reference page](/docs/concepts/events). |
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `200 OK` | Returns a page of events. Empty `data` is valid for a Run that has not yet emitted any event matching the filters. |
+| `400 Bad Request` | `limit` out of range, both `before` and `after` supplied, an unrecognized `event_type` or `family`, or a malformed `since`. Code: `invalid_request`. |
+| `401 Unauthorized` | Missing or invalid bearer token. |
+| `404 Not Found` | The Run does not exist or belongs to another Tenant. Code: `run_not_found`. |
+
+## Examples
+
+```bash
+# Full timeline, oldest first
+curl https://api.kovaserve.com/v1/ks/runs/01J8X9Y2Z3K4M5N6P7Q8R9S0T1/timeline \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# Just budget events
+curl "https://api.kovaserve.com/v1/ks/runs/01J8X9Y2Z3K4M5N6P7Q8R9S0T1/timeline?family=budget" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# Just completed model calls, paged
+curl "https://api.kovaserve.com/v1/ks/runs/01J8X9Y2Z3K4M5N6P7Q8R9S0T1/timeline?event_type=ks.model_call.completed&limit=50" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# Follow-up poll — only events newer than what we last saw
+curl "https://api.kovaserve.com/v1/ks/runs/01J8X9Y2Z3K4M5N6P7Q8R9S0T1/timeline?after=01J8X9Y2Z3K4M5N6P7Q8R9S0E4" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+```
+
+```python
+from kovaserve import KovaClient
+
+kova = KovaClient(api_key="ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b")
+
+# Tail the full timeline of a Run
+for event in kova.runs.iter_timeline("01J8X9Y2Z3K4M5N6P7Q8R9S0T1"):
+    print(f"{event.timestamp}  {event.event_type:<32}  {event.payload}")
+
+# Reconstruct the cost trajectory from completed model-call events
+total = 0
+for event in kova.runs.iter_timeline(
+    "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    event_type="ks.model_call.completed",
+):
+    total += float(event.payload["cost_cents"])
+    print(f"  +{event.payload['cost_cents']}¢ → {total:.4f}¢")
+```
+
+## See also
+
+- [`GET /v1/ks/runs/{id}/steps`](/docs/api/runs/steps) — Step rows only, in `ordinal` order
+- [`GET /v1/ks/runs/{id}`](/docs/api/runs/get) — the Run row with embedded Steps and ModelCalls
+- [Events](/docs/concepts/events) · [Event envelope](/docs/concepts/events/event-envelope) · [Execution events](/docs/concepts/events/execution)
+- [`/v1/ks/events/*`](/docs/api/events) — the event-family endpoints that publish the same envelopes for cross-Run consumption
+- [Pagination](/docs/api/using-the-api/pagination)

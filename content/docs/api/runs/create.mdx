@@ -1,0 +1,165 @@
+---
+title: Create a Run
+description: POST /v1/ks/runs — explicitly create a Run with a project, optional session and model, and a resolved PolicyScope.
+---
+
+`POST /v1/ks/runs` creates a [Run](/docs/concepts/run-hierarchy/runs) explicitly. The Canonical Execution Service resolves a [PolicyScope](/docs/concepts/policy/policy-scopes), attaches the project's default [Budget](/docs/concepts/policy/budgets) and [ContextBudget](/docs/concepts/policy/context-budgets), and returns the new Run in `CREATED`. Subsequent inference calls reference the Run by passing `kovaserve.run_id` on `/v1/chat/completions`, or by addressing it directly on the native control-plane endpoints.
+
+The companion path is **implicit creation**: a `/v1/chat/completions` request that carries a `kovaserve.run_id` the gateway has never seen before materializes the Run as part of the inference. Both paths produce the same Run shape; explicit creation exists when the runtime wants the Run row provisioned ahead of any inference — to attach a custom Budget, to bind a Session up front, or to hand the `run_id` to another process before the first model call.
+
+## Endpoint
+
+```
+POST /v1/ks/runs
+```
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_...` — see [Authentication](/docs/api/using-the-api/authentication). |
+| Content type | `application/json`. |
+| Idempotent | Yes, when `Idempotency-Key` is supplied — see [Idempotency](/docs/api/using-the-api/idempotency). The natural idempotency key for runtimes is `external_run_id`. |
+| Errors | Native envelope — see [Errors](/docs/api/using-the-api/errors). |
+
+## Request body
+
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `project_id` | string | yes | The Project the Run belongs to. Must be a Project visible to the API key's Tenant. |
+| `model` | string \| null | no | Default model ID for the Run. ModelCalls inside the Run may override per call. Must be admitted by the resolved PolicyScope when supplied. |
+| `session_id` | string \| null | no | A [Session](/docs/concepts/continuity/sessions) to bind the Run to. The Session must be visible to the same `(tenant_id, project_id)` pair and not in a terminal state. Format `ses_<24hex>`. |
+| `external_run_id` | string \| null | no | Opaque correlation ID supplied by an external runtime (LangGraph, Temporal, custom). Idempotency-keyed per Tenant. Unicode NULs and lone surrogates are rejected. |
+| `external_runtime` | string \| null | no | Name of the originating runtime — e.g., `"langgraph"`, `"temporal"`, `"custom"`. Surfaces in the Runtime Integration Adapters and on timeline events. |
+| `policy_scope_ref` | string \| null | no | Reference to an existing [PolicyScope](/docs/concepts/policy/policy-scopes), or a scope selector like `"project:01J..."`. When omitted, a minimal `(tenant, project)` scope is auto-resolved. |
+| `branch_from` | object \| null | no | Branch lineage. When set, the Run is created as a [branch](/docs/concepts/recovery/branches) — see [Branch a Run](/docs/api/runs/branch). |
+
+Unknown top-level fields return `400 invalid_request` with `details.field_errors` listing the offending keys.
+
+### Example
+
+```json
+{
+  "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+  "model": "qwen3-coder-30b",
+  "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+  "external_run_id": "lg-task-9821",
+  "external_runtime": "langgraph",
+  "policy_scope_ref": "project:01J8X9Y2Z3K4M5N6P7Q8R9S0T0"
+}
+```
+
+## Response — `201 Created`
+
+The body is the new Run row. Embedded `steps` and `model_calls` arrays are not included on creation — fetch the Run with [`GET /v1/ks/runs/{id}`](/docs/api/runs/get) when you need them.
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+  "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+  "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+  "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+  "policy_scope_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T3",
+  "budget_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T4",
+  "context_budget_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T5",
+  "branch_from": null,
+  "status": "CREATED",
+  "model": "qwen3-coder-30b",
+  "external_run_id": "lg-task-9821",
+  "external_runtime": "langgraph",
+  "step_count": 0,
+  "created_at": "2026-05-05T12:00:00Z",
+  "started_at": null,
+  "completed_at": null
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | string | Run ID — bare 26-character Crockford ULID. |
+| `tenant_id` | string | Owning Tenant, inherited from the API key. Immutable. |
+| `project_id` | string | Owning Project, copied from the request. Immutable. |
+| `session_id` | string \| null | Bound Session, when supplied. Immutable once set. |
+| `policy_scope_id` | string | Resolved PolicyScope. |
+| `budget_id` | string \| null | Attached run-level Budget. `null` when the Project has no default Budget and none was supplied. |
+| `context_budget_id` | string \| null | Attached ContextBudget. `null` when no per-call admission is configured for the Project. |
+| `branch_from` | string \| null | Parent Run when this Run was created as a branch. |
+| `status` | string | One of the values in the [Run state machine](/docs/concepts/run-hierarchy/run-state-machine). New Runs return in `CREATED`. |
+| `model` | string \| null | Default model for the Run. |
+| `external_run_id` / `external_runtime` | string \| null | Echo of the request fields. |
+| `step_count` | integer | Monotonic counter of admitted Steps. `0` on creation. |
+| `created_at` | string | ISO-8601 timestamp with `Z` suffix. |
+| `started_at` / `completed_at` | string \| null | Lifecycle timestamps. `started_at` is set on the first transition into `RUNNING`; `completed_at` is set on terminal transitions. |
+
+### Headers
+
+```http
+HTTP/1.1 201 Created
+Content-Type: application/json
+X-Request-Id: 01J8X9Y2Z3K4M5N6P7Q8R9S0XX
+X-KS-Run-Id:  01J8X9Y2Z3K4M5N6P7Q8R9S0T1
+```
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `201 Created` | The Run was created and bound to its PolicyScope, Budget, and ContextBudget. |
+| `400 Bad Request` | Malformed JSON, unknown fields, invalid `external_run_id` characters, or an invalid `policy_scope_ref` shape. Codes: `invalid_request`, `invalid_id`. |
+| `401 Unauthorized` | Missing, malformed, or unresolved API key. Codes: `missing_token`, `invalid_token`, `token_revoked`. |
+| `403 Forbidden` | The API key's Tenant does not own the requested `project_id`, or the resolved PolicyScope blocks the requested `model`. Codes: `model_access_denied`. |
+| `404 Not Found` | `policy_scope_ref` does not resolve, or `session_id` is not visible to the caller's Tenant. Codes: `policy_scope_not_found`, `unknown_session`. |
+| `409 Conflict` | The supplied `Idempotency-Key` was reused with a different request body. Code: `idempotency_conflict`. |
+| `422 Unprocessable Entity` | The body parsed but failed schema validation. `details` lists field-level errors. |
+| `429 Too Many Requests` | Rate limit exceeded. Code: `rate_limited`. |
+
+## Examples
+
+```bash
+# Minimal — a Run scoped to a Project
+curl -X POST https://api.kovaserve.com/v1/ks/runs \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0"
+  }'
+
+# Bound to a Session and a default model, with idempotency
+curl -X POST https://api.kovaserve.com/v1/ks/runs \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: 6c1f8a30-9b22-4f0e-9d6c-12c4f0a1b2c3" \
+  -d '{
+    "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+    "model": "qwen3-coder-30b",
+    "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+    "external_run_id": "lg-task-9821",
+    "external_runtime": "langgraph"
+  }'
+```
+
+```python
+from kovaserve import KovaClient
+
+kova = KovaClient(api_key="ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b")
+
+run = kova.runs.create(
+    project_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+    model="qwen3-coder-30b",
+    session_id="ses_a7f3c2b8d4e1f0925a1b6c3d",
+    external_run_id="lg-task-9821",
+    external_runtime="langgraph",
+)
+
+# Subsequent inference references the Run via the extension envelope
+resp = kova.chat.completions.create(
+    model=run.model,
+    messages=[{"role": "user", "content": "Refactor src/auth.py."}],
+    kovaserve={"run_id": run.id, "session_id": run.session_id},
+)
+```
+
+## See also
+
+- [`GET /v1/ks/runs/{id}`](/docs/api/runs/get) · [`PATCH /v1/ks/runs/{id}`](/docs/api/runs/update) · [`POST /v1/ks/runs/{id}/cancel`](/docs/api/runs/cancel) · [`POST /v1/ks/runs/{id}/branch`](/docs/api/runs/branch)
+- [Runs](/docs/concepts/run-hierarchy/runs) · [Run state machine](/docs/concepts/run-hierarchy/run-state-machine) · [Identity and IDs](/docs/concepts/run-hierarchy/identity-and-ids)
+- [PolicyScopes](/docs/concepts/policy/policy-scopes) · [Budgets](/docs/concepts/policy/budgets) · [ContextBudgets](/docs/concepts/policy/context-budgets) — the control objects bound at creation
+- [Authentication](/docs/api/using-the-api/authentication) · [Idempotency](/docs/api/using-the-api/idempotency) · [Errors](/docs/api/using-the-api/errors)

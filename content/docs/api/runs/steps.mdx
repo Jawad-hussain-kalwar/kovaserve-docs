@@ -1,0 +1,159 @@
+---
+title: List Steps for a Run
+description: GET /v1/ks/runs/{id}/steps — list every Step admitted under a Run, in ordinal order, with embedded ModelCalls.
+---
+
+`GET /v1/ks/runs/{id}/steps` returns every [Step](/docs/concepts/run-hierarchy/steps) admitted under a [Run](/docs/concepts/run-hierarchy/runs), in `ordinal` order — the order Steps were admitted, monotonic and gap-free. Each Step carries its own embedded `model_calls` array. The endpoint is the focused alternative to [`GET /v1/ks/runs/{id}`](/docs/api/runs/get): it returns Steps without the surrounding Run row, which is useful when polling for step-level progress on a Run the caller has already fetched.
+
+The return order is **ascending by `ordinal`** — the natural reading order of an execution. This differs from the default descending-by-creation order used elsewhere in the API; the endpoint is sequence-shaped, not feed-shaped.
+
+## Endpoint
+
+```
+GET /v1/ks/runs/{run_id}/steps
+```
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_...` — see [Authentication](/docs/api/using-the-api/authentication). |
+| Path parameter | `run_id` — bare 26-character Crockford ULID. |
+| Pagination | Cursor — see [Pagination](/docs/api/using-the-api/pagination). Ordering is ascending by `ordinal`. |
+| Errors | Native envelope — see [Errors](/docs/api/using-the-api/errors). |
+
+## Query parameters
+
+| Parameter | Type | Default | Meaning |
+|---|---|---|---|
+| `limit` | integer | `100` | Maximum Steps to return. Capped at `200`. |
+| `after` | string \| null | `null` | Cursor — return Steps strictly after it in ascending `ordinal` order. |
+| `before` | string \| null | `null` | Cursor — return Steps strictly before it. Mutually exclusive with `after`. |
+| `step_type` | string \| null | `null` | Restrict to one [step type](/docs/concepts/run-hierarchy/step-types) — e.g., `MODEL_CALL`, `TOOL_EXECUTE`, `CHECKPOINT`. |
+| `status` | string \| null | `null` | Restrict to one [Step status](/docs/concepts/run-hierarchy/step-state-machine) — e.g., `STARTED`, `SUCCEEDED`, `FAILED`. |
+
+## Response — `200 OK`
+
+```json
+{
+  "data": [
+    {
+      "id": "01J8X9Y2Z3K4M5N6P7Q8R9S0S1",
+      "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+      "step_type": "MODEL_CALL",
+      "status": "SUCCEEDED",
+      "ordinal": 0,
+      "parent_step_id": null,
+      "created_at": "2026-05-05T12:00:01Z",
+      "started_at": "2026-05-05T12:00:01Z",
+      "completed_at": "2026-05-05T12:00:04Z",
+      "metadata": {},
+      "model_calls": [
+        {
+          "id": "01J8X9Y2Z3K4M5N6P7Q8R9S0M1",
+          "step_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0S1",
+          "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+          "model": "qwen3-coder-30b",
+          "node_id": "gpu-node-2",
+          "prompt_tokens": 1240,
+          "completion_tokens": 482,
+          "ttft_ms": 184,
+          "total_ms": 2710,
+          "cache_hit_ratio": 0.79,
+          "cost_cents": "0.0420",
+          "stable_prefix_id": "9f3c2b8d4e1f0925a1b6c3d4e5f6a7b8...",
+          "context_manifest_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T7",
+          "metadata": {},
+          "created_at": "2026-05-05T12:00:04Z"
+        }
+      ]
+    },
+    {
+      "id": "01J8X9Y2Z3K4M5N6P7Q8R9S0S2",
+      "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+      "step_type": "TOOL_EXECUTE",
+      "status": "SUCCEEDED",
+      "ordinal": 1,
+      "parent_step_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0S1",
+      "created_at": "2026-05-05T12:00:04Z",
+      "started_at": "2026-05-05T12:00:04Z",
+      "completed_at": "2026-05-05T12:00:05Z",
+      "metadata": { "tool": "search_repo" },
+      "model_calls": []
+    }
+  ],
+  "page": {
+    "next_cursor": "01J8X9Y2Z3K4M5N6P7Q8R9S0S2",
+    "prev_cursor": null,
+    "has_more": true,
+    "limit": 100
+  }
+}
+```
+
+Each entry in `data` is a Step in the same shape as the embedded Steps on [`GET /v1/ks/runs/{id}`](/docs/api/runs/get). The pagination envelope is documented at [Pagination](/docs/api/using-the-api/pagination).
+
+### Step fields
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | string | Step ID. |
+| `run_id` | string | Owning Run. |
+| `step_type` | string | One of the canonical [step types](/docs/concepts/run-hierarchy/step-types). |
+| `status` | string | One of the values in the [Step state machine](/docs/concepts/run-hierarchy/step-state-machine). |
+| `ordinal` | integer | Position under the Run. Monotonic, gap-free, ascending. |
+| `parent_step_id` | string \| null | Step that admitted this one, when nested (e.g., a `TOOL_EXECUTE` admitted by a preceding `MODEL_CALL`'s tool plan). |
+| `created_at` / `started_at` / `completed_at` | string \| null | Lifecycle timestamps. |
+| `metadata` | object | Free-form Step-type-specific metadata. |
+| `model_calls` | array | Embedded ModelCalls. Empty for non-`MODEL_CALL` Steps. |
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `200 OK` | Returns a page of Steps. Empty `data` is valid for a Run that has not yet admitted any Step. |
+| `400 Bad Request` | Both `before` and `after` supplied, `limit` out of range, or an unrecognized `step_type` / `status`. Code: `invalid_request`. |
+| `401 Unauthorized` | Missing or invalid bearer token. |
+| `404 Not Found` | The Run does not exist or belongs to another Tenant. Code: `run_not_found`. |
+
+## Examples
+
+```bash
+# All Steps for a Run, oldest first
+curl https://api.kovaserve.com/v1/ks/runs/01J8X9Y2Z3K4M5N6P7Q8R9S0T1/steps \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# Only TOOL_EXECUTE Steps that failed
+curl "https://api.kovaserve.com/v1/ks/runs/01J8X9Y2Z3K4M5N6P7Q8R9S0T1/steps?step_type=TOOL_EXECUTE&status=FAILED" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# Walk forward
+curl "https://api.kovaserve.com/v1/ks/runs/01J8X9Y2Z3K4M5N6P7Q8R9S0T1/steps?after=01J8X9Y2Z3K4M5N6P7Q8R9S0S2&limit=50" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+```
+
+```python
+from kovaserve import KovaClient
+
+kova = KovaClient(api_key="ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b")
+
+# Render a Run as a numbered execution trace
+for step in kova.runs.iter_steps("01J8X9Y2Z3K4M5N6P7Q8R9S0T1"):
+    print(f"[{step.ordinal:>3}] {step.step_type:<14} {step.status}")
+    for mc in step.model_calls:
+        print(f"        ↳ {mc.model} on {mc.node_id} — {mc.prompt_tokens}/{mc.completion_tokens} tokens, ${mc.cost_cents}")
+
+# Find the first failed Step
+failed = next(
+    (s for s in kova.runs.iter_steps("01J8X9Y2Z3K4M5N6P7Q8R9S0T1") if s.status == "FAILED"),
+    None,
+)
+if failed:
+    print(f"first failure at ordinal {failed.ordinal}: {failed.step_type}")
+```
+
+## See also
+
+- [`GET /v1/ks/runs/{id}`](/docs/api/runs/get) — the same Steps embedded inside the Run row
+- [`GET /v1/ks/runs/{id}/timeline`](/docs/api/runs/timeline) — every event under the Run, not just Step rows
+- [Steps](/docs/concepts/run-hierarchy/steps) · [Step types](/docs/concepts/run-hierarchy/step-types) · [Step state machine](/docs/concepts/run-hierarchy/step-state-machine)
+- [ModelCalls](/docs/concepts/run-hierarchy/model-calls) — embedded inside `MODEL_CALL` Steps
+- [Pagination](/docs/api/using-the-api/pagination)

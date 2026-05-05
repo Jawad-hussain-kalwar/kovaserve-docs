@@ -1,0 +1,137 @@
+---
+title: Update a Run
+description: PATCH /v1/ks/runs/{id} — transition a Run to a new status with strict state-machine validation.
+---
+
+`PATCH /v1/ks/runs/{id}` transitions a [Run](/docs/concepts/run-hierarchy/runs) to a new status. The Canonical Execution Service validates the transition against the [Run state machine](/docs/concepts/run-hierarchy/run-state-machine) before applying it; illegal transitions are rejected at the service layer with `409 illegal_state_transition`. Terminal states (`COMPLETED`, `FAILED`, `CANCELED`) are frozen — no transition out is admissible.
+
+The endpoint is the surface runtimes use to drive Run lifecycle from outside: marking a Run `COMPLETED` once the runtime considers its work done, marking it `FAILED` when the runtime gives up, pausing a long-running Run, and so on. Cancellation has a dedicated verb at [`POST /v1/ks/runs/{id}/cancel`](/docs/api/runs/cancel) so audit trails distinguish operator cancellation from runtime-side termination.
+
+## Endpoint
+
+```
+PATCH /v1/ks/runs/{run_id}
+```
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_...` — see [Authentication](/docs/api/using-the-api/authentication). |
+| Path parameter | `run_id` — bare 26-character Crockford ULID. |
+| Content type | `application/json`. |
+| Errors | Native envelope — see [Errors](/docs/api/using-the-api/errors). |
+
+## Request body
+
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `status` | string | yes | Target status — one of the values in the [Run state machine](/docs/concepts/run-hierarchy/run-state-machine). |
+
+`status` is the only admissible field. Unknown top-level fields return `400 invalid_request` with `details.unknown_fields` listing them. The `status` field is required; an empty body returns `400 invalid_request` with `details.missing_fields: ["status"]`.
+
+```json
+{ "status": "COMPLETED" }
+```
+
+### Admissible target statuses
+
+The full set of legal transitions is captured in the [Run state machine](/docs/concepts/run-hierarchy/run-state-machine). The transitions a runtime typically drives through this endpoint:
+
+| Target | When the runtime would transition |
+|---|---|
+| `RUNNING` | Resume a `PAUSED` or `RECOVERING/RESUMING` Run after the resume sub-state completes. The gateway emits `ks.run.started` on this transition. |
+| `PAUSED` | Hold a Run that is currently `RUNNING`, `WAITING`, `CHECKPOINTING`, `RECOVERING`, `RESUMING`, or `BRANCHING`. |
+| `COMPLETED` | Mark a `RUNNING` Run as having completed its work. `step_count` is frozen, `completed_at` is set, attached Budget transitions to `CLOSED`. The gateway emits `ks.run.completed`. |
+| `FAILED` | Mark a non-terminal Run as failed. `completed_at` is set, attached Budget transitions to `CLOSED`. The gateway emits `ks.run.failed`. |
+| `CANCELED` | Cancel a non-terminal Run. Prefer the dedicated [cancel endpoint](/docs/api/runs/cancel) for operator cancellations — the dedicated path produces clearer audit signals and is idempotent. |
+
+Every transition into a Run-terminal state (`COMPLETED`, `FAILED`, `CANCELED`) closes the attached run-level Budget. The `ks.budget.closed` event fires after the run-terminal event so a timeline reads in the order operators expect.
+
+## Response — `200 OK`
+
+The body is the updated Run row, in the same shape as the create response — no embedded `steps`.
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+  "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+  "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+  "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+  "policy_scope_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T3",
+  "budget_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T4",
+  "context_budget_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T5",
+  "branch_from": null,
+  "status": "COMPLETED",
+  "model": "qwen3-coder-30b",
+  "external_run_id": "lg-task-9821",
+  "external_runtime": "langgraph",
+  "step_count": 7,
+  "created_at": "2026-05-05T12:00:00Z",
+  "started_at": "2026-05-05T12:00:01Z",
+  "completed_at": "2026-05-05T12:03:42Z"
+}
+```
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `200 OK` | The transition was admissible and applied. |
+| `400 Bad Request` | Malformed JSON, unknown fields, missing `status`, or a `status` value that is not in the [Run status enum](/docs/concepts/run-hierarchy/run-state-machine). Codes: `invalid_request`, `invalid_run_state`. The `invalid_run_state` body includes `details.allowed` listing every admissible enum value. |
+| `401 Unauthorized` | Missing or invalid bearer token. |
+| `404 Not Found` | The Run does not exist or belongs to another Tenant. Code: `run_not_found`. |
+| `409 Conflict` | The requested transition is not legal from the Run's current status. Code: `illegal_state_transition`. The body includes `details.from` and `details.to` so clients can disambiguate. |
+
+### Disambiguating `400 invalid_run_state` from `409 illegal_state_transition`
+
+`invalid_run_state` (`400`) means the supplied `status` value is not a member of the enum at all — a typo, an old client, an unsupported value. `illegal_state_transition` (`409`) means the value *is* a valid status, but the Run is in a state from which it cannot legally reach the target. The two are intentionally distinct so clients can branch on the cause.
+
+## Examples
+
+```bash
+# Mark a RUNNING Run as completed
+curl -X PATCH https://api.kovaserve.com/v1/ks/runs/01J8X9Y2Z3K4M5N6P7Q8R9S0T1 \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b" \
+  -H "Content-Type: application/json" \
+  -d '{ "status": "COMPLETED" }'
+
+# Pause a long-running Run
+curl -X PATCH https://api.kovaserve.com/v1/ks/runs/01J8X9Y2Z3K4M5N6P7Q8R9S0T1 \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b" \
+  -H "Content-Type: application/json" \
+  -d '{ "status": "PAUSED" }'
+
+# Mark a Run as FAILED — runtime gave up after a non-recoverable error
+curl -X PATCH https://api.kovaserve.com/v1/ks/runs/01J8X9Y2Z3K4M5N6P7Q8R9S0T1 \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b" \
+  -H "Content-Type: application/json" \
+  -d '{ "status": "FAILED" }'
+```
+
+```python
+from kovaserve import KovaClient, KovaError
+
+kova = KovaClient(api_key="ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b")
+
+# Mark a Run as completed
+run = kova.runs.update("01J8X9Y2Z3K4M5N6P7Q8R9S0T1", status="COMPLETED")
+print(f"completed at {run.completed_at}")
+
+# Branch on illegal-transition errors
+try:
+    kova.runs.update("01J8X9Y2Z3K4M5N6P7Q8R9S0T1", status="RUNNING")
+except KovaError as exc:
+    if exc.code == "illegal_state_transition":
+        print(f"cannot go from {exc.details['from']} to {exc.details['to']}")
+    elif exc.code == "invalid_run_state":
+        print(f"unsupported status; allowed = {exc.details['allowed']}")
+    else:
+        raise
+```
+
+## See also
+
+- [`POST /v1/ks/runs/{id}/cancel`](/docs/api/runs/cancel) — the dedicated cancellation verb
+- [`GET /v1/ks/runs/{id}`](/docs/api/runs/get) · [`GET /v1/ks/runs/{id}/timeline`](/docs/api/runs/timeline)
+- [Run state machine](/docs/concepts/run-hierarchy/run-state-machine) — the complete legal transition table
+- [Budgets](/docs/concepts/policy/budgets) · [Budget state machine](/docs/concepts/policy/budget-state-machine) — the `CLOSED` transition driven by run-terminal updates
+- [Errors](/docs/api/using-the-api/errors)

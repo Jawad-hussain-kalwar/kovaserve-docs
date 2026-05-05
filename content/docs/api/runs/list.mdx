@@ -1,0 +1,146 @@
+---
+title: List Runs
+description: GET /v1/ks/runs — page through Runs with cursor pagination, scoped by project, session, status, or external runtime.
+---
+
+`GET /v1/ks/runs` lists [Runs](/docs/concepts/run-hierarchy/runs) the caller owns, newest first. The response uses cursor pagination — same shape as every other list endpoint in the API. Filters narrow the result set to a single Project, Session, status, or external-runtime correlation.
+
+Steps and ModelCalls are **not** embedded on list responses — fetch [`GET /v1/ks/runs/{id}`](/docs/api/runs/get) for the full execution trace.
+
+## Endpoint
+
+```
+GET /v1/ks/runs
+```
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_...` — see [Authentication](/docs/api/using-the-api/authentication). |
+| Pagination | Cursor — see [Pagination](/docs/api/using-the-api/pagination). |
+| Errors | Native envelope — see [Errors](/docs/api/using-the-api/errors). |
+
+## Query parameters
+
+| Parameter | Type | Default | Meaning |
+|---|---|---|---|
+| `limit` | integer | `100` | Maximum Runs to return. Capped at `200`. Values outside `1..200` return `400 invalid_request`. |
+| `after` | string \| null | `null` | Cursor — return Runs strictly after it in descending creation order. |
+| `before` | string \| null | `null` | Cursor — return Runs strictly before it. Mutually exclusive with `after`. |
+| `project_id` | string \| null | `null` | Restrict to one Project. |
+| `session_id` | string \| null | `null` | Restrict to one Session (`ses_<24hex>`). |
+| `status` | string \| null | `null` | Restrict to one [Run status](/docs/concepts/run-hierarchy/run-state-machine) — e.g., `RUNNING`, `COMPLETED`, `FAILED`. |
+| `external_runtime` | string \| null | `null` | Restrict to one external runtime — e.g., `langgraph`, `temporal`. |
+| `external_run_id` | string \| null | `null` | Exact match on the external correlation ID. Useful for runtime-side reconciliation. |
+| `created_after` | string \| null | `null` | ISO-8601 timestamp — Runs with `created_at >= created_after`. |
+| `created_before` | string \| null | `null` | ISO-8601 timestamp — Runs with `created_at < created_before`. |
+
+The Tenant filter is implicit — Runs from other Tenants never appear in the result, regardless of any query parameter combination.
+
+## Response — `200 OK`
+
+```json
+{
+  "data": [
+    {
+      "id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+      "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+      "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+      "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+      "policy_scope_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T3",
+      "budget_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T4",
+      "context_budget_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T5",
+      "branch_from": null,
+      "status": "RUNNING",
+      "model": "qwen3-coder-30b",
+      "external_run_id": "lg-task-9821",
+      "external_runtime": "langgraph",
+      "step_count": 3,
+      "created_at": "2026-05-05T12:00:00Z",
+      "started_at": "2026-05-05T12:00:01Z",
+      "completed_at": null
+    },
+    {
+      "id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+      "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+      "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+      "session_id": null,
+      "policy_scope_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T3",
+      "budget_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0SZ",
+      "context_budget_id": null,
+      "branch_from": null,
+      "status": "COMPLETED",
+      "model": "qwen3-coder-30b",
+      "external_run_id": null,
+      "external_runtime": null,
+      "step_count": 7,
+      "created_at": "2026-05-05T11:42:00Z",
+      "started_at": "2026-05-05T11:42:01Z",
+      "completed_at": "2026-05-05T11:43:18Z"
+    }
+  ],
+  "page": {
+    "next_cursor": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+    "prev_cursor": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    "has_more": true,
+    "limit": 100
+  }
+}
+```
+
+Each entry in `data` is a Run row in the same shape as [`POST /v1/ks/runs`](/docs/api/runs/create), without the embedded `steps` array. The pagination envelope is documented at [Pagination](/docs/api/using-the-api/pagination).
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `200 OK` | Returns a page of Runs. Empty `data` is valid. |
+| `400 Bad Request` | Both `before` and `after` supplied, `limit` outside `1..200`, or an unrecognized `status` value. Code: `invalid_request`. |
+| `401 Unauthorized` | Missing or invalid bearer token. |
+| `404 Not Found` | A scoping ID (`project_id`, `session_id`) does not resolve in the caller's Tenant. Codes: `unknown_session`, `project_not_found`. |
+
+## Examples
+
+```bash
+# Newest 50 Runs across the Tenant
+curl "https://api.kovaserve.com/v1/ks/runs?limit=50" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# All RUNNING Runs in one Project
+curl "https://api.kovaserve.com/v1/ks/runs?project_id=01J8X9Y2Z3K4M5N6P7Q8R9S0T0&status=RUNNING" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# Walk forward through a Session's Run history
+curl "https://api.kovaserve.com/v1/ks/runs?session_id=ses_a7f3c2b8d4e1f0925a1b6c3d&limit=50&after=01J8X9Y2Z3K4M5N6P7Q8R9S0T0" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# Reconcile against an external runtime ID
+curl "https://api.kovaserve.com/v1/ks/runs?external_runtime=langgraph&external_run_id=lg-task-9821" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+```
+
+```python
+from kovaserve import KovaClient
+
+kova = KovaClient(api_key="ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b")
+
+# Iterate every RUNNING Run, page-by-page
+cursor = None
+while True:
+    page = kova.runs.list(status="RUNNING", limit=100, after=cursor)
+    for run in page.data:
+        print(f"{run.id}  {run.project_id}  {run.step_count} steps")
+    if not page.has_more:
+        break
+    cursor = page.next_cursor
+
+# Built-in iterator helper — auto-paginates
+for run in kova.runs.iter(project_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T0"):
+    if run.status == "FAILED":
+        print(f"failed: {run.id}")
+```
+
+## See also
+
+- [`POST /v1/ks/runs`](/docs/api/runs/create) · [`GET /v1/ks/runs/{id}`](/docs/api/runs/get)
+- [Pagination](/docs/api/using-the-api/pagination) · [IDs](/docs/api/using-the-api/ids) · [Errors](/docs/api/using-the-api/errors)
+- [Runs](/docs/concepts/run-hierarchy/runs) · [Run state machine](/docs/concepts/run-hierarchy/run-state-machine)

@@ -1,0 +1,115 @@
+---
+title: Cancel a Run
+description: POST /v1/ks/runs/{id}/cancel — terminate a Run idempotently, freezing cost accounting and closing the attached Budget.
+---
+
+`POST /v1/ks/runs/{id}/cancel` transitions a [Run](/docs/concepts/run-hierarchy/runs) to `CANCELED` (terminal). The endpoint is **idempotent**: cancelling an already-`CANCELED` Run returns `200 OK` with the unchanged Run row, not an error. Cancelling a Run in `COMPLETED` or `FAILED` returns `409 invalid_run_state` because those terminal states represent different outcomes — KovaServe never overwrites one terminal verdict with another.
+
+The dedicated cancel verb is the recommended path for operator and runtime cancellations. It produces a clearer audit signal than [`PATCH /v1/ks/runs/{id}` with `{"status": "CANCELED"}`](/docs/api/runs/update) — the timeline records `ks.run.canceled` with the cancelling actor, and the budget close emits `ks.budget.closed` with `reason: "run_canceled"`.
+
+## What cancellation does
+
+- **Stops further admission.** No new [Step](/docs/concepts/run-hierarchy/steps) is admitted under the Run. Inference calls referencing the Run are rejected with `409 run_not_runnable`.
+- **Allows in-flight ModelCalls to settle.** Calls that were already dispatched to the substrate complete naturally so their token counts and cost are recorded accurately; cancellation does not abandon partial work.
+- **Freezes cost accounting.** The Run's `cost_used_cents` is finalized when the last in-flight ModelCall settles. Subsequent metering queries for the Run return that final number.
+- **Closes the attached Budget.** The run-level [Budget](/docs/concepts/policy/budgets) transitions to `CLOSED`. The `ks.budget.closed` event is emitted after the `ks.run.canceled` event so a timeline reads in causal order.
+- **Releases the Session binding for new Runs.** A bound Session moves from `OPEN` toward `IDLE` per the [Session state machine](/docs/concepts/continuity/session-state-machine), making it available to host the next Run.
+- **Preserves the audit trail.** Every Step, ModelCall, ContextManifest, and event recorded under the Run remains queryable forever.
+
+Cancellation is **not** a recovery primitive. To restart from a known-good point, create a [branch from a Checkpoint](/docs/api/runs/branch) instead.
+
+## Endpoint
+
+```
+POST /v1/ks/runs/{run_id}/cancel
+```
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_...` — see [Authentication](/docs/api/using-the-api/authentication). |
+| Path parameter | `run_id` — bare 26-character Crockford ULID. |
+| Idempotent | Yes — repeated calls on a `CANCELED` Run return `200 OK`. |
+| Errors | Native envelope — see [Errors](/docs/api/using-the-api/errors). |
+
+## Request body
+
+The request body is empty. The cancel verb takes no fields.
+
+```http
+POST /v1/ks/runs/01J8X9Y2Z3K4M5N6P7Q8R9S0T1/cancel HTTP/1.1
+Authorization: Bearer ks_...
+Content-Length: 0
+```
+
+## Response — `200 OK`
+
+The body is the Run row in `CANCELED`.
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+  "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+  "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+  "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+  "policy_scope_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T3",
+  "budget_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T4",
+  "context_budget_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T5",
+  "branch_from": null,
+  "status": "CANCELED",
+  "model": "qwen3-coder-30b",
+  "external_run_id": "lg-task-9821",
+  "external_runtime": "langgraph",
+  "step_count": 4,
+  "created_at": "2026-05-05T12:00:00Z",
+  "started_at": "2026-05-05T12:00:01Z",
+  "completed_at": "2026-05-05T12:03:42Z"
+}
+```
+
+`completed_at` is set to the cancellation timestamp.
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `200 OK` | The Run was cancelled, *or* was already in `CANCELED` (idempotent). |
+| `401 Unauthorized` | Missing or invalid bearer token. |
+| `404 Not Found` | The Run does not exist or belongs to another Tenant. Code: `run_not_found`. |
+| `409 Conflict` | The Run is in a different terminal state — `COMPLETED` or `FAILED` — and cannot be cancelled. Code: `invalid_run_state`. The body includes `details.status` so clients can branch. |
+
+## Examples
+
+```bash
+# Cancel a Run
+curl -X POST https://api.kovaserve.com/v1/ks/runs/01J8X9Y2Z3K4M5N6P7Q8R9S0T1/cancel \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# Idempotent — same response on the second call
+curl -X POST https://api.kovaserve.com/v1/ks/runs/01J8X9Y2Z3K4M5N6P7Q8R9S0T1/cancel \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+```
+
+```python
+from kovaserve import KovaClient, KovaError
+
+kova = KovaClient(api_key="ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b")
+
+# Cancel — and tolerate the case where the Run already finished a different way
+try:
+    run = kova.runs.cancel("01J8X9Y2Z3K4M5N6P7Q8R9S0T1")
+    print(f"cancelled, final cost computed at {run.completed_at}")
+except KovaError as exc:
+    if exc.code == "invalid_run_state":
+        # Run already reached COMPLETED or FAILED — nothing to cancel
+        print(f"run already terminal: {exc.details['status']}")
+    else:
+        raise
+```
+
+## See also
+
+- [`PATCH /v1/ks/runs/{id}`](/docs/api/runs/update) — the general status-transition endpoint
+- [`POST /v1/ks/runs/{id}/branch`](/docs/api/runs/branch) — for restarting from a known-good point instead of starting over
+- [Run state machine](/docs/concepts/run-hierarchy/run-state-machine) — terminal-state semantics
+- [Budgets](/docs/concepts/policy/budgets) · [Budget state machine](/docs/concepts/policy/budget-state-machine) — the `CLOSED` transition triggered by cancellation
+- [Sessions](/docs/concepts/continuity/sessions) · [Session state machine](/docs/concepts/continuity/session-state-machine) — how a bound Session reacts when its Run is cancelled
