@@ -8,6 +8,8 @@ Living roadmap for `docs.kovaserve.com`. Source of structure for `content/docs/`
 
 **One-topic-per-page rule (binding):** each page covers exactly one entity, endpoint, command, decorator, recipe, or state machine. Bundle only when the bundle *is* the topic — overviews, hierarchy maps, taxonomies. If a page would need more than one H1-level concept to make sense, split it.
 
+**Folder-grouping rule (binding):** every page lives inside a topic folder, never as a flat file at a section root. The only exception is a section's own `index.mdx`. If a topic only has one or two pages today, still place them in a folder so future siblings have a home.
+
 **Finished-product rule (binding):** these docs describe KovaServe as a complete, polished product. The blueprint is the source of truth for what the product is; pages reflect the blueprint as built. No hedging, no "not yet shipped", no shipped-vs-deferred breakdowns, no implementation-status disclosures anywhere in `content/docs/`. Implementation status lives in `kova-v1/docs/vertical-slices/SLICE-STATUS.md` and (later) a separate roadmap surface — never in the docs site. The docs are the development target.
 
 **No-internal-language rule (binding):** user-facing pages never leak internal program language. Banned anywhere in `content/docs/`: the words "slice", "pass", "ADR", "blueprint", "positioning brief", "vertical slice"; document filename citations (`SLICE-STATUS.md`, `KovaServe_Blueprint.md`, `kova_serve_product_positioning_brief.md`, `VERTICAL-SLICES-V2.md`, `CLAUDE.md`); identifier citations (`ADR-NNN`, `Slice X.Y`, `Pass N`, `§N.M`, `KI-NNN`, `VS-N`); engineering-process phrasing ("in this slice", "this pass", "per ADR-NNN", "see the blueprint"). Concept and API pages may still cite the canonical entity vocabulary (Run, Step, ContextManifest, etc.) and external standards (RFCs, OpenAI-compatibility callouts) — those are product, not program. The docs describe the product, not the program building it.
@@ -23,7 +25,7 @@ Living roadmap for `docs.kovaserve.com`. Source of structure for `content/docs/`
 
 ## 1. Top of tree
 
-- [x] `index.mdx` — Introduction (positioning voice; Agentic Execution Cloud; the three layers)
+- [x] `index.mdx` — Introduction (positioning voice; the Agentic Execution Cloud category claim)
 
 ## 2. Quickstart   (positioning voice)
 
@@ -38,64 +40,50 @@ Living roadmap for `docs.kovaserve.com`. Source of structure for `content/docs/`
 
 - [x] `concepts/index.mdx` — Concepts overview + canonical entity map
 
-### Layered model — Blueprint Part 2
+### Where KovaServe fits   (purpose: orient the reader in their AI stack — nothing more)
 
-- [x] `concepts/layers/index.mdx` — Layer 1 / 2 / 3 boundaries
-- [x] `concepts/layers/execution-substrate.mdx` — Layer 1: vLLM alignment, what the substrate exposes
-- [x] `concepts/layers/control-plane.mdx` — Layer 2: KovaServe control plane responsibilities
-- [x] `concepts/layers/runtime-wedge.mdx` — Layer 3: runtime wedge (CodeRuns)
+- [x] `concepts/layers/index.mdx` — How KovaServe sits between open inference substrate and your agent runtime
+- [x] `concepts/layers/execution-substrate.mdx` — Layer 1: the open inference substrate KovaServe runs on (vLLM)
+- [x] `concepts/layers/control-plane.mdx` — Layer 2: the KovaServe control plane — runs, sessions, checkpoints, budgets, policy
+- [x] `concepts/layers/runtime-wedge.mdx` — Layer 3: the optional KovaServe runtime for coding / terminal / tool-heavy agents
 
-### Run hierarchy — Blueprint §7.2 entities, §7.4 FSMs
+### Run hierarchy
 
 - [x] `concepts/run-hierarchy/runs.mdx` — Run entity
-- [x] `concepts/run-hierarchy/sub-runs.mdx` — `parent_run_id`, `summary_artifact_id`, sub-run lineage
 - [x] `concepts/run-hierarchy/steps.mdx` — Step entity
-- [x] `concepts/run-hierarchy/step-types.mdx` — canonical Pass 7 set + `COMPACT`, `MEMORY_READ`, `MEMORY_WRITE`, `SUB_RUN_DISPATCH`, `SUB_RUN_JOIN`
+- [x] `concepts/run-hierarchy/step-types.mdx` — canonical step type taxonomy (`MODEL_CALL`, `TOOL_PLAN`, `TOOL_EXECUTE`, `FILE_READ`, `FILE_WRITE`, `PROCESS_START`, `OBSERVE`, `THINK`, `CHECKPOINT`, `PAUSE`, `RESUME`, `BRANCH`, `COMPLETE`, `FAIL`, `COMPACT`)
 - [x] `concepts/run-hierarchy/model-calls.mdx` — ModelCall entity
 - [x] `concepts/run-hierarchy/run-state-machine.mdx` — 12-state Run FSM (CREATED → … → BRANCHING → COMPLETED/FAILED/CANCELED)
 - [x] `concepts/run-hierarchy/step-state-machine.mdx` — Step FSM
 - [x] `concepts/run-hierarchy/identity-and-ids.mdx` — ULIDs, Session ID shape, idempotency keys
 
-### Continuity — Blueprint §5.9, §7.2
+### Continuity
 
 - [x] `concepts/continuity/sessions.mdx` — Session entity
 - [x] `concepts/continuity/session-state-machine.mdx` — `OPEN → IDLE → RESUMABLE → ARCHIVED | EXPIRED`
 - [x] `concepts/continuity/current-manifest.mdx` — `current_manifest_id` semantics
 
-### Checkpoints, recovery, branches — Blueprint §5.10, §6.10, §7.4
+### Checkpoints, recovery, branches
 
 - [x] `concepts/recovery/checkpoints.mdx` — Checkpoint entity
 - [x] `concepts/recovery/checkpoint-state-machine.mdx` — `REQUESTED → CAPTURING → STORED → VALIDATED → RESTORING → RESTORED`
-- [x] `concepts/recovery/state-handles.mdx` — StateHandle (`kv_prefix | context_manifest | checkpoint | artifact_bundle | memory_entry | runtime_state`)
+- [x] `concepts/recovery/state-handles.mdx` — StateHandle (`kv_prefix | context_manifest | checkpoint | artifact_bundle | runtime_state`)
 - [x] `concepts/recovery/resume-flow.mdx` — `RECOVERING → RESUMING → RUNNING` (logical-context-first)
 - [x] `concepts/recovery/retries.mdx` — runtime retry semantics
 - [x] `concepts/recovery/branches.mdx` — Branch concept (`BRANCHING` state)
 - [x] `concepts/recovery/branch-flow.mdx` — branching from a checkpoint into a child run
 
-### Context engineering — Blueprint §5.17, §7.2, §8.1 context APIs
+### Context engineering
 
 - [x] `concepts/context/context-manifests.mdx` — ContextManifest (audit anchor)
-- [x] `concepts/context/context-segments.mdx` — ContextSegment, `context_type`, `parts` wire format
+- [x] `concepts/context/context-segments.mdx` — ContextSegment, `context_type`, `memory_class` (5-value retention-intent label), `parts` wire format
 - [x] `concepts/context/context-artifacts.mdx` — ContextArtifact (object-storage)
 - [x] `concepts/context/compaction-records.mdx` — CompactionRecord entity
 - [x] `concepts/context/compaction-lineage.mdx` — source/output relationships
-- [x] `concepts/context/segment-types.mdx` — canonical `context_type` values (ADR-003)
+- [x] `concepts/context/segment-types.mdx` — canonical `context_type` values
 - [x] `concepts/context/renderer-versions.mdx` — renderer + tokenizer fingerprinting
 
-### Memory — Blueprint §7.2 MemoryScope/MemoryEntry, §8.3 memory events
-
-- [x] `concepts/memory/index.mdx` — overview of the memory model
-- [x] `concepts/memory/memory-scopes.mdx` — `ephemeral | session | user | tenant | global`
-- [x] `concepts/memory/memory-entries.mdx` — MemoryEntry row shape, namespacing
-- [x] `concepts/memory/memory-store.mdx` — Memory Store Service surface
-
-### Tools — Blueprint §7.2
-
-- [x] `concepts/tools/tool-catalogs.mdx` — ToolCatalog (hashed, immutable, versioned)
-- [x] `concepts/tools/tool-context-disposition.mdx` — `inline_full | inline_preview | summary_required | artifact_ref | drop | blocked`
-- [x] `concepts/tools/tool-governance.mdx` — tool policy enforcement model
-
-### Budgets & Policy — Blueprint §5.12, §5.13, §7.2, §7.4
+### Budgets & Policy
 
 - [x] `concepts/policy/budgets.mdx` — Budget entity
 - [x] `concepts/policy/budget-state-machine.mdx` — `ACTIVE → WARNING → DEGRADED_ALLOWED | HARD_STOP → CLOSED`
@@ -104,7 +92,7 @@ Living roadmap for `docs.kovaserve.com`. Source of structure for `content/docs/`
 - [x] `concepts/policy/policy-scopes.mdx` — PolicyScope hierarchy + enrichment fields
 - [x] `concepts/policy/admission.mdx` — admission decision flow
 
-### Routing & cache — Blueprint §5.6–5.8
+### Routing & cache
 
 - [x] `concepts/routing/kv-cache.mdx` — KV cache fundamentals
 - [x] `concepts/routing/manifest-aware-routing.mdx` — Cache-Aware Router behaviour
@@ -112,23 +100,23 @@ Living roadmap for `docs.kovaserve.com`. Source of structure for `content/docs/`
 - [x] `concepts/routing/placement-hints.mdx` — PlacementHint
 - [x] `concepts/routing/cached-tokens.mdx` — `cached_tokens` accounting
 
-### Cost — Blueprint §5.13; positioning §12 Cost Per Completed Run
+### Cost
 
-- [x] `concepts/cost/cost-model.mdx` — gross / net / cache savings (ADR-019/020/021)
-- [x] `concepts/cost/pricing-snapshots.mdx` — `*_price_snapshot` columns (ADR-022)
+- [x] `concepts/cost/cost-model.mdx` — gross / net / cache savings
+- [x] `concepts/cost/pricing-snapshots.mdx` — `*_price_snapshot` columns
 - [x] `concepts/cost/cost-per-completed-run.mdx` — the unit of value (positioning voice)
 
-### Tenancy — Blueprint §5.14
+### Tenancy
 
-- [x] `concepts/tenancy/index.mdx` — overview of the hierarchy
-- [x] `concepts/tenancy/tenants.mdx`
-- [x] `concepts/tenancy/projects.mdx`
-- [x] `concepts/tenancy/environments.mdx`
-- [x] `concepts/tenancy/keys.mdx` — keys and key scopes
+- [x] `concepts/tenancy/index.mdx` — Tenant → Project → Environment → Deployment hierarchy overview
+- [x] `concepts/tenancy/tenants.mdx` — Tenant (billing root)
+- [x] `concepts/tenancy/projects.mdx` — Project (logical app boundary)
+- [x] `concepts/tenancy/environments.mdx` — Environment (prod / staging / dev)
+- [x] `concepts/tenancy/keys.mdx` — Bearer Keys (credential surface, orthogonal to the hierarchy)
 
-### Events — Blueprint §8.3 (10 streams) + §8.4 envelope
+### Events
 
-- [x] `concepts/events.mdx` — overview, envelope, taxonomy
+- [x] `concepts/events/index.mdx` — overview, envelope, taxonomy (8 streams)
 - [x] `concepts/events/event-envelope.mdx` — minimum envelope
 - [x] `concepts/events/execution.mdx`
 - [x] `concepts/events/state.mdx` — `kv_events` stream
@@ -138,17 +126,15 @@ Living roadmap for `docs.kovaserve.com`. Source of structure for `content/docs/`
 - [x] `concepts/events/checkpoint.mdx`
 - [x] `concepts/events/runtime.mdx`
 - [x] `concepts/events/context-engineering.mdx`
-- [x] `concepts/events/memory.mdx`
-- [x] `concepts/events/sub-run.mdx`
 
-### Product modes — Blueprint Part 9
+### Product modes
 
-- [x] `concepts/deployment/byo-runtime.mdx` — BYO runtime mode (§9.2)
-- [x] `concepts/deployment/managed-runtime.mdx` — KovaServe runtime mode (§9.3)
-- [x] `concepts/deployment/managed-cloud.mdx` — managed cloud (§9.4)
-- [x] `concepts/deployment/private-deployment.mdx` — self-hosted / private / sovereign (§9.5)
+- [x] `concepts/deployment/byo-runtime.mdx` — BYO runtime mode
+- [x] `concepts/deployment/managed-runtime.mdx` — KovaServe runtime mode
+- [x] `concepts/deployment/managed-cloud.mdx` — managed cloud
+- [x] `concepts/deployment/private-deployment.mdx` — self-hosted / private / sovereign
 
-### Runtime / Layer 3 — Blueprint Part 6
+### Runtime
 
 - [x] `concepts/runtime/runtime-architecture.mdx`
 - [x] `concepts/runtime/runtime-execution-semantics.mdx`
@@ -160,7 +146,7 @@ Living roadmap for `docs.kovaserve.com`. Source of structure for `content/docs/`
 - [x] `concepts/runtime/runtime-local-state.mdx`
 - [x] `concepts/runtime/runtime-observability.mdx`
 
-### Managed-agent SKUs — positioning §11 (positioning voice)
+### Managed-agent SKUs   (positioning voice)
 
 - [x] `concepts/managed-agents/index.mdx` — SKU model overview
 - [x] `concepts/managed-agents/coderuns.mdx`
@@ -171,75 +157,64 @@ Living roadmap for `docs.kovaserve.com`. Source of structure for `content/docs/`
 
 ### Migration   (positioning voice)
 
-- [ ] `guides/migrating-from-openai.mdx` — "Change two lines"
-- [ ] `guides/migrating-from-openrouter.mdx` — Private deployment + run hierarchy
-- [ ] `guides/migrating-from-langsmith.mdx` — Replacing trace UX
+- [ ] `guides/migration/migrating-from-openai.mdx` — "Change two lines"
+- [ ] `guides/migration/migrating-from-openrouter.mdx` — Private deployment + run hierarchy
+- [ ] `guides/migration/migrating-from-langsmith.mdx` — Replacing trace UX
 
 ### Authoring runs
 
-- [ ] `guides/multi-step-runs.mdx`
-- [ ] `guides/sub-run-fanout.mdx`
-- [ ] `guides/branching-from-checkpoint.mdx`
-- [ ] `guides/resuming-after-failure.mdx`
+- [ ] `guides/authoring-runs/multi-step-runs.mdx`
+- [ ] `guides/authoring-runs/branching-from-checkpoint.mdx`
+- [ ] `guides/authoring-runs/resuming-after-failure.mdx`
 
 ### Context
 
-- [ ] `guides/authoring-context-manifests.mdx`
-- [ ] `guides/managing-artifacts.mdx`
-- [ ] `guides/compaction-strategies.mdx`
-
-### Memory
-
-- [ ] `guides/using-session-memory.mdx`
-- [ ] `guides/using-user-memory.mdx`
-- [ ] `guides/using-tenant-memory.mdx`
-
-### Tools
-
-- [ ] `guides/registering-tool-catalogs.mdx`
-- [ ] `guides/tool-output-disposition.mdx`
+- [ ] `guides/context/authoring-context-manifests.mdx`
+- [ ] `guides/context/managing-artifacts.mdx`
+- [ ] `guides/context/compaction-strategies.mdx`
 
 ### Budgets & Policy
 
-- [ ] `guides/per-run-budgets.mdx`
-- [ ] `guides/context-budgets.mdx`
-- [ ] `guides/policy-scopes.mdx`
+- [ ] `guides/policy/per-run-budgets.mdx`
+- [ ] `guides/policy/context-budgets.mdx`
+- [ ] `guides/policy/policy-scopes.mdx`
 
 ### Observability
 
-- [ ] `guides/reading-run-timelines.mdx`
-- [ ] `guides/opentelemetry-export.mdx`
-- [ ] `guides/consuming-events.mdx`
+- [ ] `guides/observability/reading-run-timelines.mdx`
+- [ ] `guides/observability/opentelemetry-export.mdx`
+- [ ] `guides/observability/consuming-events.mdx`
 
 ### Tenancy
 
-- [ ] `guides/provisioning-keys.mdx`
-- [ ] `guides/managing-environments.mdx`
+- [ ] `guides/tenancy/provisioning-keys.mdx`
+- [ ] `guides/tenancy/managing-environments.mdx`
 
 ### Deployment
 
-- [ ] `guides/self-hosting-kubernetes.mdx` — k3s + Helm install (ADR-016 path)
-- [ ] `guides/sovereign-deployment.mdx`
-- [ ] `guides/byo-runtime-integration.mdx`
+- [ ] `guides/deployment/self-hosting-kubernetes.mdx` — k3s + Helm install
+- [ ] `guides/deployment/sovereign-deployment.mdx`
+- [ ] `guides/deployment/byo-runtime-integration.mdx`
 
 ## 5. API Reference (hand-authored MDX; curl + Python tabs)
 
 ### Using the API
 
-- [x] `api/index.mdx` — overview, base URL
-- [x] `api/authentication.mdx` — Bearer keys; scope hierarchy
-- [x] `api/errors.mdx` — OpenAI-style envelope on `/v1/*`; native `error_code` envelope on `/v1/ks/*`
-- [x] `api/pagination.mdx` — cursor pagination (`before` / `after` / `limit`)
-- [x] `api/idempotency.mdx` — idempotency keys
-- [x] `api/ids.mdx` — ULID + Session ID conventions
-- [x] `api/cost-headers.mdx` — `X-KS-Cost-Cents`, cache savings
-- [x] `api/streaming.mdx` — SSE conventions; final-chunk cost delivery
+- [x] `api/index.mdx` — API Reference root with sub-section cards
+- [x] `api/using-the-api/index.mdx` — overview, base URL, two API families
+- [x] `api/using-the-api/authentication.mdx` — Bearer keys; scope hierarchy
+- [x] `api/using-the-api/errors.mdx` — OpenAI-style envelope on `/v1/*`; native `error_code` envelope on `/v1/ks/*`
+- [x] `api/using-the-api/pagination.mdx` — cursor pagination (`before` / `after` / `limit`)
+- [x] `api/using-the-api/idempotency.mdx` — idempotency keys
+- [x] `api/using-the-api/ids.mdx` — ULID + Session ID conventions
+- [x] `api/using-the-api/cost-headers.mdx` — `X-KS-Cost-Cents`, cache savings
+- [x] `api/using-the-api/streaming.mdx` — SSE conventions; final-chunk cost delivery
 
-### Chat & Models
+### Inference
 
-- [ ] `api/inference/chat-completions.mdx` — `POST /v1/chat/completions`
-- [ ] `api/inference/models.mdx` — `GET /v1/models`
-- [ ] `api/inference/extension-envelope.mdx` — `kovaserve` extension field surface
+- [x] `api/inference/chat-completions.mdx` — `POST /v1/chat/completions`
+- [x] `api/inference/models.mdx` — `GET /v1/models`
+- [x] `api/inference/extension-envelope.mdx` — `kovaserve` extension field surface
 
 ### Runs
 
@@ -249,10 +224,8 @@ Living roadmap for `docs.kovaserve.com`. Source of structure for `content/docs/`
 - [ ] `api/runs/update.mdx` — `PATCH /v1/ks/runs/{id}`
 - [ ] `api/runs/cancel.mdx`
 - [ ] `api/runs/steps.mdx` — `GET /v1/ks/runs/{id}/steps`
-- [ ] `api/runs/model-calls.mdx`
 - [ ] `api/runs/timeline.mdx` — `GET /v1/ks/runs/{id}/timeline`
 - [ ] `api/runs/branch.mdx`
-- [ ] `api/runs/sub-runs.mdx`
 
 ### Sessions
 
@@ -268,6 +241,14 @@ Living roadmap for `docs.kovaserve.com`. Source of structure for `content/docs/`
 - [ ] `api/checkpoints/list.mdx`
 - [ ] `api/checkpoints/restore.mdx`
 
+### Handles
+
+- [ ] `api/handles/create.mdx` — `POST /v1/ks/handles`
+- [ ] `api/handles/get.mdx` — `GET /v1/ks/handles/{id}`
+- [ ] `api/handles/list.mdx`
+- [ ] `api/handles/delete.mdx` — `DELETE /v1/ks/handles/{id}`
+- [ ] `api/handles/share.mdx` — promote a private handle to a shareable scope
+
 ### Context
 
 - [ ] `api/context/manifests/get.mdx`
@@ -279,54 +260,38 @@ Living roadmap for `docs.kovaserve.com`. Source of structure for `content/docs/`
 - [ ] `api/context/compaction-records/get.mdx`
 - [ ] `api/context/compaction-records/list.mdx`
 
-### Memory
+### Policy & Budgets
 
-- [ ] `api/memory/scopes.mdx`
-- [ ] `api/memory/entries/create.mdx`
-- [ ] `api/memory/entries/get.mdx`
-- [ ] `api/memory/entries/update.mdx`
-- [ ] `api/memory/entries/delete.mdx`
-- [ ] `api/memory/entries/list.mdx`
-- [ ] `api/memory/search.mdx`
+- [ ] `api/policy/budgets/create.mdx`
+- [ ] `api/policy/budgets/get.mdx`
+- [ ] `api/policy/budgets/list.mdx`
+- [ ] `api/policy/context-budgets/create.mdx`
+- [ ] `api/policy/context-budgets/get.mdx`
+- [ ] `api/policy/policy-scopes/create.mdx`
+- [ ] `api/policy/policy-scopes/get.mdx`
+- [ ] `api/policy/policy-scopes/list.mdx`
 
-### Tools
-
-- [ ] `api/tools/catalogs/create.mdx`
-- [ ] `api/tools/catalogs/get.mdx`
-- [ ] `api/tools/catalogs/list.mdx`
-
-### Budgets & Policy
-
-- [ ] `api/budgets/create.mdx`
-- [ ] `api/budgets/get.mdx`
-- [ ] `api/budgets/list.mdx`
-- [ ] `api/context-budgets/create.mdx`
-- [ ] `api/context-budgets/get.mdx`
-- [ ] `api/policy-scopes/create.mdx`
-- [ ] `api/policy-scopes/get.mdx`
-- [ ] `api/policy-scopes/list.mdx`
-
-### Usage & Cost
+### Metering
 
 - [ ] `api/metering/usage.mdx` — `GET /v1/ks/metering/usage`
 - [ ] `api/metering/export.mdx` — `GET /v1/ks/metering/export`
 
-### Tenants & Keys
+### Tenancy
 
-- [ ] `api/tenants/get.mdx`
-- [ ] `api/projects/create.mdx`
-- [ ] `api/projects/get.mdx`
-- [ ] `api/projects/list.mdx`
-- [ ] `api/environments/create.mdx`
-- [ ] `api/environments/get.mdx`
-- [ ] `api/environments/list.mdx`
-- [ ] `api/keys/create.mdx`
-- [ ] `api/keys/get.mdx`
-- [ ] `api/keys/list.mdx`
-- [ ] `api/keys/rotate.mdx`
-- [ ] `api/keys/revoke.mdx`
+- [ ] `api/tenancy/tenants/get.mdx`
+- [ ] `api/tenancy/projects/create.mdx`
+- [ ] `api/tenancy/projects/get.mdx`
+- [ ] `api/tenancy/projects/list.mdx`
+- [ ] `api/tenancy/environments/create.mdx`
+- [ ] `api/tenancy/environments/get.mdx`
+- [ ] `api/tenancy/environments/list.mdx`
+- [ ] `api/tenancy/keys/create.mdx`
+- [ ] `api/tenancy/keys/get.mdx`
+- [ ] `api/tenancy/keys/list.mdx`
+- [ ] `api/tenancy/keys/rotate.mdx`
+- [ ] `api/tenancy/keys/revoke.mdx`
 
-### Workers & Sandboxes
+### Runtime
 
 - [ ] `api/runtime/workers/list.mdx`
 - [ ] `api/runtime/sandboxes/create.mdx`
@@ -346,15 +311,12 @@ Living roadmap for `docs.kovaserve.com`. Source of structure for `content/docs/`
 - [ ] `api/events/checkpoint.mdx`
 - [ ] `api/events/runtime.mdx`
 - [ ] `api/events/context-engineering.mdx`
-- [ ] `api/events/memory.mdx`
-- [ ] `api/events/sub-run.mdx`
 
 ### Cluster
 
 - [ ] `api/cluster/nodes.mdx` — `/v1/ks/nodes`
 - [ ] `api/cluster/cache-lookup.mdx` — `/v1/ks/cache/lookup`
 - [ ] `api/cluster/routing-plan.mdx` — `/v1/ks/routing/plan`
-- [ ] `api/cluster/state-handles.mdx`
 
 ### Health & Metrics
 
@@ -362,6 +324,8 @@ Living roadmap for `docs.kovaserve.com`. Source of structure for `content/docs/`
 - [ ] `api/health/metrics.mdx` — `/metrics`
 
 ## 6. SDK Reference (Python `kovaserve`)
+
+### Getting started
 
 - [ ] `sdk/index.mdx` — install, configure, `KOVASERVE_API_KEY`
 - [ ] `sdk/openai-compat.mdx` — drop-in OpenAI replacement; `extra_body=`
@@ -372,7 +336,6 @@ Living roadmap for `docs.kovaserve.com`. Source of structure for `content/docs/`
 - [ ] `sdk/decorators/run.mdx` — `@kova.run`
 - [ ] `sdk/decorators/session.mdx` — `@kova.session`
 - [ ] `sdk/decorators/budget.mdx` — `@kova.budget`
-- [ ] `sdk/decorators/step.mdx` — `@kova.step`
 
 ### Clients
 
@@ -381,12 +344,12 @@ Living roadmap for `docs.kovaserve.com`. Source of structure for `content/docs/`
 - [ ] `sdk/clients/checkpoints.mdx`
 - [ ] `sdk/clients/budgets.mdx`
 - [ ] `sdk/clients/context.mdx`
-- [ ] `sdk/clients/memory.mdx`
-- [ ] `sdk/clients/tools.mdx`
 - [ ] `sdk/clients/events.mdx`
 
-- [ ] `sdk/errors.mdx` — exception hierarchy
-- [ ] `sdk/auto-generated/` — `pdoc` output (build-time)
+### Reference
+
+- [ ] `sdk/reference/errors.mdx` — exception hierarchy
+- [ ] `sdk/reference/auto-generated.mdx` — `pdoc` output (build-time)
 
 ## 7. CLI Reference (`kova`)
 
@@ -421,12 +384,6 @@ Living roadmap for `docs.kovaserve.com`. Source of structure for `content/docs/`
 - [ ] `cli/context/manifests.mdx`
 - [ ] `cli/context/artifacts.mdx`
 
-### memory
-
-- [ ] `cli/memory/list.mdx`
-- [ ] `cli/memory/get.mdx`
-- [ ] `cli/memory/set.mdx`
-
 ### usage
 
 - [ ] `cli/usage/query.mdx`
@@ -449,7 +406,6 @@ Living roadmap for `docs.kovaserve.com`. Source of structure for `content/docs/`
 - [ ] `cookbook/ops-automation.mdx` — OpsRuns reference recipe
 - [ ] `cookbook/tool-loops-with-budget-kill.mdx`
 - [ ] `cookbook/branching-from-checkpoint.mdx`
-- [ ] `cookbook/sub-run-fanout.mdx`
 - [ ] `cookbook/private-deployment.mdx`
 
 ## 9. Models
@@ -487,7 +443,7 @@ Tracked for context — outside the product surface.
 
 ## Coverage matrix (for audit)
 
-### Blueprint §7.2 canonical entities → concept page
+### Canonical entities → concept page
 
 | Entity | Page |
 |---|---|
@@ -500,17 +456,14 @@ Tracked for context — outside the product surface.
 | ContextArtifact | `concepts/context/context-artifacts.mdx` |
 | CompactionRecord | `concepts/context/compaction-records.mdx` |
 | Checkpoint | `concepts/recovery/checkpoints.mdx` |
-| MemoryScope | `concepts/memory/memory-scopes.mdx` |
-| MemoryEntry | `concepts/memory/memory-entries.mdx` |
-| ToolCatalog | `concepts/tools/tool-catalogs.mdx` |
-| ToolContextDisposition | `concepts/tools/tool-context-disposition.mdx` |
+| MemoryClass (label on ContextSegment) | `concepts/context/context-segments.mdx` |
 | PolicyScope | `concepts/policy/policy-scopes.mdx` |
 | Budget | `concepts/policy/budgets.mdx` |
 | ContextBudget | `concepts/policy/context-budgets.mdx` |
 | PlacementHint | `concepts/routing/placement-hints.mdx` |
 | StateHandle | `concepts/recovery/state-handles.mdx` |
 
-### Blueprint §7.4 state machines → concept page
+### State machines → concept page
 
 | FSM | Page |
 |---|---|
@@ -521,7 +474,7 @@ Tracked for context — outside the product surface.
 | ContextBudget | `concepts/policy/context-budget-state-machine.mdx` |
 | Session | `concepts/continuity/session-state-machine.mdx` |
 
-### Blueprint §8.3 event streams → concept + API pages
+### Event streams → concept + API pages
 
 | Stream | Concept | API |
 |---|---|---|
@@ -533,10 +486,8 @@ Tracked for context — outside the product surface.
 | Checkpoint | `concepts/events/checkpoint.mdx` | `api/events/checkpoint.mdx` |
 | Runtime | `concepts/events/runtime.mdx` | `api/events/runtime.mdx` |
 | Context engineering | `concepts/events/context-engineering.mdx` | `api/events/context-engineering.mdx` |
-| Memory | `concepts/events/memory.mdx` | `api/events/memory.mdx` |
-| Sub-run | `concepts/events/sub-run.mdx` | `api/events/sub-run.mdx` |
 
-### Blueprint Part 9 product modes → concept page
+### Product modes → concept page
 
 | Mode | Page |
 |---|---|
@@ -545,7 +496,7 @@ Tracked for context — outside the product surface.
 | Managed cloud | `concepts/deployment/managed-cloud.mdx` |
 | Self-hosted / private / sovereign | `concepts/deployment/private-deployment.mdx` |
 
-### Positioning §11 SKUs → concept + cookbook
+### Managed-agent SKUs → concept + cookbook
 
 | SKU | Concept | Cookbook |
 |---|---|---|
@@ -559,10 +510,11 @@ Tracked for context — outside the product surface.
 
 1. **Wire format is canon.** Every API page reflects the canonical wire shape. Do not invent fields outside the blueprint.
 2. **IDs are bare 26-char Crockford ULIDs**, no prefixes, **except** Session IDs which are `ses_<24hex>`.
-3. **Tenant nouns** in reference/concept copy: Tenant → Project → Environment → Deployment.
+3. **Tenant nouns** in reference/concept copy: Tenant → Project → Environment → Deployment. Keys are the orthogonal credential surface, bound to a `(tenant, project, environment)` triple — never a hierarchy level.
 4. **"Run" wins** over thread / conversation / task / workflow / job in user-facing copy.
 5. **Code examples**: tabbed by language (curl + Python minimum). CI-test against a real cluster.
 6. **No vendor lock-in references** — no Stainless / Speakeasy / Fern / Mintlify / Algolia.
 7. **Every concept page** ends with a `## See also` block linking to the relevant API and SDK pages.
 8. **Every API page** opens with a one-line plain-English description, then method + path, then auth scope, then full request/response schema.
 9. **One topic per page.** A concept page covers exactly one entity or state machine. An API page covers exactly one endpoint. A CLI page covers exactly one subcommand. A decorator page covers exactly one decorator.
+10. **Folder grouping is mandatory.** Every page lives inside a topic folder. The only flat files are section `index.mdx` files.
