@@ -1,0 +1,137 @@
+---
+title: List Workers
+description: GET /v1/ks/runtime/workers — page through Workers in the runtime pool with status, lease, current Run, and node binding.
+---
+
+`GET /v1/ks/runtime/workers` lists [Workers](/docs/concepts/runtime/workers) in the runtime pool, newest first. The response uses cursor pagination — same shape as every other list endpoint in the API. Filters narrow the result set to a single Worker `class`, lifecycle `status`, owning `node_id`, or the Run a Worker is currently driving.
+
+This endpoint surfaces only the runtime pool — substrate inference nodes are listed at [`/v1/ks/nodes`](/docs/api/cluster/nodes). A Worker's `node_id` is the runtime host the Worker process runs on, not the inference node a `MODEL_CALL` Step dispatches to.
+
+## Endpoint
+
+```
+GET /v1/ks/runtime/workers
+```
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_...` — see [Authentication](/docs/api/using-the-api/authentication). |
+| Pagination | Cursor — see [Pagination](/docs/api/using-the-api/pagination). |
+| Errors | Native envelope — see [Errors](/docs/api/using-the-api/errors). |
+
+## Query parameters
+
+| Parameter | Type | Default | Meaning |
+|---|---|---|---|
+| `limit` | integer | `100` | Maximum Workers to return. Capped at `200`. Values outside `1..200` return `400 invalid_request`. |
+| `after` | string \| null | `null` | Cursor — return Workers strictly after it in descending creation order. |
+| `before` | string \| null | `null` | Cursor — return Workers strictly before it. Mutually exclusive with `after`. |
+| `status` | string \| null | `null` | Restrict to one Worker status — `IDLE`, `CLAIMING`, `ACTIVE`, `DRAINING`, `LOST`, `STOPPED`. |
+| `class` | string \| null | `null` | Restrict to one Worker class — `standard`, `long_running`, `tool_heavy`, `restore`. |
+| `node_id` | string \| null | `null` | Restrict to one runtime host. |
+| `current_run_id` | string \| null | `null` | Find the Worker that holds the lease on a given Run. Returns at most one row. |
+| `started_after` | string \| null | `null` | ISO-8601 — Workers with `started_at >= started_after`. |
+| `started_before` | string \| null | `null` | ISO-8601 — Workers with `started_at < started_before`. |
+
+The Tenant filter is implicit — Workers from other Tenants never appear in the result, regardless of any query parameter combination.
+
+## Response — `200 OK`
+
+```json
+{
+  "data": [
+    {
+      "id": "01J8X9Y2Z3K4M5N6P7Q8R9WRK1",
+      "class": "standard",
+      "status": "ACTIVE",
+      "node_id": "01J8X9Y2Z3K4M5N6P7Q8R9NDE1",
+      "current_run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+      "lease_expires_at": "2026-05-05T12:05:00Z",
+      "started_at": "2026-05-05T11:42:00Z",
+      "version": "1.4.0",
+      "metadata": { "pool": "coderuns-eu" }
+    },
+    {
+      "id": "01J8X9Y2Z3K4M5N6P7Q8R9WRK2",
+      "class": "tool_heavy",
+      "status": "IDLE",
+      "node_id": "01J8X9Y2Z3K4M5N6P7Q8R9NDE2",
+      "current_run_id": null,
+      "lease_expires_at": null,
+      "started_at": "2026-05-05T11:38:00Z",
+      "version": "1.4.0",
+      "metadata": { "pool": "coderuns-eu" }
+    }
+  ],
+  "page": {
+    "next_cursor": "01J8X9Y2Z3K4M5N6P7Q8R9WRK2",
+    "prev_cursor": "01J8X9Y2Z3K4M5N6P7Q8R9WRK1",
+    "has_more": true,
+    "limit": 100
+  }
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | string | Worker ID — bare 26-character Crockford ULID. |
+| `class` | string | One of `standard`, `long_running`, `tool_heavy`, `restore`. See [Worker pool](/docs/concepts/runtime/workers#worker-pool). |
+| `status` | string | One of `IDLE`, `CLAIMING`, `ACTIVE`, `DRAINING`, `LOST`, `STOPPED`. See [Worker status](/docs/concepts/runtime/workers#worker-status). |
+| `node_id` | string | Runtime host the Worker process runs on. |
+| `current_run_id` | string \| null | The Run the Worker holds a lease on. `null` for `IDLE`, `DRAINING`, `LOST`, `STOPPED`. |
+| `lease_expires_at` | string \| null | When the lease ends if not renewed. `null` when the Worker holds no lease. |
+| `started_at` | string | When the Worker process came up. ISO-8601 with `Z` suffix. |
+| `version` | string | Runtime build the Worker is running. |
+| `metadata` | object | Free-form pool labels (e.g., region, hardware class). |
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `200 OK` | Returns a page of Workers. Empty `data` is valid. |
+| `400 Bad Request` | Both `before` and `after` supplied, `limit` outside `1..200`, or an unrecognized `status` / `class` value. Code: `invalid_request`. |
+| `401 Unauthorized` | Missing or invalid bearer token. |
+| `404 Not Found` | A scoping ID (`node_id`, `current_run_id`) does not resolve in the caller's Tenant. Codes: `node_not_found`, `run_not_found`. |
+
+## Examples
+
+```bash
+# Every ACTIVE Worker in the pool
+curl "https://api.kovaserve.com/v1/ks/runtime/workers?status=ACTIVE" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# Find the Worker driving a specific Run
+curl "https://api.kovaserve.com/v1/ks/runtime/workers?current_run_id=01J8X9Y2Z3K4M5N6P7Q8R9S0T1" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# Drain monitoring — Workers releasing leases ahead of a deploy
+curl "https://api.kovaserve.com/v1/ks/runtime/workers?status=DRAINING&limit=200" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# All tool-heavy Workers on a specific runtime host
+curl "https://api.kovaserve.com/v1/ks/runtime/workers?class=tool_heavy&node_id=01J8X9Y2Z3K4M5N6P7Q8R9NDE2" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+```
+
+```python
+from kovaserve import KovaClient
+
+kova = KovaClient(api_key="ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b")
+
+# Survey the pool
+for worker in kova.runtime.workers.iter():
+    print(f"{worker.id}  {worker.class_:>13}  {worker.status:>9}  run={worker.current_run_id}")
+
+# Locate the lease holder for a Run
+holder = kova.runtime.workers.list(current_run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1").data
+if holder:
+    w = holder[0]
+    print(f"Run is on Worker {w.id} (lease until {w.lease_expires_at})")
+```
+
+## See also
+
+- [Workers](/docs/concepts/runtime/workers) — the lease contract, Step boundary contract, and pool composition
+- [Runtime architecture](/docs/concepts/runtime/runtime-architecture) — where Workers fit alongside the Runtime Orchestrator and Worker Manager
+- [Runtime events](/docs/concepts/events/runtime) — events Workers emit during a Run
+- [Pagination](/docs/api/using-the-api/pagination) · [IDs](/docs/api/using-the-api/ids) · [Errors](/docs/api/using-the-api/errors)

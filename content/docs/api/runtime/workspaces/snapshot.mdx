@@ -1,0 +1,166 @@
+---
+title: Snapshot a Workspace
+description: POST /v1/ks/runtime/workspaces/{id}/snapshot — capture a byte-level snapshot of a Workspace's writable scope and register it as a workspace_snapshot WorkspaceArtifact.
+---
+
+`POST /v1/ks/runtime/workspaces/{id}/snapshot` captures a byte-level snapshot of a [Workspace](/docs/concepts/runtime/workspaces)'s writable scope and registers it as a `workspace_snapshot` [WorkspaceArtifact](/docs/concepts/runtime/workspace-artifacts). The snapshot is the immutable common ancestor for [branches](/docs/concepts/recovery/branches) and the `runtime_state` [StateHandle](/docs/concepts/recovery/state-handles) that future [Checkpoints](/docs/concepts/recovery/checkpoints) attach.
+
+Snapshots are normally captured automatically — on every Checkpoint when the [sandbox profile](/docs/concepts/runtime/sandboxes#sandbox-profile) sets `snapshot_policy = on_checkpoint`, and before every branch so the child Run starts from the parent's filesystem state. This endpoint is the explicit path: capture a snapshot at an arbitrary point on the [timeline](/docs/concepts/runtime/runtime-observability) — to seed an out-of-band branch, to pin pre-deploy state, or to satisfy an audit cadence the Project's retention policy does not already cover.
+
+The capture runs against the live [Sandbox](/docs/concepts/runtime/sandboxes) bound to the Workspace. While the snapshot is being captured, the sandbox transitions to `SNAPSHOT_CAPTURING`; it returns to its prior state once bytes are durable. The capture does not interrupt model calls, but `FILE_WRITE` and `PROCESS_START` Steps queued during the window are admitted only after the snapshot reaches `SNAPSHOT_STORED`.
+
+## Endpoint
+
+```
+POST /v1/ks/runtime/workspaces/{workspace_id}/snapshot
+```
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_...` — see [Authentication](/docs/api/using-the-api/authentication). |
+| Path parameter | `workspace_id` — bare 26-character Crockford ULID. |
+| Content type | `application/json` (request body is optional). |
+| Idempotent | Yes, when `Idempotency-Key` is supplied — see [Idempotency](/docs/api/using-the-api/idempotency). |
+| Errors | Native envelope — see [Errors](/docs/api/using-the-api/errors). |
+
+## Request body
+
+The request body is optional. When supplied, it carries metadata that surfaces on the captured artifact.
+
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `name` | string \| null | no | Human-readable snapshot name. Surfaces as the `WorkspaceArtifact.name`. Defaults to `snap-step-<ordinal>` when the snapshot is captured at a Step boundary, otherwise `snap-<created_at>`. |
+| `note` | string \| null | no | Optional free-form note. Surfaces as a sibling `checkpoint_note` artifact when the capture is part of a Checkpoint; otherwise stored on the snapshot's `metadata.note`. Capped at 4 KiB. |
+| `step_boundary` | string \| null | no | Bind the snapshot to a specific Step boundary. Accepts a Step ID. When omitted, the runtime captures at the *current* sandbox state. The Step must belong to the Run that owns the Workspace. |
+| `metadata` | object \| null | no | Free-form labels attached to the snapshot row. |
+
+### Example
+
+```json
+{
+  "name": "pre-migration-snapshot",
+  "note": "Captured before applying the 0042 schema migration.",
+  "metadata": { "purpose": "audit" }
+}
+```
+
+## Response — `201 Created`
+
+The body is the registered snapshot row. The underlying bytes live in object storage as a tarball compressed with zstd; a sibling `WorkspaceArtifact` of type `workspace_snapshot` is created in the same transaction so the snapshot is queryable through `GET /v1/ks/runtime/runs/{id}/artifacts`.
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9SNP2",
+  "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+  "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+  "workspace_id": "01J8X9Y2Z3K4M5N6P7Q8R9WSP1",
+  "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+  "step_id": "01J8X9Y2Z3K4M5N6P7Q8R9STP21",
+  "checkpoint_id": null,
+  "artifact_id": "01J8X9Y2Z3K4M5N6P7Q8R9ARTQ",
+  "name": "pre-migration-snapshot",
+  "byte_size": 21048372,
+  "digest": "sha256:c81b9e0d4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c",
+  "compression": "zstd",
+  "storage_uri": "s3://ks-checkpoints/tenants/01J.../runs/01J.../snapshots/01J8X9Y2Z3K4M5N6P7Q8R9SNP2.tar.zst",
+  "captured_at": "2026-05-05T12:21:04Z",
+  "metadata": {
+    "purpose": "audit",
+    "note": "Captured before applying the 0042 schema migration."
+  }
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | string | Snapshot ID — bare 26-character Crockford ULID. |
+| `tenant_id` / `project_id` | string | Owning tenancy pair. |
+| `workspace_id` | string | Workspace the snapshot was captured from. |
+| `run_id` | string | The Run the Workspace is bound to. |
+| `step_id` | string \| null | Step boundary the snapshot is anchored to, when supplied or implicitly bound. |
+| `checkpoint_id` | string \| null | Checkpoint the snapshot is attached to as a `runtime_state` StateHandle. `null` for ad-hoc snapshots. |
+| `artifact_id` | string | The companion `workspace_snapshot` [WorkspaceArtifact](/docs/concepts/runtime/workspace-artifacts). |
+| `name` | string | Human-readable name. |
+| `byte_size` | integer | Compressed snapshot size in bytes. |
+| `digest` | string | Content hash of the compressed snapshot — `sha256:...`. |
+| `compression` | string | `zstd`. |
+| `storage_uri` | string | Object-storage URI. The bucket is hosted MinIO on managed cloud and the customer-supplied S3 service on private deployment. |
+| `captured_at` | string | ISO-8601 timestamp with `Z` suffix. |
+| `metadata` | object | Echoes request `metadata`; includes `note` when supplied. |
+
+### Headers
+
+```http
+HTTP/1.1 201 Created
+Content-Type: application/json
+X-Request-Id:        01J8X9Y2Z3K4M5N6P7Q8R9S0XX
+X-KS-Workspace-Id:   01J8X9Y2Z3K4M5N6P7Q8R9WSP1
+X-KS-Snapshot-Id:    01J8X9Y2Z3K4M5N6P7Q8R9SNP2
+X-KS-Artifact-Id:    01J8X9Y2Z3K4M5N6P7Q8R9ARTQ
+```
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `201 Created` | The snapshot was captured, durable on object storage, and registered. |
+| `400 Bad Request` | Malformed JSON, unknown fields, or `note` exceeds 4 KiB. Code: `invalid_request`. |
+| `401 Unauthorized` | Missing, malformed, or unresolved API key. |
+| `403 Forbidden` | The resolved [PolicyScope](/docs/concepts/policy/policy-scopes) blocks snapshot capture for the Project (e.g., `snapshot_policy = never`), or the `data_boundary` does not allow snapshot bytes in any configured bucket. Codes: `snapshot_not_permitted`, `data_boundary_violation`. |
+| `404 Not Found` | The Workspace does not exist *or* belongs to another Tenant; or `step_boundary` does not resolve under the Workspace's Run. Codes: `workspace_not_found`, `step_not_found`. |
+| `409 Conflict` | The Workspace's sandbox is `STOPPED` or `FAILED`, or the supplied `Idempotency-Key` was reused with a different request body. Codes: `sandbox_unavailable`, `idempotency_conflict`. |
+| `422 Unprocessable Entity` | The body parsed but failed schema validation. `details` lists field-level errors. |
+| `429 Too Many Requests` | Rate limit exceeded, or a snapshot is already in progress for this Workspace. Codes: `rate_limited`, `snapshot_already_in_flight`. |
+| `507 Insufficient Storage` | The Project's snapshot retention quota is exhausted. Code: `snapshot_quota_exceeded`. |
+
+## Examples
+
+```bash
+# Capture an ad-hoc snapshot at the current sandbox state
+curl -X POST https://api.kovaserve.com/v1/ks/runtime/workspaces/01J8X9Y2Z3K4M5N6P7Q8R9WSP1/snapshot \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "pre-migration-snapshot",
+    "note": "Captured before applying the 0042 schema migration."
+  }'
+
+# Bind the snapshot to a specific Step boundary, with idempotency
+curl -X POST https://api.kovaserve.com/v1/ks/runtime/workspaces/01J8X9Y2Z3K4M5N6P7Q8R9WSP1/snapshot \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: 6c1f8a30-9b22-4f0e-9d6c-12c4f0a1b2c3" \
+  -d '{
+    "step_boundary": "01J8X9Y2Z3K4M5N6P7Q8R9STP21",
+    "name": "post-build-step-21"
+  }'
+```
+
+```python
+from kovaserve import KovaClient
+
+kova = KovaClient(api_key="ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b")
+
+# Capture and use as a branch ancestor
+snap = kova.runtime.workspaces.snapshot(
+    workspace_id="01J8X9Y2Z3K4M5N6P7Q8R9WSP1",
+    name="experiment-baseline",
+)
+print(f"snapshot {snap.id} ({snap.byte_size:,} bytes) at {snap.storage_uri}")
+
+# Branch a child Run from this snapshot — the child's Workspace is seeded from snap.id
+child_run = kova.runs.branch(
+    parent_run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    workspace_snapshot_id=snap.id,
+)
+```
+
+## See also
+
+- [`GET /v1/ks/runtime/workspaces/{id}`](/docs/api/runtime/workspaces/get) — see the workspace's snapshot list and branch lineage
+- [Workspaces](/docs/concepts/runtime/workspaces) — source binding, mutation log, snapshots, branch lineage
+- [Workspace artifacts](/docs/concepts/runtime/workspace-artifacts) — `workspace_snapshot` is one of the artifact types
+- [Branch flow](/docs/concepts/recovery/branch-flow) — using a snapshot as the ancestor of a child Run
+- [Checkpoints](/docs/concepts/recovery/checkpoints) — sandbox snapshots as `runtime_state` StateHandles
+- [State handles](/docs/concepts/recovery/state-handles) — the typed reference shape snapshots surface as
+- [Idempotency](/docs/api/using-the-api/idempotency) · [Errors](/docs/api/using-the-api/errors) · [IDs](/docs/api/using-the-api/ids)

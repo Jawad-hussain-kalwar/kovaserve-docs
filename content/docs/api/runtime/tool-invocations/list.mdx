@@ -1,0 +1,171 @@
+---
+title: List Tool Invocations
+description: GET /v1/ks/runtime/tool-invocations — page through ToolInvocation rows with tool name and class, sandbox binding, outcome, latency, and artifact references.
+---
+
+`GET /v1/ks/runtime/tool-invocations` lists [ToolInvocations](/docs/concepts/runtime/tool-invocations) — the runtime's first-class records of tool executions — newest first. The response uses cursor pagination — same shape as every other list endpoint in the API. Filters narrow the result set to a single Run, Step, sandbox, tool name, tool class, or outcome.
+
+The endpoint surfaces ToolInvocations across runtime modes: built-in tool runs in [KovaServe runtime mode](/docs/concepts/deployment/managed-runtime) and `POST /v1/ks/tools/report` records from [BYO runtime](/docs/concepts/deployment/byo-runtime) clients all show up here once admitted by the resolved [PolicyScope](/docs/concepts/policy/policy-scopes) and the Run's [Budget](/docs/concepts/policy/budgets) `tool_limit`.
+
+Tool *result bytes* are not embedded on list responses. The structured `result_summary` is included for previews; the full result is fetchable through the [`result_artifact_id`](/docs/api/context/artifacts/get) when offload was required.
+
+## Endpoint
+
+```
+GET /v1/ks/runtime/tool-invocations
+```
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_...` — see [Authentication](/docs/api/using-the-api/authentication). |
+| Pagination | Cursor — see [Pagination](/docs/api/using-the-api/pagination). |
+| Errors | Native envelope — see [Errors](/docs/api/using-the-api/errors). |
+
+## Query parameters
+
+| Parameter | Type | Default | Meaning |
+|---|---|---|---|
+| `limit` | integer | `100` | Maximum invocations to return. Capped at `200`. Values outside `1..200` return `400 invalid_request`. |
+| `after` | string \| null | `null` | Cursor — return invocations strictly after it in descending creation order. |
+| `before` | string \| null | `null` | Cursor — return invocations strictly before it. Mutually exclusive with `after`. |
+| `run_id` | string \| null | `null` | Restrict to one [Run](/docs/concepts/run-hierarchy/runs). |
+| `step_id` | string \| null | `null` | Restrict to one `TOOL_EXECUTE` Step. Implies `run_id`. |
+| `sandbox_id` | string \| null | `null` | Restrict to one [Sandbox](/docs/concepts/runtime/sandboxes). Useful when reconciling tool actions against a persistent sandbox. |
+| `tool_name` | string \| null | `null` | Restrict to one tool — e.g., `run_tests`, `git`, `shell`. |
+| `tool_class` | string \| null | `null` | Restrict to one tool class — `shell`, `file`, `repo_git`, `test_build`, `http_api`, `structured_external`. |
+| `outcome` | string \| null | `null` | Restrict to one outcome — `SUCCEEDED`, `FAILED`, `DENIED`, `TIMED_OUT`. |
+| `idempotent` | boolean \| null | `null` | When `true`, only invocations of tools registered as idempotent. When `false`, only non-idempotent. |
+| `created_after` | string \| null | `null` | ISO-8601 — invocations with `started_at >= created_after`. |
+| `created_before` | string \| null | `null` | ISO-8601 — invocations with `started_at < created_before`. |
+
+The Tenant filter is implicit — invocations from other Tenants never appear in the result, regardless of any query parameter combination.
+
+## Response — `200 OK`
+
+```json
+{
+  "data": [
+    {
+      "id": "01J8X9Y2Z3K4M5N6P7Q8R9TIV1",
+      "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+      "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+      "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+      "step_id": "01J8X9Y2Z3K4M5N6P7Q8R9STP1",
+      "sandbox_id": "01J8X9Y2Z3K4M5N6P7Q8R9SBX1",
+      "tool_name": "run_tests",
+      "tool_class": "test_build",
+      "idempotent": true,
+      "arguments_digest": "sha256:6a04f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9",
+      "outcome": "FAILED",
+      "result_summary": "1 of 47 tests failed: test_refund_partial — assertion error on `tax_cents`.",
+      "result_artifact_id": "01J8X9Y2Z3K4M5N6P7Q8R9ART1",
+      "cost_cents": "0.0000",
+      "started_at": "2026-05-05T12:01:00.000Z",
+      "completed_at": "2026-05-05T12:01:42.180Z",
+      "duration_ms": 42180,
+      "external_runtime": null
+    },
+    {
+      "id": "01J8X9Y2Z3K4M5N6P7Q8R9TIV2",
+      "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+      "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+      "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+      "step_id": "01J8X9Y2Z3K4M5N6P7Q8R9STP3",
+      "sandbox_id": "01J8X9Y2Z3K4M5N6P7Q8R9SBX1",
+      "tool_name": "git",
+      "tool_class": "repo_git",
+      "idempotent": false,
+      "arguments_digest": "sha256:9f1c2b8d4e1f0925a1b6c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4",
+      "outcome": "DENIED",
+      "result_summary": "Tool denied by policy: tool_policy_ref blocks `repo_git push` for project scope.",
+      "result_artifact_id": null,
+      "cost_cents": "0.0000",
+      "started_at": "2026-05-05T12:02:11.000Z",
+      "completed_at": "2026-05-05T12:02:11.014Z",
+      "duration_ms": 14,
+      "external_runtime": null
+    }
+  ],
+  "page": {
+    "next_cursor": "01J8X9Y2Z3K4M5N6P7Q8R9TIV2",
+    "prev_cursor": "01J8X9Y2Z3K4M5N6P7Q8R9TIV1",
+    "has_more": true,
+    "limit": 100
+  }
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | string | ToolInvocation ID — bare 26-character Crockford ULID. |
+| `tenant_id` / `project_id` | string | Owning tenancy pair, inherited from the Run. |
+| `run_id` / `step_id` | string | The Run and the `TOOL_EXECUTE` Step the invocation belongs to. |
+| `sandbox_id` | string \| null | The sandbox the invocation dispatched into. `null` for non-sandbox-bound tools (e.g., some `http_api` paths). |
+| `tool_name` | string | The registered tool name. |
+| `tool_class` | string | One of `shell`, `file`, `repo_git`, `test_build`, `http_api`, `structured_external`. See [Tool classes](/docs/concepts/runtime/tool-invocations#tool-classes). |
+| `idempotent` | boolean | Whether the tool was registered as idempotent. Drives [retry](/docs/concepts/recovery/retries) decisions. |
+| `arguments_digest` | string | SHA-256 of the canonical-form arguments. The full `arguments` object is on [`GET /v1/ks/tools/results/{id}`](/docs/concepts/runtime/tool-invocations#wire-shape) under operator scope; list responses carry only the digest. |
+| `outcome` | string | One of `SUCCEEDED`, `FAILED`, `DENIED`, `TIMED_OUT`. |
+| `result_summary` | string \| null | Bounded summary of the result, suitable for the next [`MODEL_CALL`](/docs/concepts/run-hierarchy/model-calls)'s context. |
+| `result_artifact_id` | string \| null | The [ContextArtifact](/docs/concepts/context/context-artifacts) holding the full result, when admission required offload. |
+| `cost_cents` | string | Cost in cents as a decimal string with 4 fractional digits. `"0.0000"` for unpriced tool classes. See [Cost headers](/docs/api/using-the-api/cost-headers). |
+| `started_at` / `completed_at` | string | ISO-8601 timestamps. |
+| `duration_ms` | integer | Wall-clock duration of the invocation. |
+| `external_runtime` | string \| null | Set when the invocation was reported by an external runtime through `POST /v1/ks/tools/report`. |
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `200 OK` | Returns a page of ToolInvocations. Empty `data` is valid. |
+| `400 Bad Request` | Both `before` and `after` supplied, `limit` outside `1..200`, an unrecognized `outcome` / `tool_class` value, or `step_id` supplied without `run_id` resolving to the same Run. Code: `invalid_request`. |
+| `401 Unauthorized` | Missing or invalid bearer token. |
+| `404 Not Found` | A scoping ID (`run_id`, `step_id`, `sandbox_id`) does not resolve in the caller's Tenant. Codes: `run_not_found`, `step_not_found`, `sandbox_not_found`. |
+
+## Examples
+
+```bash
+# Every invocation in a Run, newest first
+curl "https://api.kovaserve.com/v1/ks/runtime/tool-invocations?run_id=01J8X9Y2Z3K4M5N6P7Q8R9S0T1" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# Failures and policy denials in the last hour
+curl "https://api.kovaserve.com/v1/ks/runtime/tool-invocations?outcome=FAILED&created_after=2026-05-05T11:00:00Z" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# Audit `repo_git` actions across the Tenant
+curl "https://api.kovaserve.com/v1/ks/runtime/tool-invocations?tool_class=repo_git&limit=200" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# Walk forward through a sandbox's invocation history
+curl "https://api.kovaserve.com/v1/ks/runtime/tool-invocations?sandbox_id=01J8X9Y2Z3K4M5N6P7Q8R9SBX1&limit=50&after=01J8X9Y2Z3K4M5N6P7Q8R9TIV1" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+```
+
+```python
+from kovaserve import KovaClient
+
+kova = KovaClient(api_key="ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b")
+
+# Per-Run tool action timeline
+for inv in kova.runtime.tool_invocations.iter(run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1"):
+    bucket = inv.outcome.lower()
+    print(f"  [{bucket:>9}] {inv.tool_class:>20}/{inv.tool_name:<14} "
+          f"{inv.duration_ms:>6}ms  ${inv.cost_cents}  {inv.result_summary or ''}")
+
+# Tenant-wide policy denial audit
+denied = kova.runtime.tool_invocations.list(outcome="DENIED", limit=200)
+for inv in denied.data:
+    print(f"{inv.run_id} step {inv.step_id}: {inv.tool_class}/{inv.tool_name} → DENIED")
+```
+
+## See also
+
+- [Tool invocations](/docs/concepts/runtime/tool-invocations) — tool classes, sandbox dispatch, idempotency, ownership boundary
+- [Sandboxes](/docs/concepts/runtime/sandboxes) — the execution surface for sandbox-bound tools
+- [PolicyScopes](/docs/concepts/policy/policy-scopes) — `tool_policy_ref`, the control-plane governance surface for tool allow and deny
+- [Budgets](/docs/concepts/policy/budgets) — `tool_limit`, the cap on invocation count per Run
+- [Retries](/docs/concepts/recovery/retries) · [Branch flow](/docs/concepts/recovery/branch-flow) — escalation path for non-idempotent failures
+- [Runtime events](/docs/concepts/events/runtime) — `ks.tool.invocation.started` / `ks.tool.invocation.completed`
+- [Context artifacts](/docs/concepts/context/context-artifacts) — where offloaded results live
+- [Pagination](/docs/api/using-the-api/pagination) · [IDs](/docs/api/using-the-api/ids) · [Errors](/docs/api/using-the-api/errors) · [Cost headers](/docs/api/using-the-api/cost-headers)

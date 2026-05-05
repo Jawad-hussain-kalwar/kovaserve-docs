@@ -1,0 +1,173 @@
+---
+title: Create a Sandbox
+description: POST /v1/ks/runtime/sandboxes — provision a container-isolated execution environment for a Run, bound to a sandbox profile and Workspace.
+---
+
+`POST /v1/ks/runtime/sandboxes` provisions a [Sandbox](/docs/concepts/runtime/sandboxes) explicitly. The Sandbox Manager pulls the pinned container image, mounts the Run's [Workspace](/docs/concepts/runtime/workspaces) at the configured root, applies file and network policy from the [sandbox profile](/docs/concepts/runtime/sandboxes#sandbox-profile), and returns the sandbox in `STARTING` or `READY`. Subsequent `FILE_WRITE`, `PROCESS_START`, and sandbox-bound tool [Steps](/docs/concepts/run-hierarchy/step-types) on the same Run dispatch into this sandbox.
+
+The companion path is **implicit creation**: when a Run is created with a `workspace.source` block and an agent spec that pins a sandbox profile, the runtime provisions the sandbox automatically on the first `FILE_WRITE`, `PROCESS_START`, or sandbox-bound tool Step. Both paths produce the same sandbox shape; explicit creation exists when the runtime wants the sandbox up before the first Step — to seed an image cache, to validate the profile against the resolved [PolicyScope](/docs/concepts/policy/policy-scopes), or to take a baseline snapshot ahead of a branch.
+
+## Endpoint
+
+```
+POST /v1/ks/runtime/sandboxes
+```
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_...` — see [Authentication](/docs/api/using-the-api/authentication). |
+| Content type | `application/json`. |
+| Idempotent | Yes, when `Idempotency-Key` is supplied — see [Idempotency](/docs/api/using-the-api/idempotency). The natural idempotency key for runtimes is `(run_id, profile_id)`. |
+| Errors | Native envelope — see [Errors](/docs/api/using-the-api/errors). |
+
+## Request body
+
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `run_id` | string | yes | The [Run](/docs/concepts/run-hierarchy/runs) the sandbox is bound to. The Run must be in a non-terminal state and visible to the API key's Tenant. |
+| `profile_id` | string | yes | The [sandbox profile](/docs/concepts/runtime/sandboxes#sandbox-profile) to provision against. Profiles fix container image, resource limits, file/network policy, persistence, and snapshot policy. Profiles are versioned; the resolved version is recorded on the sandbox row. |
+| `workspace_id` | string \| null | no | The [Workspace](/docs/concepts/runtime/workspaces) to mount. When omitted, the sandbox uses the Workspace already bound to the Run. Supplying a different Workspace requires the Run not to have one bound yet. |
+| `persistence_override` | string \| null | no | Override the profile's `persistence` for this sandbox: `none`, `run`, `session`. Subject to the resolved PolicyScope's allowed persistence modes. |
+| `metadata` | object \| null | no | Free-form labels attached to the sandbox row. Surfaced on the timeline; not used for control flow. |
+
+Unknown top-level fields return `400 invalid_request` with `details.field_errors` listing the offending keys.
+
+### Example
+
+```json
+{
+  "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+  "profile_id": "01J8X9Y2Z3K4M5N6P7Q8R9PRF1",
+  "workspace_id": "01J8X9Y2Z3K4M5N6P7Q8R9WSP1",
+  "metadata": { "purpose": "ci-repro" }
+}
+```
+
+## Response — `201 Created`
+
+The body is the new sandbox row, with the resolved profile snapshot inlined. Sandboxes are returned in `STARTING` (most common) or `READY` if the runtime had a warm container cache for the profile's image.
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9SBX1",
+  "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+  "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+  "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+  "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+  "workspace_id": "01J8X9Y2Z3K4M5N6P7Q8R9WSP1",
+  "profile_id": "01J8X9Y2Z3K4M5N6P7Q8R9PRF1",
+  "profile_version": 7,
+  "status": "STARTING",
+  "container": {
+    "image": "ghcr.io/kovaserve/runtime/coderuns:1.4.0",
+    "limits": { "cpu": "2", "memory_mb": 4096, "disk_mb": 8192, "time_s": 1800 },
+    "gpu": null
+  },
+  "policy": {
+    "network": { "type": "allowlist", "hosts": ["github.com", "registry.npmjs.org"] },
+    "file": {
+      "writable_paths":  ["/workspace"],
+      "read_only_paths": ["/etc", "/usr"],
+      "denied_paths":    ["/workspace/.kova-secrets"]
+    }
+  },
+  "persistence": "run",
+  "snapshot_policy": "on_checkpoint",
+  "worker_id": "01J8X9Y2Z3K4M5N6P7Q8R9WRK1",
+  "node_id": "01J8X9Y2Z3K4M5N6P7Q8R9NDE1",
+  "created_at": "2026-05-05T12:00:00Z",
+  "started_at": null,
+  "metadata": { "purpose": "ci-repro" }
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | string | Sandbox ID — bare 26-character Crockford ULID. |
+| `tenant_id` / `project_id` | string | Owning tenancy pair, inherited from the Run. |
+| `run_id` | string | The Run the sandbox is bound to. |
+| `session_id` | string \| null | Bound Session, when the Run is bound to one. |
+| `workspace_id` | string | The Workspace mounted into the sandbox. |
+| `profile_id` / `profile_version` | string / integer | The resolved sandbox profile and its pinned version. |
+| `status` | string | One of the values in the [sandbox lifecycle](/docs/concepts/runtime/sandboxes#sandbox-lifecycle). New sandboxes return in `STARTING` or `READY`. |
+| `container` | object | Resolved container image and resource limits — see [sandbox profile](/docs/concepts/runtime/sandboxes#sandbox-profile). |
+| `policy` | object | Resolved network and file policy. |
+| `persistence` | string | One of `none`, `run`, `session`. |
+| `snapshot_policy` | string | One of `never`, `on_checkpoint`, `manual`. |
+| `worker_id` | string \| null | The [Worker](/docs/concepts/runtime/workers) that will dispatch into the sandbox. `null` until a Worker claims the Run. |
+| `node_id` | string \| null | The runtime host the container is scheduled on. `null` while the container is still pending placement. |
+| `created_at` | string | ISO-8601 with `Z` suffix. |
+| `started_at` | string \| null | When the container reached `READY`. `null` while still `STARTING`. |
+| `metadata` | object | Echoed from the request. |
+
+### Headers
+
+```http
+HTTP/1.1 201 Created
+Content-Type: application/json
+X-Request-Id:  01J8X9Y2Z3K4M5N6P7Q8R9S0XX
+X-KS-Run-Id:   01J8X9Y2Z3K4M5N6P7Q8R9S0T1
+X-KS-Sandbox-Id: 01J8X9Y2Z3K4M5N6P7Q8R9SBX1
+```
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `201 Created` | The sandbox row is provisioned and the container is `STARTING` or `READY`. |
+| `400 Bad Request` | Malformed JSON, unknown fields, or `persistence_override` not in `{none, run, session}`. Codes: `invalid_request`, `invalid_id`. |
+| `401 Unauthorized` | Missing, malformed, or unresolved API key. |
+| `403 Forbidden` | The resolved PolicyScope blocks the requested image, network policy, or persistence mode. Codes: `image_not_permitted`, `network_policy_not_permitted`, `persistence_not_permitted`. |
+| `404 Not Found` | `run_id`, `profile_id`, or `workspace_id` does not resolve in the caller's Tenant. Codes: `run_not_found`, `sandbox_profile_not_found`, `workspace_not_found`. |
+| `409 Conflict` | The Run already has an active sandbox bound, or the supplied `Idempotency-Key` was reused with a different request body. Codes: `sandbox_already_bound`, `idempotency_conflict`. |
+| `422 Unprocessable Entity` | The body parsed but failed schema validation. `details` lists field-level errors. |
+| `429 Too Many Requests` | Rate limit exceeded, or the runtime pool is saturated. Codes: `rate_limited`, `runtime_pool_saturated`. |
+
+## Examples
+
+```bash
+# Bind a sandbox to a Run, using the Run's existing Workspace
+curl -X POST https://api.kovaserve.com/v1/ks/runtime/sandboxes \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    "profile_id": "01J8X9Y2Z3K4M5N6P7Q8R9PRF1"
+  }'
+
+# Override persistence to keep the sandbox alive across Runs in a Session
+curl -X POST https://api.kovaserve.com/v1/ks/runtime/sandboxes \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: 6c1f8a30-9b22-4f0e-9d6c-12c4f0a1b2c3" \
+  -d '{
+    "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    "profile_id": "01J8X9Y2Z3K4M5N6P7Q8R9PRF1",
+    "workspace_id": "01J8X9Y2Z3K4M5N6P7Q8R9WSP1",
+    "persistence_override": "session"
+  }'
+```
+
+```python
+from kovaserve import KovaClient
+
+kova = KovaClient(api_key="ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b")
+
+sandbox = kova.runtime.sandboxes.create(
+    run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    profile_id="01J8X9Y2Z3K4M5N6P7Q8R9PRF1",
+)
+
+print(f"sandbox {sandbox.id} {sandbox.status} on {sandbox.node_id}")
+print(f"image: {sandbox.container.image}")
+print(f"limits: {sandbox.container.limits}")
+```
+
+## See also
+
+- [`GET /v1/ks/runtime/sandboxes/{id}`](/docs/api/runtime/sandboxes/get) — fetch sandbox state and policy
+- [Sandboxes](/docs/concepts/runtime/sandboxes) — lifecycle, profile, persistent sandboxes, branchable snapshots, failure modes
+- [Workspaces](/docs/concepts/runtime/workspaces) — the structured filesystem mounted into the sandbox
+- [Workers](/docs/concepts/runtime/workers) — the lease holder dispatching into the sandbox
+- [PolicyScopes](/docs/concepts/policy/policy-scopes) — `data_boundary` and tool-policy enforcement at admission
+- [Idempotency](/docs/api/using-the-api/idempotency) · [Errors](/docs/api/using-the-api/errors) · [IDs](/docs/api/using-the-api/ids)

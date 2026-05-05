@@ -10,6 +10,8 @@
     "handles",
     "context",
     "policy",
-    "metering"
+    "metering",
+    "tenancy",
+    "runtime"
   ]
 }

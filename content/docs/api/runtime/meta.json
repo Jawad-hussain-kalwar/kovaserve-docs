@@ -1,0 +1,9 @@
+{
+  "title": "Runtime",
+  "pages": [
+    "workers",
+    "sandboxes",
+    "workspaces",
+    "tool-invocations"
+  ]
+}

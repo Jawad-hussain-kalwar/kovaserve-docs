@@ -278,27 +278,27 @@ Living roadmap for `docs.kovaserve.com`. Source of structure for `content/docs/`
 
 ### Tenancy
 
-- [ ] `api/tenancy/tenants/get.mdx`
-- [ ] `api/tenancy/projects/create.mdx`
-- [ ] `api/tenancy/projects/get.mdx`
-- [ ] `api/tenancy/projects/list.mdx`
-- [ ] `api/tenancy/environments/create.mdx`
-- [ ] `api/tenancy/environments/get.mdx`
-- [ ] `api/tenancy/environments/list.mdx`
-- [ ] `api/tenancy/keys/create.mdx`
-- [ ] `api/tenancy/keys/get.mdx`
-- [ ] `api/tenancy/keys/list.mdx`
-- [ ] `api/tenancy/keys/rotate.mdx`
-- [ ] `api/tenancy/keys/revoke.mdx`
+- [x] `api/tenancy/tenants/get.mdx`
+- [x] `api/tenancy/projects/create.mdx`
+- [x] `api/tenancy/projects/get.mdx`
+- [x] `api/tenancy/projects/list.mdx`
+- [x] `api/tenancy/environments/create.mdx`
+- [x] `api/tenancy/environments/get.mdx`
+- [x] `api/tenancy/environments/list.mdx`
+- [x] `api/tenancy/keys/create.mdx`
+- [x] `api/tenancy/keys/get.mdx`
+- [x] `api/tenancy/keys/list.mdx`
+- [x] `api/tenancy/keys/rotate.mdx`
+- [x] `api/tenancy/keys/revoke.mdx`
 
 ### Runtime
 
-- [ ] `api/runtime/workers/list.mdx`
-- [ ] `api/runtime/sandboxes/create.mdx`
-- [ ] `api/runtime/sandboxes/get.mdx`
-- [ ] `api/runtime/workspaces/get.mdx`
-- [ ] `api/runtime/workspaces/snapshot.mdx`
-- [ ] `api/runtime/tool-invocations/list.mdx`
+- [x] `api/runtime/workers/list.mdx`
+- [x] `api/runtime/sandboxes/create.mdx`
+- [x] `api/runtime/sandboxes/get.mdx`
+- [x] `api/runtime/workspaces/get.mdx`
+- [x] `api/runtime/workspaces/snapshot.mdx`
+- [x] `api/runtime/tool-invocations/list.mdx`
 
 ### Events
 

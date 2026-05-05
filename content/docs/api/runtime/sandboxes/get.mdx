@@ -1,0 +1,157 @@
+---
+title: Get a Sandbox
+description: GET /v1/ks/runtime/sandboxes/{id} — fetch a Sandbox with its resolved profile, container, policy, lifecycle status, and bound Worker.
+---
+
+`GET /v1/ks/runtime/sandboxes/{id}` returns a single [Sandbox](/docs/concepts/runtime/sandboxes) — the container-isolated execution environment a [Worker](/docs/concepts/runtime/workers) dispatches `FILE_WRITE`, `PROCESS_START`, and sandbox-bound tool [Steps](/docs/concepts/run-hierarchy/step-types) into. The response carries the resolved sandbox profile snapshot, current lifecycle status, the bound Worker and runtime node, and any captured snapshots.
+
+The sandbox is resolved against the API key's Tenant. Cross-tenant fetches return `404 Not Found` — the same response as a genuinely missing sandbox — so the surface leaks no information about sandboxes the caller cannot see.
+
+## Endpoint
+
+```
+GET /v1/ks/runtime/sandboxes/{sandbox_id}
+```
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_...` — see [Authentication](/docs/api/using-the-api/authentication). |
+| Path parameter | `sandbox_id` — bare 26-character Crockford ULID. |
+| Errors | Native envelope — see [Errors](/docs/api/using-the-api/errors). |
+
+## Query parameters
+
+| Parameter | Type | Default | Meaning |
+|---|---|---|---|
+| `include` | string \| null | `null` | Comma-separated list of optional sub-resources to embed: `snapshots`, `usage`. By default neither is embedded — query each through its own endpoint. |
+
+## Response — `200 OK`
+
+The body is the sandbox row with the resolved profile snapshot inlined. `snapshots` and `usage` blocks appear only when requested via `include`.
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9SBX1",
+  "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+  "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+  "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+  "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+  "workspace_id": "01J8X9Y2Z3K4M5N6P7Q8R9WSP1",
+  "profile_id": "01J8X9Y2Z3K4M5N6P7Q8R9PRF1",
+  "profile_version": 7,
+  "status": "RUNNING",
+  "container": {
+    "image": "ghcr.io/kovaserve/runtime/coderuns:1.4.0",
+    "limits": { "cpu": "2", "memory_mb": 4096, "disk_mb": 8192, "time_s": 1800 },
+    "gpu": null
+  },
+  "policy": {
+    "network": { "type": "allowlist", "hosts": ["github.com", "registry.npmjs.org"] },
+    "file": {
+      "writable_paths":  ["/workspace"],
+      "read_only_paths": ["/etc", "/usr"],
+      "denied_paths":    ["/workspace/.kova-secrets"]
+    }
+  },
+  "persistence": "run",
+  "snapshot_policy": "on_checkpoint",
+  "worker_id": "01J8X9Y2Z3K4M5N6P7Q8R9WRK1",
+  "node_id": "01J8X9Y2Z3K4M5N6P7Q8R9NDE1",
+  "created_at": "2026-05-05T12:00:00Z",
+  "started_at": "2026-05-05T12:00:04Z",
+  "stopped_at": null,
+  "last_step_id": "01J8X9Y2Z3K4M5N6P7Q8R9STP4",
+  "metadata": { "purpose": "ci-repro" }
+}
+```
+
+### Top-level fields
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | string | Sandbox ID. |
+| `tenant_id` / `project_id` | string | Owning tenancy pair. |
+| `run_id` | string | The Run the sandbox is bound to. |
+| `session_id` | string \| null | Bound Session, when the Run is bound to one. |
+| `workspace_id` | string | The Workspace mounted into the sandbox. |
+| `profile_id` / `profile_version` | string / integer | The resolved sandbox profile and its pinned version. |
+| `status` | string | One of `CREATED`, `STARTING`, `READY`, `RUNNING`, `PAUSED`, `SNAPSHOT_CAPTURING`, `SNAPSHOT_STORED`, `STOPPED`, `ARCHIVED`, `FAILED`. See [sandbox lifecycle](/docs/concepts/runtime/sandboxes#sandbox-lifecycle). |
+| `container` | object | Resolved container image and resource limits — see [sandbox profile](/docs/concepts/runtime/sandboxes#sandbox-profile). |
+| `policy` | object | Resolved network and file policy. |
+| `persistence` | string | One of `none`, `run`, `session`. |
+| `snapshot_policy` | string | One of `never`, `on_checkpoint`, `manual`. |
+| `worker_id` | string \| null | The Worker dispatching into the sandbox. `null` while no Worker holds the lease. |
+| `node_id` | string \| null | The runtime host the container is scheduled on. |
+| `created_at` / `started_at` / `stopped_at` | string \| null | Lifecycle timestamps. `started_at` is set when the container reaches `READY`; `stopped_at` is set on terminal transitions. |
+| `last_step_id` | string \| null | The most recent Step that dispatched into the sandbox. |
+| `metadata` | object | Free-form labels echoed from creation. |
+
+### Embedded `snapshots[]` (when `include=snapshots`)
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | string | Snapshot ID. |
+| `step_id` | string \| null | The Step the snapshot was captured at, when bound to a Step boundary. |
+| `checkpoint_id` | string \| null | The [Checkpoint](/docs/concepts/recovery/checkpoints) the snapshot is attached to as a `runtime_state` [StateHandle](/docs/concepts/recovery/state-handles), when applicable. |
+| `byte_size` | integer | Compressed snapshot size on object storage. |
+| `digest` | string | Content hash. |
+| `captured_at` | string | ISO-8601 timestamp. |
+
+### Embedded `usage` (when `include=usage`)
+
+| Field | Type | Meaning |
+|---|---|---|
+| `cpu_seconds` | number | Cumulative CPU seconds consumed. |
+| `memory_peak_mb` | integer | Peak RSS in MiB. |
+| `disk_peak_mb` | integer | Peak workspace + ephemeral disk in MiB. |
+| `wall_clock_seconds` | integer | Wall-clock time the sandbox has been `READY` or `RUNNING`. |
+| `gpu_seconds` | number \| null | Cumulative GPU seconds, when a GPU is attached. |
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `200 OK` | The sandbox exists and is visible to the caller. |
+| `400 Bad Request` | Unknown `include` value, or malformed `sandbox_id`. Codes: `invalid_request`, `invalid_id`. |
+| `401 Unauthorized` | Missing or invalid bearer token. |
+| `404 Not Found` | The sandbox does not exist *or* belongs to another Tenant. Code: `sandbox_not_found`. |
+
+## Examples
+
+```bash
+# Plain fetch
+curl https://api.kovaserve.com/v1/ks/runtime/sandboxes/01J8X9Y2Z3K4M5N6P7Q8R9SBX1 \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# With snapshots and resource usage embedded
+curl "https://api.kovaserve.com/v1/ks/runtime/sandboxes/01J8X9Y2Z3K4M5N6P7Q8R9SBX1?include=snapshots,usage" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+```
+
+```python
+from kovaserve import KovaClient
+
+kova = KovaClient(api_key="ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b")
+
+sandbox = kova.runtime.sandboxes.get(
+    "01J8X9Y2Z3K4M5N6P7Q8R9SBX1",
+    include=["snapshots", "usage"],
+)
+
+print(f"{sandbox.id} {sandbox.status} on node {sandbox.node_id}")
+print(f"image: {sandbox.container.image}, persistence: {sandbox.persistence}")
+print(f"cpu seconds: {sandbox.usage.cpu_seconds:.1f}, peak mem: {sandbox.usage.memory_peak_mb} MiB")
+
+for snap in sandbox.snapshots:
+    print(f"  snapshot {snap.id} at step {snap.step_id} ({snap.byte_size} bytes)")
+```
+
+## See also
+
+- [`POST /v1/ks/runtime/sandboxes`](/docs/api/runtime/sandboxes/create) — provision a sandbox explicitly
+- [Sandboxes](/docs/concepts/runtime/sandboxes) — lifecycle, profile, persistent sandboxes, branchable snapshots, failure modes
+- [Workspaces](/docs/concepts/runtime/workspaces) — the structured filesystem mounted into the sandbox
+- [Workers](/docs/concepts/runtime/workers) — the lease holder dispatching Steps
+- [Checkpoints](/docs/concepts/recovery/checkpoints) — sandbox snapshots as `runtime_state` StateHandles
+- [Branch flow](/docs/concepts/recovery/branch-flow) — using sandbox snapshots as the ancestor of a child Run
+- [IDs](/docs/api/using-the-api/ids) · [Errors](/docs/api/using-the-api/errors)

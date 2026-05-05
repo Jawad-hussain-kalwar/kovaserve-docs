@@ -1,0 +1,205 @@
+---
+title: Get a Workspace
+description: GET /v1/ks/runtime/workspaces/{id} — fetch a Workspace with its source binding, read/write policy, mutation log summary, snapshots, and branch lineage.
+---
+
+`GET /v1/ks/runtime/workspaces/{id}` returns a single [Workspace](/docs/concepts/runtime/workspaces) — the structured filesystem a [Run](/docs/concepts/run-hierarchy/runs) in [KovaServe runtime mode](/docs/concepts/deployment/managed-runtime) operates against. The response carries the source binding (Git, tarball, branch, or empty), the resolved read/write policy, a summary of the mutation log, every snapshot captured against the workspace, and the branch lineage when the workspace was seeded from a parent.
+
+The workspace is resolved against the API key's Tenant. Cross-tenant fetches return `404 Not Found` — the same response as a genuinely missing workspace — so the surface leaks no information about workspaces the caller cannot see.
+
+The Workspace is the metadata surface. The bytes on disk live inside the bound [Sandbox](/docs/concepts/runtime/sandboxes); the byte snapshots live in object storage and surface as [WorkspaceArtifacts](/docs/concepts/runtime/workspace-artifacts).
+
+## Endpoint
+
+```
+GET /v1/ks/runtime/workspaces/{workspace_id}
+```
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_...` — see [Authentication](/docs/api/using-the-api/authentication). |
+| Path parameter | `workspace_id` — bare 26-character Crockford ULID. |
+| Errors | Native envelope — see [Errors](/docs/api/using-the-api/errors). |
+
+## Query parameters
+
+| Parameter | Type | Default | Meaning |
+|---|---|---|---|
+| `include` | string \| null | `null` | Comma-separated list of optional sub-resources to embed: `mutation_log`, `branch_children`. By default neither is embedded — the workspace row carries `mutation_log_count` and any `branch_children[]` is queried separately. |
+| `mutation_log_limit` | integer | `100` | When `include=mutation_log`, cap on the most recent mutation entries returned. Capped at `500`. |
+
+## Response — `200 OK`
+
+The body is the workspace row. `mutation_log[]` and `branch_children[]` blocks appear only when requested via `include`.
+
+### Workspace bound to a Git source
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9WSP1",
+  "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+  "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+  "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+  "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+  "source": {
+    "type": "git",
+    "url": "git@github.com:acme/payments.git",
+    "ref": "main",
+    "commit": "a3f2c81b9e0d4f5a6b7c8d9e0f1a2b3c4d5e6f7a"
+  },
+  "root": "/workspace",
+  "read_write_policy": {
+    "writable_paths":  ["/workspace"],
+    "read_only_paths": ["/etc", "/usr"],
+    "denied_paths":    ["/workspace/.kova-secrets"]
+  },
+  "persistence": "run",
+  "mutation_log_count": 4,
+  "snapshots": [
+    {
+      "id": "01J8X9Y2Z3K4M5N6P7Q8R9SNP1",
+      "step_id": "01J8X9Y2Z3K4M5N6P7Q8R9STP4",
+      "checkpoint_id": "01J8X9Y2Z3K4M5N6P7Q8R9CHK1",
+      "artifact_id": "01J8X9Y2Z3K4M5N6P7Q8R9ART9",
+      "byte_size": 18934211,
+      "digest": "sha256:c81b...",
+      "captured_at": "2026-05-05T12:08:00Z"
+    }
+  ],
+  "branch_lineage": null,
+  "created_at": "2026-05-05T12:00:00Z",
+  "archived_at": null,
+  "metadata": {}
+}
+```
+
+### Workspace seeded from a branch
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9WSP2",
+  "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+  "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+  "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+  "session_id": null,
+  "source": {
+    "type": "branch",
+    "parent_workspace_id": "01J8X9Y2Z3K4M5N6P7Q8R9WSP1",
+    "snapshot_id": "01J8X9Y2Z3K4M5N6P7Q8R9SNP1"
+  },
+  "root": "/workspace",
+  "read_write_policy": {
+    "writable_paths":  ["/workspace"],
+    "read_only_paths": ["/etc", "/usr"],
+    "denied_paths":    ["/workspace/.kova-secrets"]
+  },
+  "persistence": "run",
+  "mutation_log_count": 1,
+  "snapshots": [],
+  "branch_lineage": {
+    "parent_workspace_id": "01J8X9Y2Z3K4M5N6P7Q8R9WSP1",
+    "branch_from_run_id":  "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    "snapshot_id":         "01J8X9Y2Z3K4M5N6P7Q8R9SNP1"
+  },
+  "created_at": "2026-05-05T12:30:00Z",
+  "archived_at": null,
+  "metadata": {}
+}
+```
+
+### Top-level fields
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | string | Workspace ID. |
+| `tenant_id` / `project_id` | string | Owning tenancy pair. |
+| `run_id` | string | The Run the workspace is bound to. A Run owns at most one Workspace. |
+| `session_id` | string \| null | Bound Session, when persistence is `session`. |
+| `source` | object | Source binding — see [Source binding](/docs/concepts/runtime/workspaces#source-binding). |
+| `root` | string | Mount path inside the bound Sandbox (default `/workspace`). |
+| `read_write_policy` | object | Writable, read-only, and denied paths. |
+| `persistence` | string | One of `none`, `run`, `session` — inherited from the [sandbox profile](/docs/concepts/runtime/sandboxes#sandbox-profile). |
+| `mutation_log_count` | integer | Number of `FILE_WRITE` Steps that have committed mutations. |
+| `snapshots` | array | All snapshots captured against the workspace. |
+| `branch_lineage` | object \| null | Set when `source.type = branch`. Identifies the parent Workspace, the parent Run, and the snapshot the child was seeded from. |
+| `created_at` / `archived_at` | string \| null | Lifecycle timestamps. `archived_at` is set after the Run completes and the project's retention window elapses. |
+| `metadata` | object | Free-form labels. |
+
+### Embedded `mutation_log[]` (when `include=mutation_log`)
+
+Most recent first; capped by `mutation_log_limit`.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `step_id` | string | The `FILE_WRITE` Step that produced the mutation. |
+| `paths` | array of string | Paths written. |
+| `diff_artifact_id` | string \| null | The [WorkspaceArtifact](/docs/concepts/runtime/workspace-artifacts) holding the diff (`type: diff`). |
+| `applied_at` | string | ISO-8601 timestamp. |
+
+### Embedded `branch_children[]` (when `include=branch_children`)
+
+Workspaces that were seeded from a snapshot of this one.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | string | Child Workspace ID. |
+| `run_id` | string | Child Run ID. |
+| `snapshot_id` | string | The snapshot the child was seeded from. |
+| `created_at` | string | When the child was provisioned. |
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `200 OK` | The workspace exists and is visible to the caller. |
+| `400 Bad Request` | Unknown `include` value, or `mutation_log_limit` outside `1..500`. Code: `invalid_request`. |
+| `401 Unauthorized` | Missing or invalid bearer token. |
+| `404 Not Found` | The workspace does not exist *or* belongs to another Tenant. Code: `workspace_not_found`. |
+
+## Examples
+
+```bash
+# Plain fetch
+curl https://api.kovaserve.com/v1/ks/runtime/workspaces/01J8X9Y2Z3K4M5N6P7Q8R9WSP1 \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# With the mutation log embedded
+curl "https://api.kovaserve.com/v1/ks/runtime/workspaces/01J8X9Y2Z3K4M5N6P7Q8R9WSP1?include=mutation_log&mutation_log_limit=50" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# Walk the branch tree from a parent
+curl "https://api.kovaserve.com/v1/ks/runtime/workspaces/01J8X9Y2Z3K4M5N6P7Q8R9WSP1?include=branch_children" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+```
+
+```python
+from kovaserve import KovaClient
+
+kova = KovaClient(api_key="ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b")
+
+ws = kova.runtime.workspaces.get(
+    "01J8X9Y2Z3K4M5N6P7Q8R9WSP1",
+    include=["mutation_log", "branch_children"],
+)
+
+if ws.source.type == "git":
+    print(f"git: {ws.source.url}@{ws.source.commit[:8]}")
+elif ws.source.type == "branch":
+    print(f"branch of {ws.branch_lineage.parent_workspace_id} at snapshot {ws.branch_lineage.snapshot_id}")
+
+for entry in ws.mutation_log:
+    print(f"  step {entry.step_id} wrote {len(entry.paths)} path(s) at {entry.applied_at}")
+
+for child in ws.branch_children:
+    print(f"  branch {child.id} (run {child.run_id}) from snapshot {child.snapshot_id}")
+```
+
+## See also
+
+- [`POST /v1/ks/runtime/workspaces/{id}/snapshot`](/docs/api/runtime/workspaces/snapshot) — capture a snapshot on demand
+- [Workspaces](/docs/concepts/runtime/workspaces) — source binding, read/write policy, mutation log, snapshots, branch lineage
+- [Workspace artifacts](/docs/concepts/runtime/workspace-artifacts) — the catalog of stdout, stderr, diffs, snapshots, test reports
+- [Sandboxes](/docs/concepts/runtime/sandboxes) — the execution boundary the workspace mounts into
+- [Branch flow](/docs/concepts/recovery/branch-flow) — using a snapshot as the ancestor of a child Run
+- [Step types](/docs/concepts/run-hierarchy/step-types) — `FILE_READ`, `FILE_WRITE`, `PROCESS_START`
+- [IDs](/docs/api/using-the-api/ids) · [Errors](/docs/api/using-the-api/errors)
