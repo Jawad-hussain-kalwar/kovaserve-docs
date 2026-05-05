@@ -9,6 +9,7 @@
     "checkpoints",
     "handles",
     "context",
-    "policy"
+    "policy",
+    "metering"
   ]
 }

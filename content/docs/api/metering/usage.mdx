@@ -1,0 +1,110 @@
+---
+title: Query Usage
+description: GET /v1/ks/metering/usage — aggregated cost, tokens, and cache savings scoped to a Run, Project, or Tenant.
+---
+
+`GET /v1/ks/metering/usage` returns aggregated cost, token counts, and cache savings for a chosen scope. The response sums across every [ModelCall](/docs/concepts/run-hierarchy/model-calls) that landed inside the scope, optionally narrowed to a date range. Costs are computed at full precision from the same per-row math used in [cost headers](/docs/api/using-the-api/cost-headers) and the [JSONL export](/docs/api/metering/export), so totals reconcile bit-for-bit with the underlying records.
+
+This is the read path for the [cost model](/docs/concepts/cost/cost-model). For row-level audit data, use [`GET /v1/ks/metering/export`](/docs/api/metering/export).
+
+## Endpoint
+
+```
+GET /v1/ks/metering/usage
+```
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_...` — see [Authentication](/docs/api/using-the-api/authentication). |
+| Errors | Native envelope — see [Errors](/docs/api/using-the-api/errors). |
+| Cost wire format | Decimal-strings, 4 fractional digits — see [Cost headers](/docs/api/using-the-api/cost-headers). |
+
+The Tenant is always inferred from the bearer key. A request can never see usage outside its own Tenant, regardless of the `scope` and `id` supplied.
+
+## Query parameters
+
+| Parameter | Type | Required | Meaning |
+|---|---|---|---|
+| `scope` | string | yes | One of `run`, `project`, `tenant`. Defines which aggregate the response represents. |
+| `id` | string | for `run` and `project` | The Run ID or Project ID to aggregate. Ignored when `scope=tenant` — the Tenant is taken from the bearer key. |
+| `start_date` | string \| null | no | Inclusive lower bound on `created_at`. ISO date `YYYY-MM-DD`. |
+| `end_date` | string \| null | no | Inclusive upper bound on `created_at`. ISO date `YYYY-MM-DD`. |
+
+`start_date` and `end_date` are evaluated in UTC. Omit them to aggregate over all time. If both are supplied, `start_date` must be on or before `end_date`.
+
+## Response — `200 OK`
+
+```json
+{
+  "total_prompt_tokens": 184320,
+  "total_completion_tokens": 42118,
+  "total_cost_cents": "12.4280",
+  "total_cache_savings_cents": "3.1740",
+  "model_call_count": 27
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `total_prompt_tokens` | integer | Sum of `prompt_tokens` across every ModelCall in scope. |
+| `total_completion_tokens` | integer | Sum of `completion_tokens` across every ModelCall in scope. |
+| `total_cost_cents` | string (decimal) | Net cost in cents at 4 fractional digits — input + output, after the cache discount. |
+| `total_cache_savings_cents` | string (decimal) | `gross_cost - net_cost` in cents at 4 fractional digits. The savings attributable to KV cache reuse. |
+| `model_call_count` | integer | Number of ModelCalls included in the aggregate. |
+
+Cost fields are emitted as JSON **strings**, not numbers, so client-side IEEE-754 parsing cannot widen and silently truncate sub-millicent values. Treat them as exact decimals.
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `200 OK` | Aggregate returned. An empty range or unknown `project_id`/`tenant_id` produces zeros across the board with `model_call_count = 0`. |
+| `400 Bad Request` | `scope` missing or not in `{run, project, tenant}` (`invalid_scope`); `id` missing for `scope=run` or `scope=project` (`invalid_request`); malformed `start_date` / `end_date`, or `start_date` after `end_date` (`invalid_request`). |
+| `401 Unauthorized` | Missing or invalid bearer token. |
+| `404 Not Found` | `scope=run` and the Run does not resolve in the caller's Tenant. Code: `run_not_found`. **`scope=project` and `scope=tenant` never 404** — an unknown ID returns zeros. |
+
+The 404-vs-zeros split is intentional: a Run is a concrete execution that either exists or does not, while Project and Tenant are coarse aggregation boundaries where "no usage" is a valid answer.
+
+## Examples
+
+```bash
+# Cost of one Run
+curl "https://api.kovaserve.com/v1/ks/metering/usage?scope=run&id=01J8X9Y2Z3K4M5N6P7Q8R9S0T1" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# Project total for May 2026
+curl "https://api.kovaserve.com/v1/ks/metering/usage?scope=project&id=01J8X9Y2Z3K4M5N6P7Q8R9S0T0&start_date=2026-05-01&end_date=2026-05-31" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# Tenant-wide total — id is ignored, the Tenant comes from the key
+curl "https://api.kovaserve.com/v1/ks/metering/usage?scope=tenant" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+```
+
+```python
+from decimal import Decimal
+from kovaserve import KovaClient
+
+kova = KovaClient(api_key="ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b")
+
+# Cost of one Run
+run_usage = kova.metering.usage(scope="run", id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1")
+print(f"{run_usage.model_call_count} calls cost {Decimal(run_usage.total_cost_cents)} cents")
+
+# Roll up a date range at the Project level
+proj = kova.metering.usage(
+    scope="project",
+    id="01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+    start_date="2026-05-01",
+    end_date="2026-05-31",
+)
+gross = Decimal(proj.total_cost_cents) + Decimal(proj.total_cache_savings_cents)
+print(f"net={proj.total_cost_cents}c  cache_savings={proj.total_cache_savings_cents}c  gross={gross}c")
+```
+
+## See also
+
+- [`GET /v1/ks/metering/export`](/docs/api/metering/export) — row-level audit export
+- [Cost model](/docs/concepts/cost/cost-model) · [Pricing snapshots](/docs/concepts/cost/pricing-snapshots)
+- [Cost headers](/docs/api/using-the-api/cost-headers) · [Errors](/docs/api/using-the-api/errors) · [IDs](/docs/api/using-the-api/ids)
+- [ModelCall](/docs/concepts/run-hierarchy/model-calls) · [Run](/docs/concepts/run-hierarchy/runs)

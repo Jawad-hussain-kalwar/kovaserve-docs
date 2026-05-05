@@ -273,8 +273,8 @@ Living roadmap for `docs.kovaserve.com`. Source of structure for `content/docs/`
 
 ### Metering
 
-- [ ] `api/metering/usage.mdx` — `GET /v1/ks/metering/usage`
-- [ ] `api/metering/export.mdx` — `GET /v1/ks/metering/export`
+- [x] `api/metering/usage.mdx` — `GET /v1/ks/metering/usage`
+- [x] `api/metering/export.mdx` — `GET /v1/ks/metering/export`
 
 ### Tenancy
 

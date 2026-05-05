@@ -1,0 +1,134 @@
+---
+title: Export Usage
+description: GET /v1/ks/metering/export — stream row-level usage records for a Tenant as JSONL with full 4-decimal cost precision.
+---
+
+`GET /v1/ks/metering/export` returns one JSON object per row in the underlying usage ledger as newline-delimited JSON. It is the audit-grade counterpart to [`GET /v1/ks/metering/usage`](/docs/api/metering/usage): every successful inference request — including anonymous OpenAI-compatible traffic that never opted into the [Run hierarchy](/docs/concepts/run-hierarchy/runs) — produces exactly one line. Cost columns retain their full 4-decimal-digit precision so totals reconciled downstream match the same per-row math KovaServe uses internally.
+
+Use this endpoint for billing reconciliation, data-warehouse ingestion, and after-the-fact cost attribution against external systems.
+
+## Endpoint
+
+```
+GET /v1/ks/metering/export
+```
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_...` — see [Authentication](/docs/api/using-the-api/authentication). |
+| Errors | Native envelope — see [Errors](/docs/api/using-the-api/errors). |
+| Response media type | `application/x-ndjson` |
+| Cost wire format | Decimal-strings, 4 fractional digits — see [Cost headers](/docs/api/using-the-api/cost-headers). |
+
+The export is always Tenant-scoped — the bearer key fixes the Tenant, and rows from other Tenants never appear in the body.
+
+## Query parameters
+
+| Parameter | Type | Required | Meaning |
+|---|---|---|---|
+| `format` | string | yes | Must be `jsonl`. Any other value returns `400 unsupported_format`. |
+| `start` | string | yes | Inclusive lower bound on `created_at`. ISO date `YYYY-MM-DD`. |
+| `end` | string | yes | Inclusive upper bound on `created_at`. ISO date `YYYY-MM-DD`. |
+
+`start` and `end` are evaluated in UTC. `start` must be on or before `end`. Both bounds are required — there is no "all time" export.
+
+## Response — `200 OK`
+
+| Header | Meaning |
+|---|---|
+| `Content-Type` | `application/x-ndjson` |
+| `X-KS-Record-Count` | Total number of rows in the body. Equal to the line count. |
+
+The body is one JSON object per line, ordered by `created_at` ascending. The trailing newline is always present, even when the body is empty.
+
+```jsonl
+{"id":91240,"tenant_id":"01J8X9Y2Z3K4M5N6P7Q8R9S0T2","project_id":"01J8X9Y2Z3K4M5N6P7Q8R9S0T0","model":"qwen3-coder-30b","prompt_tokens":1240,"completion_tokens":318,"total_tokens":1558,"created_at":"2026-05-05T12:00:01.124Z","run_id":"01J8X9Y2Z3K4M5N6P7Q8R9S0T1","step_id":"01J8X9Y2Z3K4M5N6P7Q8R9S0T7","model_call_id":"01J8X9Y2Z3K4M5N6P7Q8R9S0T8","node_id":"node-2","cache_hit_ratio":0.41,"cost_cents":"0.4218","gross_cost_cents":"0.5040","input_price_snapshot":"0.3000","output_price_snapshot":"0.6000","discount_snapshot":0.5}
+{"id":91241,"tenant_id":"01J8X9Y2Z3K4M5N6P7Q8R9S0T2","project_id":"01J8X9Y2Z3K4M5N6P7Q8R9S0T0","model":"qwen3-coder-30b","prompt_tokens":820,"completion_tokens":102,"total_tokens":922,"created_at":"2026-05-05T12:00:08.910Z","run_id":null,"step_id":null,"model_call_id":null,"node_id":"node-1","cache_hit_ratio":0.0,"cost_cents":"0.3072","gross_cost_cents":"0.3072","input_price_snapshot":"0.3000","output_price_snapshot":"0.6000","discount_snapshot":0.5}
+```
+
+### Per-line schema
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | integer | Stable, monotonically increasing row identifier in the usage ledger. |
+| `tenant_id` | string | Always equals the Tenant resolved from the bearer key. |
+| `project_id` | string | The [Project](/docs/concepts/tenancy/projects) the request was billed to. |
+| `model` | string | Model name as accepted at the gateway. |
+| `prompt_tokens` | integer | Real input token count from the inference engine. |
+| `completion_tokens` | integer | Real output token count from the inference engine. |
+| `total_tokens` | integer | `prompt_tokens + completion_tokens`. |
+| `created_at` | string (ISO-8601) | Wall-clock time the request completed. UTC. |
+| `run_id` | string \| null | The [Run](/docs/concepts/run-hierarchy/runs) the call belonged to. `null` for anonymous OpenAI-compatible traffic. |
+| `step_id` | string \| null | The owning [Step](/docs/concepts/run-hierarchy/steps), when available. |
+| `model_call_id` | string \| null | The [ModelCall](/docs/concepts/run-hierarchy/model-calls) record, when available. |
+| `node_id` | string \| null | Node that served the request. |
+| `cache_hit_ratio` | number | Fraction of prompt tokens served from KV cache. `0.0` when no reuse occurred. |
+| `cost_cents` | string (decimal) | Net cost in cents at 4 fractional digits — input + output, after the cache discount. |
+| `gross_cost_cents` | string (decimal) | Cost before the cache discount. `cost_cents + cache_savings = gross_cost_cents` exactly. |
+| `input_price_snapshot` | string (decimal) | Input price per 1,000 tokens at the moment of the call — see [Pricing snapshots](/docs/concepts/cost/pricing-snapshots). |
+| `output_price_snapshot` | string (decimal) | Output price per 1,000 tokens at the moment of the call. |
+| `discount_snapshot` | number | Cache discount fraction in `[0.0, 1.0]` at the moment of the call. |
+
+`cost_cents`, `gross_cost_cents`, `input_price_snapshot`, and `output_price_snapshot` are emitted as JSON **strings** so client-side IEEE-754 parsing cannot widen and silently truncate sub-millicent values. Parse them with a decimal type.
+
+Each row is self-contained — every cost field carries its own price snapshot. Reprocessing the export at any later date reproduces the original cost exactly, even if `model_pricing` has been updated since.
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `200 OK` | Export streamed. Body may be empty if the date range contains no rows; `X-KS-Record-Count: 0`. |
+| `400 Bad Request` | `format` missing, or not `jsonl` (`unsupported_format`); `start` or `end` missing (`missing_date_range`); malformed `start` / `end`, or `start` after `end` (`invalid_request`). |
+| `401 Unauthorized` | Missing or invalid bearer token. |
+
+## Examples
+
+```bash
+# Pull May 2026 to a local file
+curl "https://api.kovaserve.com/v1/ks/metering/export?format=jsonl&start=2026-05-01&end=2026-05-31" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b" \
+  -o usage-2026-05.jsonl
+
+# Daily export, piped into a stream processor
+curl -sS "https://api.kovaserve.com/v1/ks/metering/export?format=jsonl&start=2026-05-05&end=2026-05-05" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b" \
+  | jq -c 'select(.run_id != null) | {run_id, cost_cents, cache_hit_ratio}'
+```
+
+```python
+import json
+from decimal import Decimal
+from kovaserve import KovaClient
+
+kova = KovaClient(api_key="ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b")
+
+# Stream rows for one day, summing exact 4-decimal cents
+total = Decimal("0.0000")
+calls = 0
+for row in kova.metering.export(start="2026-05-05", end="2026-05-05"):
+    if row["cost_cents"] is not None:
+        total += Decimal(row["cost_cents"])
+        calls += 1
+print(f"{calls} rows, total {total} cents")
+
+# Re-derive cost from snapshots — proves the export is self-contained
+def reprice(row: dict) -> Decimal:
+    in_p = Decimal(row["input_price_snapshot"])
+    out_p = Decimal(row["output_price_snapshot"])
+    disc = Decimal(str(row["discount_snapshot"]))
+    chr_ = Decimal(str(row["cache_hit_ratio"]))
+    p = Decimal(row["prompt_tokens"])
+    c = Decimal(row["completion_tokens"])
+    gross = (p * in_p + c * out_p) / Decimal(1000) * Decimal(100)
+    discount = (p * chr_ * in_p * disc) / Decimal(1000) * Decimal(100)
+    return (gross - discount).quantize(Decimal("0.0001"))
+```
+
+When parsing the body manually, configure your JSON decoder to read numbers as decimals — for example `json.loads(line, parse_float=Decimal)` in Python — to avoid binary-float rounding on `cache_hit_ratio` and `discount_snapshot`.
+
+## See also
+
+- [`GET /v1/ks/metering/usage`](/docs/api/metering/usage) — pre-aggregated totals
+- [Cost model](/docs/concepts/cost/cost-model) · [Pricing snapshots](/docs/concepts/cost/pricing-snapshots)
+- [Cost headers](/docs/api/using-the-api/cost-headers) · [Errors](/docs/api/using-the-api/errors) · [IDs](/docs/api/using-the-api/ids)
+- [ModelCall](/docs/concepts/run-hierarchy/model-calls) · [Tenancy](/docs/concepts/tenancy)
