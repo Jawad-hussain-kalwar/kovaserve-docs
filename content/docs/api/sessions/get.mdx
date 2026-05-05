@@ -1,0 +1,155 @@
+---
+title: Get a Session
+description: GET /v1/ks/sessions/{id} — fetch a Session with its full turn history; expired Sessions return 410 Gone with the audit trail still queryable.
+---
+
+`GET /v1/ks/sessions/{id}` returns a single [Session](/docs/concepts/continuity/sessions) with its complete turn history embedded as `turns`. The shape is the canonical Session payload — clients reconstruct the conversational state from a single response without N+1 fetches against `session_turns`.
+
+The Session is resolved against the API key's Tenant. Cross-tenant fetches return `404 Not Found` — the same response as a genuinely missing Session — so the surface leaks no information about Sessions the caller cannot see.
+
+Expiry is checked **lazily** on read. A Session whose `expires_at` has elapsed is transitioned to `EXPIRED` as part of this request and the response is `410 Gone`. The Session row and its turns remain in the database for audit; expiry never purges.
+
+## Endpoint
+
+```
+GET /v1/ks/sessions/{session_id}
+```
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_...` — see [Authentication](/docs/api/using-the-api/authentication). |
+| Path parameter | `session_id` — `ses_<24hex>`. See [IDs](/docs/api/using-the-api/ids). |
+| Errors | Native envelope — see [Errors](/docs/api/using-the-api/errors). |
+
+## Response — `200 OK`
+
+The body is the Session row with `turns` populated. Turns are returned in `turn_number` order — the order they were appended.
+
+```json
+{
+  "id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+  "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+  "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+  "model": "qwen3-coder-30b",
+  "state": "OPEN",
+  "turn_count": 4,
+  "created_at": "2026-05-05T12:00:00Z",
+  "last_accessed_at": "2026-05-05T12:04:18Z",
+  "expires_at": "2026-05-06T12:00:00Z",
+  "stable_prefix_id": "9f3c2b8d4e1f0925a1b6c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e",
+  "last_node_id": "gpu-node-2",
+  "current_run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+  "current_manifest_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T7",
+  "turns": [
+    {
+      "turn_number": 1,
+      "role": "user",
+      "content": "Refactor src/auth.py to use the new token format.",
+      "token_count": 18,
+      "timestamp": "2026-05-05T12:00:01Z",
+      "step_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0S1",
+      "model_call_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0M1"
+    },
+    {
+      "turn_number": 2,
+      "role": "assistant",
+      "content": "I'll start by reading src/auth.py and the token module...",
+      "token_count": 482,
+      "timestamp": "2026-05-05T12:00:04Z",
+      "step_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0S1",
+      "model_call_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0M1"
+    },
+    {
+      "turn_number": 3,
+      "role": "tool",
+      "content": "{\"path\": \"src/auth.py\", \"bytes\": 4218}",
+      "token_count": 14,
+      "timestamp": "2026-05-05T12:00:05Z",
+      "step_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0S2",
+      "model_call_id": null
+    },
+    {
+      "turn_number": 4,
+      "role": "assistant",
+      "content": "The file uses the legacy HMAC-SHA1 path on lines 42-67...",
+      "token_count": 612,
+      "timestamp": "2026-05-05T12:04:18Z",
+      "step_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0S3",
+      "model_call_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0M2"
+    }
+  ]
+}
+```
+
+### Top-level fields
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | string | Session ID — `ses_<24hex>`. |
+| `tenant_id` / `project_id` | string | Owning tenancy pair. Immutable. |
+| `model` | string | Default model for the Session. |
+| `state` | string | Current state in the [Session state machine](/docs/concepts/continuity/session-state-machine). |
+| `turn_count` | integer | Number of turns appended. Equals the length of `turns`. |
+| `created_at` / `last_accessed_at` | string | Lifecycle timestamps. `last_accessed_at` advances on every turn append and every Run bind. |
+| `expires_at` | string \| null | Absolute expiry. `null` when no TTL was configured. |
+| `stable_prefix_id` | string \| null | Hex digest of the most recent cache-aligned prefix observed for this Session. |
+| `last_node_id` | string \| null | Node that served the most recent ModelCall under this Session. |
+| `current_run_id` | string \| null | The Run currently bound to the Session. Pinned to the most recent bind even after that Run reaches a terminal state — the next bind replaces it. |
+| `current_manifest_id` | string \| null | The most recently admitted [ContextManifest](/docs/concepts/context/context-manifests). |
+| `turns` | array | Embedded SessionTurns. See below. |
+
+### Embedded turn fields
+
+| Field | Type | Meaning |
+|---|---|---|
+| `turn_number` | integer | Monotonic counter, starting at `1` and gap-free per Session. |
+| `role` | string | `"user"`, `"assistant"`, or `"tool"`. |
+| `content` | string | The turn payload. |
+| `token_count` | integer | Real measurement from the substrate response, not a client estimate. |
+| `timestamp` | string | ISO-8601 timestamp the turn was appended. |
+| `step_id` | string \| null | The [Step](/docs/concepts/run-hierarchy/steps) that produced the turn. `null` for anonymous traffic recorded before the Run hierarchy became active. |
+| `model_call_id` | string \| null | The [ModelCall](/docs/concepts/run-hierarchy/model-calls) that produced the turn. `null` for tool turns and for anonymous traffic. |
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `200 OK` | The Session exists, is visible to the caller, and is in `OPEN`, `IDLE`, `RESUMABLE`, or `ARCHIVED`. `ARCHIVED` Sessions remain readable for audit. |
+| `401 Unauthorized` | Missing or invalid bearer token. Codes: `missing_token`, `invalid_token`, `token_revoked`. |
+| `404 Not Found` | The Session does not exist *or* belongs to another Tenant. Code: `session_not_found`. |
+| `410 Gone` | The Session has reached `EXPIRED`. Code: `session_expired`. The response body is the native error envelope; the Session row and turns remain queryable in the database for audit but are not returned on the wire. |
+
+## Examples
+
+```bash
+curl https://api.kovaserve.com/v1/ks/sessions/ses_a7f3c2b8d4e1f0925a1b6c3d \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+```
+
+```python
+from kovaserve import KovaClient, KovaError
+
+kova = KovaClient(api_key="ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b")
+
+try:
+    session = kova.sessions.get("ses_a7f3c2b8d4e1f0925a1b6c3d")
+    print(f"{session.id}  state={session.state}  turns={session.turn_count}")
+    for turn in session.turns:
+        print(f"  [{turn.turn_number}] {turn.role}: {turn.content[:60]!r}")
+except KovaError as exc:
+    if exc.code == "session_expired":
+        # 410 Gone — the Session aged out. Audit data still in the DB,
+        # but the wire surface no longer returns it.
+        print("session expired; create a new one to continue")
+    elif exc.code == "session_not_found":
+        print("session does not exist or is not visible to this key")
+    else:
+        raise
+```
+
+## See also
+
+- [`POST /v1/ks/sessions`](/docs/api/sessions/create) · [`GET /v1/ks/sessions`](/docs/api/sessions/list) · [`POST /v1/ks/sessions/{id}/archive`](/docs/api/sessions/archive)
+- [Sessions](/docs/concepts/continuity/sessions) · [Session state machine](/docs/concepts/continuity/session-state-machine) · [Current manifest](/docs/concepts/continuity/current-manifest)
+- [Runs](/docs/concepts/run-hierarchy/runs) · [Steps](/docs/concepts/run-hierarchy/steps) · [ModelCalls](/docs/concepts/run-hierarchy/model-calls)
+- [IDs](/docs/api/using-the-api/ids) · [Errors](/docs/api/using-the-api/errors)

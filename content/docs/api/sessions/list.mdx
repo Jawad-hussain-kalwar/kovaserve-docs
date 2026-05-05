@@ -1,0 +1,139 @@
+---
+title: List Sessions
+description: GET /v1/ks/sessions — page through Sessions with cursor pagination, filtered by project, state, model, or expiry window.
+---
+
+`GET /v1/ks/sessions` lists [Sessions](/docs/concepts/continuity/sessions) the caller owns, newest first. The response uses cursor pagination — the same shape as every other list endpoint in the API. Filters narrow the result set to a single Project, state, default model, or creation/expiry window.
+
+Turns are **not** embedded on list responses — fetch [`GET /v1/ks/sessions/{id}`](/docs/api/sessions/get) for the full turn history.
+
+## Endpoint
+
+```
+GET /v1/ks/sessions
+```
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_...` — see [Authentication](/docs/api/using-the-api/authentication). |
+| Pagination | Cursor — see [Pagination](/docs/api/using-the-api/pagination). |
+| Errors | Native envelope — see [Errors](/docs/api/using-the-api/errors). |
+
+## Query parameters
+
+| Parameter | Type | Default | Meaning |
+|---|---|---|---|
+| `limit` | integer | `100` | Maximum Sessions to return. Capped at `200`. Values outside `1..200` return `400 invalid_request`. |
+| `after` | string \| null | `null` | Cursor — return Sessions strictly after it in descending creation order. |
+| `before` | string \| null | `null` | Cursor — return Sessions strictly before it. Mutually exclusive with `after`. |
+| `project_id` | string \| null | `null` | Restrict to one Project. |
+| `state` | string \| null | `null` | Restrict to one [Session state](/docs/concepts/continuity/session-state-machine) — `OPEN`, `IDLE`, `RESUMABLE`, `ARCHIVED`, or `EXPIRED`. |
+| `model` | string \| null | `null` | Restrict to Sessions whose default `model` matches exactly. |
+| `created_after` | string \| null | `null` | ISO-8601 timestamp — Sessions with `created_at >= created_after`. |
+| `created_before` | string \| null | `null` | ISO-8601 timestamp — Sessions with `created_at < created_before`. |
+| `expires_before` | string \| null | `null` | ISO-8601 timestamp — Sessions with `expires_at < expires_before`. Useful for finding Sessions that will expire in the next window. |
+
+The Tenant filter is implicit — Sessions from other Tenants never appear in the result, regardless of any query parameter combination. `EXPIRED` Sessions are included in list responses (they remain in the database for audit) but their `state` field reflects the terminal status; reads against them via [`GET /v1/ks/sessions/{id}`](/docs/api/sessions/get) return `410 Gone`.
+
+## Response — `200 OK`
+
+```json
+{
+  "data": [
+    {
+      "id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+      "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+      "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+      "model": "qwen3-coder-30b",
+      "state": "OPEN",
+      "turn_count": 4,
+      "created_at": "2026-05-05T12:00:00Z",
+      "last_accessed_at": "2026-05-05T12:04:18Z",
+      "expires_at": "2026-05-06T12:00:00Z",
+      "stable_prefix_id": "9f3c2b8d4e1f0925a1b6c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e",
+      "last_node_id": "gpu-node-2",
+      "current_run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+      "current_manifest_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T7"
+    },
+    {
+      "id": "ses_b8e4d3c9e5f2a1063b2c7d4e",
+      "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+      "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+      "model": "qwen3-coder-30b",
+      "state": "IDLE",
+      "turn_count": 12,
+      "created_at": "2026-05-04T18:42:00Z",
+      "last_accessed_at": "2026-05-04T19:21:07Z",
+      "expires_at": "2026-05-05T18:42:00Z",
+      "stable_prefix_id": "7c1e8a30b2d4f6c89e0a1b3c5d7f8092a4b6c8d0e2f4a6b8c0d2e4f60718293a",
+      "last_node_id": "gpu-node-1",
+      "current_run_id": null,
+      "current_manifest_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0R4"
+    }
+  ],
+  "page": {
+    "next_cursor": "ses_b8e4d3c9e5f2a1063b2c7d4e",
+    "prev_cursor": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+    "has_more": true,
+    "limit": 100
+  }
+}
+```
+
+Each entry in `data` is a Session row in the same shape as [`POST /v1/ks/sessions`](/docs/api/sessions/create), without an embedded `turns` array. The pagination envelope is documented at [Pagination](/docs/api/using-the-api/pagination).
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `200 OK` | Returns a page of Sessions. Empty `data` is valid. |
+| `400 Bad Request` | Both `before` and `after` supplied, `limit` outside `1..200`, an unrecognized `state` value, or a malformed timestamp. Code: `invalid_request`. |
+| `401 Unauthorized` | Missing or invalid bearer token. |
+| `404 Not Found` | A scoping ID (`project_id`) does not resolve in the caller's Tenant. Code: `project_not_found`. |
+
+## Examples
+
+```bash
+# Newest 50 Sessions across the Tenant
+curl "https://api.kovaserve.com/v1/ks/sessions?limit=50" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# Active Sessions in one Project
+curl "https://api.kovaserve.com/v1/ks/sessions?project_id=01J8X9Y2Z3K4M5N6P7Q8R9S0T0&state=OPEN" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# Sessions held for resume — operator triage
+curl "https://api.kovaserve.com/v1/ks/sessions?state=RESUMABLE" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# Sessions about to expire in the next hour
+curl "https://api.kovaserve.com/v1/ks/sessions?expires_before=2026-05-05T13:00:00Z" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+```
+
+```python
+from kovaserve import KovaClient
+
+kova = KovaClient(api_key="ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b")
+
+# Iterate every IDLE Session, page-by-page
+cursor = None
+while True:
+    page = kova.sessions.list(state="IDLE", limit=100, after=cursor)
+    for session in page.data:
+        print(f"{session.id}  turns={session.turn_count}  last={session.last_accessed_at}")
+    if not page.has_more:
+        break
+    cursor = page.next_cursor
+
+# Built-in iterator helper — auto-paginates
+for session in kova.sessions.iter(project_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T0"):
+    if session.state == "RESUMABLE":
+        print(f"held for resume: {session.id}")
+```
+
+## See also
+
+- [`POST /v1/ks/sessions`](/docs/api/sessions/create) · [`GET /v1/ks/sessions/{id}`](/docs/api/sessions/get) · [`POST /v1/ks/sessions/{id}/archive`](/docs/api/sessions/archive)
+- [Sessions](/docs/concepts/continuity/sessions) · [Session state machine](/docs/concepts/continuity/session-state-machine)
+- [Pagination](/docs/api/using-the-api/pagination) · [IDs](/docs/api/using-the-api/ids) · [Errors](/docs/api/using-the-api/errors)

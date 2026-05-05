@@ -1,0 +1,147 @@
+---
+title: Create a Session
+description: POST /v1/ks/sessions — create an empty Session that hosts sequential Runs and accumulates a turn history with TTL-based expiry.
+---
+
+`POST /v1/ks/sessions` creates a [Session](/docs/concepts/continuity/sessions) in `OPEN`. The Session inherits its `(tenant_id, project_id)` pair from the API key and is ready to host Runs immediately. `current_run_id` is `null` until a [Run](/docs/concepts/run-hierarchy/runs) binds to it — either by passing `kovaserve.session_id` on `/v1/chat/completions`, or by setting `session_id` on [`POST /v1/ks/runs`](/docs/api/runs/create).
+
+The companion path is **implicit creation**: a `/v1/chat/completions` request without a `session_id` runs anonymously and never materializes a Session. Explicit creation exists when the caller wants the Session row provisioned ahead of any inference — to hand the Session ID to another process, to set a non-default expiry, or to attach the Session to a Run before the first turn.
+
+## Endpoint
+
+```
+POST /v1/ks/sessions
+```
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_...` — see [Authentication](/docs/api/using-the-api/authentication). |
+| Content type | `application/json`. |
+| Idempotent | Yes, when `Idempotency-Key` is supplied — see [Idempotency](/docs/api/using-the-api/idempotency). |
+| Errors | Native envelope — see [Errors](/docs/api/using-the-api/errors). |
+
+## Request body
+
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `model` | string | yes | Default model ID for the Session. ModelCalls inside Runs bound to this Session may override per call. Must be admitted by the API key's resolved [PolicyScope](/docs/concepts/policy/policy-scopes). |
+| `expires_in_hours` | integer | no | TTL in hours from creation. Defaults to `24`. Range `1..720` (one hour to thirty days). The Session transitions to `EXPIRED` when the wall clock crosses `created_at + expires_in_hours`. |
+
+The `(tenant_id, project_id)` pair is taken from the API key — Sessions are scoped to the key's tenancy and cannot cross it. Unknown top-level fields return `400 invalid_request` with `details.unknown_fields` listing the offending keys.
+
+### Example
+
+```json
+{
+  "model": "qwen3-coder-30b",
+  "expires_in_hours": 24
+}
+```
+
+## Response — `201 Created`
+
+The body is the new Session row in `OPEN` with no turns and no Run bound. The `turns` array is **not** included on creation — fetch [`GET /v1/ks/sessions/{id}`](/docs/api/sessions/get) once turns have been recorded.
+
+```json
+{
+  "id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+  "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+  "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+  "model": "qwen3-coder-30b",
+  "state": "OPEN",
+  "turn_count": 0,
+  "created_at": "2026-05-05T12:00:00Z",
+  "last_accessed_at": "2026-05-05T12:00:00Z",
+  "expires_at": "2026-05-06T12:00:00Z",
+  "stable_prefix_id": null,
+  "last_node_id": null,
+  "current_run_id": null,
+  "current_manifest_id": null
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | string | Session ID — `ses_<24hex>` (the Session-specific format; every other ID in the surface is a bare 26-character Crockford ULID). See [IDs](/docs/api/using-the-api/ids). |
+| `tenant_id` | string | Owning Tenant, inherited from the API key. Immutable. |
+| `project_id` | string | Owning Project, inherited from the API key. Immutable. |
+| `model` | string | Default model for the Session. |
+| `state` | string | One of the values in the [Session state machine](/docs/concepts/continuity/session-state-machine). New Sessions return in `OPEN`. |
+| `turn_count` | integer | Monotonic counter of turns appended. `0` on creation. |
+| `created_at` | string | ISO-8601 timestamp with `Z` suffix. |
+| `last_accessed_at` | string | Updated on every turn append and every Run bind. The Session-state idle sweep reads this. Equals `created_at` on creation. |
+| `expires_at` | string \| null | Absolute expiry timestamp. `null` indicates no TTL was configured. |
+| `stable_prefix_id` | string \| null | Hex digest of the most recent cache-aligned prefix observed for this Session. `null` until the first turn settles. |
+| `last_node_id` | string \| null | Node that served the most recent ModelCall under this Session. Used by routing for affinity. `null` until the first ModelCall completes. |
+| `current_run_id` | string \| null | The Run currently bound to the Session. `null` until the first Run binds. |
+| `current_manifest_id` | string \| null | The most recently admitted [ContextManifest](/docs/concepts/context/context-manifests). `null` until the first ModelCall settles. |
+
+### Headers
+
+```http
+HTTP/1.1 201 Created
+Content-Type: application/json
+X-Request-Id:    01J8X9Y2Z3K4M5N6P7Q8R9S0XX
+X-KS-Session-Id: ses_a7f3c2b8d4e1f0925a1b6c3d
+```
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `201 Created` | The Session was created in `OPEN` and is immediately addressable. |
+| `400 Bad Request` | Malformed JSON, unknown fields, or `expires_in_hours` outside `1..720`. Code: `invalid_request`. |
+| `401 Unauthorized` | Missing, malformed, or unresolved API key. Codes: `missing_token`, `invalid_token`, `token_revoked`. |
+| `403 Forbidden` | The API key's resolved PolicyScope blocks the requested `model`. Code: `model_access_denied`. |
+| `409 Conflict` | The supplied `Idempotency-Key` was reused with a different request body. Code: `idempotency_conflict`. |
+| `422 Unprocessable Entity` | The body parsed but failed schema validation. `details.field_errors` lists field-level errors. |
+| `429 Too Many Requests` | Rate limit exceeded. Code: `rate_limited`. |
+
+## Examples
+
+```bash
+# Minimal — 24h Session bound to one default model
+curl -X POST https://api.kovaserve.com/v1/ks/sessions \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen3-coder-30b"
+  }'
+
+# Long-lived Session for a multi-day workflow, with idempotency
+curl -X POST https://api.kovaserve.com/v1/ks/sessions \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: 6c1f8a30-9b22-4f0e-9d6c-12c4f0a1b2c3" \
+  -d '{
+    "model": "qwen3-coder-30b",
+    "expires_in_hours": 168
+  }'
+```
+
+```python
+from kovaserve import KovaClient
+
+kova = KovaClient(api_key="ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b")
+
+session = kova.sessions.create(
+    model="qwen3-coder-30b",
+    expires_in_hours=168,
+)
+
+# Use the Session on inference — the gateway prepends turn history,
+# executes, and appends the new turns on success.
+resp = kova.chat.completions.create(
+    model=session.model,
+    messages=[{"role": "user", "content": "Open the repo and summarize the auth module."}],
+    kovaserve={"session_id": session.id},
+)
+```
+
+## See also
+
+- [`GET /v1/ks/sessions/{id}`](/docs/api/sessions/get) · [`GET /v1/ks/sessions`](/docs/api/sessions/list) · [`POST /v1/ks/sessions/{id}/archive`](/docs/api/sessions/archive)
+- [Sessions](/docs/concepts/continuity/sessions) · [Session state machine](/docs/concepts/continuity/session-state-machine) · [Current manifest](/docs/concepts/continuity/current-manifest)
+- [Runs](/docs/concepts/run-hierarchy/runs) — what a Session contains
+- [IDs](/docs/api/using-the-api/ids) — the `ses_<24hex>` Session ID format
+- [Authentication](/docs/api/using-the-api/authentication) · [Idempotency](/docs/api/using-the-api/idempotency) · [Errors](/docs/api/using-the-api/errors)

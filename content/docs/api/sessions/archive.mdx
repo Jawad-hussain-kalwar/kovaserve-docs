@@ -1,0 +1,115 @@
+---
+title: Archive a Session
+description: POST /v1/ks/sessions/{id}/archive — terminally close a Session for new work while preserving the audit trail; idempotent on already-archived Sessions.
+---
+
+`POST /v1/ks/sessions/{id}/archive` transitions a [Session](/docs/concepts/continuity/sessions) to `ARCHIVED` (terminal). The endpoint is **idempotent**: archiving an already-`ARCHIVED` Session returns `200 OK` with the unchanged Session row, not an error. Archiving an `EXPIRED` Session returns `409 invalid_session_state` because terminal verdicts are not interchangeable — an `EXPIRED` Session aged out, an `ARCHIVED` Session was deliberately closed, and KovaServe never overwrites one terminal verdict with another.
+
+The dedicated archive verb is the right path for finishing a workflow whose Session you want preserved for audit. Reads against an `ARCHIVED` Session continue to return `200 OK` with the row and turn history; new turns and Run binds are rejected. Use [`POST /v1/ks/sessions/{id}/archive`](#) instead of waiting for TTL expiry when the audit story matters — `ARCHIVED` says "deliberately ended", `EXPIRED` says "wall clock elapsed".
+
+## What archival does
+
+- **Stops new turn appends.** `/v1/chat/completions` requests passing this Session ID are rejected with `409 session_archived` before substrate dispatch.
+- **Stops new Run binds.** `POST /v1/ks/runs` with `session_id` pointing at this Session is rejected with `409 session_archived`. Runs already bound to the Session are unaffected and continue on their own [state machine](/docs/concepts/run-hierarchy/run-state-machine) — only the Session is frozen.
+- **Preserves the audit trail.** Every `SessionTurn`, every Run binding, every event recorded under this Session remains queryable forever. The row is durable and unchangeable.
+- **Releases idle-sweep work.** Background sweeps skip `ARCHIVED` Sessions; the row no longer participates in `OPEN ↔ IDLE` cycling.
+- **Terminal — no reactivation.** `ARCHIVED` is a sink in the [Session state machine](/docs/concepts/continuity/session-state-machine). To resume the same conversational thread, create a new Session.
+
+Archival is **not** a recovery primitive. To suspend a Session pending a [Checkpoint](/docs/concepts/recovery/checkpoints)-driven resume, the Session enters `RESUMABLE` instead — set by the runtime, not by this endpoint.
+
+## Endpoint
+
+```
+POST /v1/ks/sessions/{session_id}/archive
+```
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_...` — see [Authentication](/docs/api/using-the-api/authentication). |
+| Path parameter | `session_id` — `ses_<24hex>`. See [IDs](/docs/api/using-the-api/ids). |
+| Idempotent | Yes — repeated calls on an `ARCHIVED` Session return `200 OK`. |
+| Errors | Native envelope — see [Errors](/docs/api/using-the-api/errors). |
+
+## Request body
+
+The request body is empty. The archive verb takes no fields.
+
+```http
+POST /v1/ks/sessions/ses_a7f3c2b8d4e1f0925a1b6c3d/archive HTTP/1.1
+Authorization: Bearer ks_...
+Content-Length: 0
+```
+
+## Response — `200 OK`
+
+The body is the Session row in `ARCHIVED`.
+
+```json
+{
+  "id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+  "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+  "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+  "model": "qwen3-coder-30b",
+  "state": "ARCHIVED",
+  "turn_count": 12,
+  "created_at": "2026-05-05T12:00:00Z",
+  "last_accessed_at": "2026-05-05T12:42:11Z",
+  "expires_at": "2026-05-06T12:00:00Z",
+  "stable_prefix_id": "9f3c2b8d4e1f0925a1b6c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e",
+  "last_node_id": "gpu-node-2",
+  "current_run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+  "current_manifest_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T7"
+}
+```
+
+`last_accessed_at` is bumped to the archival timestamp. `current_run_id` and `current_manifest_id` are **not** cleared — pinning them preserves the lineage of the most recent Run and ContextManifest that ran under the Session.
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `200 OK` | The Session was archived, *or* was already in `ARCHIVED` (idempotent). |
+| `401 Unauthorized` | Missing or invalid bearer token. |
+| `404 Not Found` | The Session does not exist or belongs to another Tenant. Code: `session_not_found`. |
+| `409 Conflict` | The Session is in a different terminal state (`EXPIRED`) and cannot be archived. Code: `invalid_session_state`. The body includes `details.state` so clients can branch. |
+| `410 Gone` | The Session reached `EXPIRED` between the read and the write attempt. Code: `session_expired`. |
+
+## Examples
+
+```bash
+# Archive a Session
+curl -X POST https://api.kovaserve.com/v1/ks/sessions/ses_a7f3c2b8d4e1f0925a1b6c3d/archive \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# Idempotent — same response on the second call
+curl -X POST https://api.kovaserve.com/v1/ks/sessions/ses_a7f3c2b8d4e1f0925a1b6c3d/archive \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+```
+
+```python
+from kovaserve import KovaClient, KovaError
+
+kova = KovaClient(api_key="ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b")
+
+# Archive — and tolerate the case where the Session already aged out
+try:
+    session = kova.sessions.archive("ses_a7f3c2b8d4e1f0925a1b6c3d")
+    print(f"archived at {session.last_accessed_at}; turns preserved: {session.turn_count}")
+except KovaError as exc:
+    if exc.code == "invalid_session_state":
+        # EXPIRED Session — already terminal, just by a different verdict
+        print(f"session already terminal: {exc.details['state']}")
+    elif exc.code in ("session_not_found", "session_expired"):
+        # Either gone from the surface or aged out between read and write
+        print(f"session no longer addressable: {exc.code}")
+    else:
+        raise
+```
+
+## See also
+
+- [`POST /v1/ks/sessions`](/docs/api/sessions/create) · [`GET /v1/ks/sessions/{id}`](/docs/api/sessions/get) · [`GET /v1/ks/sessions`](/docs/api/sessions/list)
+- [Sessions](/docs/concepts/continuity/sessions) · [Session state machine](/docs/concepts/continuity/session-state-machine) — terminal-state semantics and the `ARCHIVED` vs `EXPIRED` distinction
+- [Runs](/docs/concepts/run-hierarchy/runs) · [Run state machine](/docs/concepts/run-hierarchy/run-state-machine) — how a bound Run reacts when its Session is archived
+- [Checkpoints](/docs/concepts/recovery/checkpoints) — the resume surface that uses `RESUMABLE` instead of `ARCHIVED`
+- [IDs](/docs/api/using-the-api/ids) · [Errors](/docs/api/using-the-api/errors)

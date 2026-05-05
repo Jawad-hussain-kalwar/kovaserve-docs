@@ -229,10 +229,10 @@ Living roadmap for `docs.kovaserve.com`. Source of structure for `content/docs/`
 
 ### Sessions
 
-- [ ] `api/sessions/create.mdx`
-- [ ] `api/sessions/get.mdx`
-- [ ] `api/sessions/list.mdx`
-- [ ] `api/sessions/archive.mdx`
+- [x] `api/sessions/create.mdx`
+- [x] `api/sessions/get.mdx`
+- [x] `api/sessions/list.mdx`
+- [x] `api/sessions/archive.mdx`
 
 ### Checkpoints
 
