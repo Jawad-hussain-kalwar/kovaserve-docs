@@ -1,0 +1,128 @@
+---
+title: Revoke a Key
+description: POST /v1/ks/keys/{id}/revoke — terminally revoke a Key. New requests reject with 401; in-flight requests complete; the Key cannot be reactivated.
+---
+
+`POST /v1/ks/keys/{id}/revoke` terminally revokes a [Key](/docs/concepts/tenancy/keys). Revocation is **immediate and unconditional** — every new request bearing the secret returns `401 Unauthorized` with `error.code = "key_revoked"`. The Key transitions to `REVOKED` and cannot be reactivated; replace it with a fresh [`POST /v1/ks/keys`](/docs/api/tenancy/keys/create).
+
+In-flight requests already past authentication continue to completion — revocation does not interrupt admitted Steps. Cached resolutions inside the gateway are invalidated within the gateway's resolution-cache TTL (configured at deployment time, never longer than 60 seconds).
+
+## Endpoint
+
+```
+POST /v1/ks/keys/{key_id}/revoke
+```
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_...` — must be an admin-scoped Key. See [Authentication](/docs/api/using-the-api/authentication). |
+| Path parameter | `key_id` — bare 26-character Crockford ULID. |
+| Content type | `application/json` (request body is optional). |
+| Idempotent | Yes — calling revoke on an already-`REVOKED` Key returns `200 OK` and is a no-op. |
+| Errors | Native envelope — see [Errors](/docs/api/using-the-api/errors). |
+
+## Request body
+
+The request body is optional. When supplied, it records a reason string for the audit trail.
+
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `reason` | string \| null | no | Free-form audit reason, 1–256 characters. Surfaces in the audit log row and on subsequent `GET /v1/ks/keys/{id}` reads as `revoked_reason`. |
+
+### Example
+
+```json
+{
+  "reason": "leaked in public repo, replaced 2026-05-05"
+}
+```
+
+## Response — `200 OK`
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9KEY1",
+  "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9ORG1",
+  "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9PRJ1",
+  "environment_id": "01J8X9Y2Z3K4M5N6P7Q8R9ENV1",
+  "name": "ci-bot",
+  "mode": "live",
+  "status": "REVOKED",
+  "last4": "e1f2",
+  "revoked_at": "2026-05-05T13:00:00Z",
+  "revoked_reason": "leaked in public repo, replaced 2026-05-05",
+  "created_at": "2026-04-30T12:00:00Z",
+  "expires_at": "2027-04-30T00:00:00Z",
+  "last_used_at": "2026-05-05T11:58:42Z"
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | string | Key ID. |
+| `tenant_id` / `project_id` / `environment_id` | string | The bound triple. Unchanged. |
+| `name` / `mode` / `last4` | string | Unchanged. |
+| `status` | string | `REVOKED`. Terminal — Keys cannot be moved out of `REVOKED`. |
+| `revoked_at` | string | Instant the revocation took effect. |
+| `revoked_reason` | string \| null | Echo of the request `reason`, or `null` when none supplied. |
+| `created_at` / `expires_at` / `last_used_at` | string \| null | Lifecycle timestamps; preserved through revocation. |
+
+The `secret` field is never returned. Once revoked, the secret is unusable on every endpoint.
+
+### Headers
+
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+X-Request-Id: 01J8X9Y2Z3K4M5N6P7Q8R9S0XX
+X-KS-Key-Id:  01J8X9Y2Z3K4M5N6P7Q8R9KEY1
+```
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `200 OK` | Revocation succeeded, or the Key was already in `REVOKED` (no-op). |
+| `400 Bad Request` | Malformed JSON, unknown fields, or a `reason` outside the 1–256 character range. Code: `invalid_request`. |
+| `401 Unauthorized` | Missing, malformed, or unresolved API key. Codes: `missing_token`, `invalid_token`, `token_revoked`. |
+| `403 Forbidden` | The authenticated Tenant is `SUSPENDED`, or the calling Key lacks permission to revoke Keys. Codes: `tenant_suspended`, `permission_denied`. |
+| `404 Not Found` | The Key does not exist *or* belongs to another Tenant. Code: `key_not_found`. |
+| `409 Conflict` | The Key is in `EXPIRED` and cannot be revoked again. Code: `key_already_terminal`. |
+| `429 Too Many Requests` | Rate limit exceeded. Code: `rate_limited`. |
+
+## Examples
+
+```bash
+# Revoke without a reason
+curl -X POST https://api.kovaserve.com/v1/ks/keys/01J8X9Y2Z3K4M5N6P7Q8R9KEY1/revoke \
+  -H "Authorization: Bearer ks_admin_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# Revoke with an audit reason
+curl -X POST https://api.kovaserve.com/v1/ks/keys/01J8X9Y2Z3K4M5N6P7Q8R9KEY1/revoke \
+  -H "Authorization: Bearer ks_admin_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b" \
+  -H "Content-Type: application/json" \
+  -d '{ "reason": "leaked in public repo, replaced 2026-05-05" }'
+```
+
+```python
+from kovaserve import KovaClient
+import os
+
+admin = KovaClient(api_key=os.environ["KOVASERVE_ADMIN_KEY"])
+
+revoked = admin.keys.revoke(
+    "01J8X9Y2Z3K4M5N6P7Q8R9KEY1",
+    reason="leaked in public repo, replaced 2026-05-05",
+)
+
+print(f"revoked {revoked.id} at {revoked.revoked_at}")
+```
+
+A revoked Key cannot be brought back. To restore service for the same workload, [issue a new Key](/docs/api/tenancy/keys/create) bound to the same `(project_id, environment_id)` and update the consumer to use the new secret.
+
+## See also
+
+- [`POST /v1/ks/keys/{id}/rotate`](/docs/api/tenancy/keys/rotate) — replace the secret while preserving the Key ID
+- [`POST /v1/ks/keys`](/docs/api/tenancy/keys/create) · [`GET /v1/ks/keys/{id}`](/docs/api/tenancy/keys/get) · [`GET /v1/ks/keys`](/docs/api/tenancy/keys/list)
+- [Keys](/docs/concepts/tenancy/keys) — revocation semantics and the resolution flow
+- [Authentication](/docs/api/using-the-api/authentication) · [Errors](/docs/api/using-the-api/errors)

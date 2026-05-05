@@ -1,0 +1,87 @@
+---
+title: Get a Tenant
+description: GET /v1/ks/tenants/{id} — fetch the Tenant the authenticated key resolves to, with its defaults, ceilings, and lifecycle status.
+---
+
+`GET /v1/ks/tenants/{id}` returns the [Tenant](/docs/concepts/tenancy/tenants) the authenticated key resolves to. The response carries the contract-level identifiers, the default [PolicyScope](/docs/concepts/policy/policy-scopes), the default data boundary, the Tenant-wide rate-limit ceiling, the contracted model ACL, and the lifecycle status.
+
+A Bearer key resolves to exactly one Tenant. The endpoint accepts only that Tenant's ID — fetching another Tenant's ID returns `404 Not Found`, the same response as a genuinely missing Tenant, so the surface leaks no information about other customers.
+
+## Endpoint
+
+```
+GET /v1/ks/tenants/{tenant_id}
+```
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_...` — see [Authentication](/docs/api/using-the-api/authentication). |
+| Path parameter | `tenant_id` — bare 26-character Crockford ULID. |
+| Errors | Native envelope — see [Errors](/docs/api/using-the-api/errors). |
+
+## Response — `200 OK`
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9TEN1",
+  "name": "Acme Corp",
+  "status": "ACTIVE",
+  "default_policy_scope_id": "01J8X9Y2Z3K4M5N6P7Q8R9P0K0",
+  "default_data_boundary": "tenant_local",
+  "default_rate_limits": {
+    "requests_per_second": 200,
+    "tokens_per_second": 4000000
+  },
+  "default_model_acl": ["qwen3-coder-30b", "qwen3-coder-7b"],
+  "created_at": "2026-01-15T09:00:00Z"
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | string | Tenant ID — bare 26-character Crockford ULID. |
+| `name` | string | Human-readable identifier. Not used for routing or auth. |
+| `status` | string | `ACTIVE` or `SUSPENDED`. Suspended Tenants reject every admission with `403 Forbidden`. |
+| `default_policy_scope_id` | string | The PolicyScope applied to any Project that does not declare its own override. |
+| `default_data_boundary` | string | `tenant_local`, `region_local`, or `unrestricted`. Residency floor for ContextArtifacts and KV exports across all Projects. |
+| `default_rate_limits` | object | `requests_per_second` and `tokens_per_second` ceilings. Sums across every Project under the Tenant. |
+| `default_model_acl` | array | Allowlist of model IDs the Tenant is contracted for. Project-level ACLs may narrow this list but cannot extend it. |
+| `created_at` | string | ISO-8601 timestamp with `Z` suffix. |
+
+The Tenant-level fields are **defaults and ceilings**, not per-request enforcement. Actual enforcement happens at admission time after the full hierarchy overlays — see [PolicyScope resolution](/docs/concepts/policy/policy-scopes#resolution).
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `200 OK` | The Tenant exists and matches the authenticated key. |
+| `401 Unauthorized` | Missing or invalid bearer token. Codes: `missing_token`, `invalid_token`, `token_revoked`. |
+| `404 Not Found` | The supplied `tenant_id` is not the Tenant the authenticated key resolves to. |
+
+## Examples
+
+```bash
+curl https://api.kovaserve.com/v1/ks/tenants/01J8X9Y2Z3K4M5N6P7Q8R9TEN1 \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+```
+
+```python
+from kovaserve import KovaClient
+
+kova = KovaClient(api_key="ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b")
+
+tenant = kova.tenants.get("01J8X9Y2Z3K4M5N6P7Q8R9TEN1")
+
+print(f"{tenant.name}  status={tenant.status}")
+print(f"  models:   {', '.join(tenant.default_model_acl)}")
+print(f"  rps cap:  {tenant.default_rate_limits['requests_per_second']}")
+print(f"  boundary: {tenant.default_data_boundary}")
+```
+
+## See also
+
+- [Tenants](/docs/concepts/tenancy/tenants) — the billing root and governance container
+- [Tenancy](/docs/concepts/tenancy) — the four-level hierarchy
+- [Projects](/docs/api/tenancy/projects/list) — the next level down
+- [PolicyScope](/docs/concepts/policy/policy-scopes) — how Tenant defaults flow into admission
+- [Authentication](/docs/api/using-the-api/authentication) · [IDs](/docs/api/using-the-api/ids) · [Errors](/docs/api/using-the-api/errors)

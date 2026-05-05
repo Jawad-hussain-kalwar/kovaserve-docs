@@ -1,0 +1,89 @@
+---
+title: Get an Environment
+description: GET /v1/ks/environments/{id} — fetch an Environment with its tier, rate limits, deployment restrictions, and lifecycle status.
+---
+
+`GET /v1/ks/environments/{id}` returns a single [Environment](/docs/concepts/tenancy/environments). The response carries the parent Project, the canonical tier, the resolved [PolicyScope](/docs/concepts/policy/policy-scopes) override, the per-Environment rate limits, the deployment restrictions, and the lifecycle status.
+
+The Environment is resolved against the API key's Tenant. Cross-tenant fetches return `404 Not Found` — the same response as a genuinely missing Environment — so the surface leaks no information about Environments the caller cannot see.
+
+## Endpoint
+
+```
+GET /v1/ks/environments/{environment_id}
+```
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_...` — see [Authentication](/docs/api/using-the-api/authentication). |
+| Path parameter | `environment_id` — bare 26-character Crockford ULID. |
+| Errors | Native envelope — see [Errors](/docs/api/using-the-api/errors). |
+
+## Response — `200 OK`
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9ENV1",
+  "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9ORG1",
+  "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9PRJ1",
+  "name": "production",
+  "tier": "prod",
+  "status": "ACTIVE",
+  "policy_scope_id": "01J8X9Y2Z3K4M5N6P7Q8R9P0K2",
+  "rate_limits": {
+    "requests_per_second": 100,
+    "tokens_per_second": 2000000
+  },
+  "deployment_restrictions": ["dep_us_east_1", "dep_us_west_2"],
+  "created_at": "2026-04-30T12:00:00Z"
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | string | Environment ID. |
+| `tenant_id` / `project_id` | string | Parent tenancy pair. Immutable. |
+| `name` | string | Human-readable identifier, unique within the Project. |
+| `tier` | string | Canonical tier — `prod` / `staging` / `dev`. Immutable. |
+| `status` | string | `ACTIVE` or `ARCHIVED`. Archived Environments reject new admission with `error.code = "environment_archived"` while existing rows remain queryable. |
+| `policy_scope_id` | string \| null | Environment-level PolicyScope override. |
+| `rate_limits` | object \| null | Per-Environment rate-limit override; `null` indicates the Environment inherits Project limits without narrowing. |
+| `deployment_restrictions` | array | Deployment IDs this Environment may execute against. Empty = all deployments allowed by the Project. |
+| `created_at` | string | ISO-8601 timestamp with `Z` suffix. |
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `200 OK` | The Environment exists and is visible to the caller. |
+| `401 Unauthorized` | Missing or invalid bearer token. Codes: `missing_token`, `invalid_token`, `token_revoked`. |
+| `404 Not Found` | The Environment does not exist *or* belongs to another Tenant. Code: `environment_not_found`. |
+
+## Examples
+
+```bash
+curl https://api.kovaserve.com/v1/ks/environments/01J8X9Y2Z3K4M5N6P7Q8R9ENV1 \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+```
+
+```python
+from kovaserve import KovaClient
+
+kova = KovaClient(api_key="ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b")
+
+env = kova.environments.get("01J8X9Y2Z3K4M5N6P7Q8R9ENV1")
+
+print(f"{env.name}  tier={env.tier}  status={env.status}")
+if env.rate_limits:
+    print(f"  rps cap: {env.rate_limits['requests_per_second']}")
+if env.deployment_restrictions:
+    print(f"  pinned:  {', '.join(env.deployment_restrictions)}")
+```
+
+## See also
+
+- [`POST /v1/ks/environments`](/docs/api/tenancy/environments/create) · [`GET /v1/ks/environments`](/docs/api/tenancy/environments/list)
+- [Environments](/docs/concepts/tenancy/environments) — stage isolation under a Project
+- [PolicyScope](/docs/concepts/policy/policy-scopes) — overlay resolution
+- [Manifest-aware routing](/docs/concepts/routing/manifest-aware-routing) — how `tier` partitions cache reuse
+- [Authentication](/docs/api/using-the-api/authentication) · [IDs](/docs/api/using-the-api/ids) · [Errors](/docs/api/using-the-api/errors)

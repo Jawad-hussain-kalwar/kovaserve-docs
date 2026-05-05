@@ -1,0 +1,157 @@
+---
+title: Create an Environment
+description: POST /v1/ks/environments — create an Environment under a Project, with a tier, optional rate limits, optional PolicyScope override, and deployment restrictions.
+---
+
+`POST /v1/ks/environments` creates an [Environment](/docs/concepts/tenancy/environments) under a [Project](/docs/concepts/tenancy/projects). The Environment is the stage-isolation level that separates production, staging, and development traffic — independent cache, independent rate limits, independent cost, and optional deploy-target pinning.
+
+The `tier` field carries the canonical posture (`prod` / `staging` / `dev`) independent of the human-readable `name`; downstream subsystems apply class-specific defaults from the tier rather than the name. The [Cache-Aware Router](/docs/concepts/routing/manifest-aware-routing) treats `tier` as a hard partition: a `prod` Run never reuses cache warmed by a `dev` Run, even within the same Project.
+
+## Endpoint
+
+```
+POST /v1/ks/environments
+```
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_...` — see [Authentication](/docs/api/using-the-api/authentication). |
+| Content type | `application/json`. |
+| Idempotent | Yes, when `Idempotency-Key` is supplied — see [Idempotency](/docs/api/using-the-api/idempotency). |
+| Errors | Native envelope — see [Errors](/docs/api/using-the-api/errors). |
+
+## Request body
+
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `project_id` | string | yes | The Project the Environment belongs to. Must be visible to the API key's Tenant and not in `ARCHIVED`. |
+| `name` | string | yes | Human-readable identifier, unique within the Project. 1–64 characters; ASCII letters, digits, hyphens, underscores. Common values: `production`, `staging`, `development`. |
+| `tier` | string | yes | Canonical tier. One of `prod`, `staging`, `dev`. Drives default policy posture. |
+| `policy_scope_id` | string \| null | no | An existing [PolicyScope](/docs/concepts/policy/policy-scopes) to bind as the Environment-level override. Must belong to the same Tenant. Narrows against the Project's resolved scope. |
+| `rate_limits` | object \| null | no | `requests_per_second` and `tokens_per_second` for this Environment. Defaults to inherited Project limits. May only narrow inherited limits. |
+| `deployment_restrictions` | array \| null | no | Deployment IDs this Environment may execute against. Empty or `null` = all deployments allowed by the Project. |
+
+Unknown top-level fields return `400 invalid_request` with `details.field_errors` listing the offending keys. The Tenant is implicit — taken from the authenticated key, never accepted on the request body.
+
+### Example
+
+```json
+{
+  "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9PRJ1",
+  "name": "production",
+  "tier": "prod",
+  "policy_scope_id": "01J8X9Y2Z3K4M5N6P7Q8R9P0K2",
+  "rate_limits": {
+    "requests_per_second": 100,
+    "tokens_per_second": 2000000
+  },
+  "deployment_restrictions": ["dep_us_east_1", "dep_us_west_2"]
+}
+```
+
+## Response — `201 Created`
+
+The body is the new Environment row in `ACTIVE`.
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9ENV1",
+  "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9ORG1",
+  "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9PRJ1",
+  "name": "production",
+  "tier": "prod",
+  "status": "ACTIVE",
+  "policy_scope_id": "01J8X9Y2Z3K4M5N6P7Q8R9P0K2",
+  "rate_limits": {
+    "requests_per_second": 100,
+    "tokens_per_second": 2000000
+  },
+  "deployment_restrictions": ["dep_us_east_1", "dep_us_west_2"],
+  "created_at": "2026-05-05T12:00:00Z"
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | string | Environment ID — bare 26-character Crockford ULID. |
+| `tenant_id` | string | Owning Tenant. Inherited from the Project. Immutable. |
+| `project_id` | string | Owning Project. Immutable. |
+| `name` | string | Human-readable identifier, unique within the Project. |
+| `tier` | string | Canonical tier — `prod` / `staging` / `dev`. Immutable. |
+| `status` | string | `ACTIVE` or `ARCHIVED`. New Environments return in `ACTIVE`. |
+| `policy_scope_id` | string \| null | Environment-level PolicyScope override. |
+| `rate_limits` | object \| null | Per-Environment rate-limit override. |
+| `deployment_restrictions` | array | Deployment ID list, possibly empty. |
+| `created_at` | string | ISO-8601 timestamp with `Z` suffix. |
+
+### Headers
+
+```http
+HTTP/1.1 201 Created
+Content-Type: application/json
+X-Request-Id:        01J8X9Y2Z3K4M5N6P7Q8R9S0XX
+X-KS-Environment-Id: 01J8X9Y2Z3K4M5N6P7Q8R9ENV1
+```
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `201 Created` | The Environment was created and is immediately usable for [Key issuance](/docs/api/tenancy/keys/create) and Run admission. |
+| `400 Bad Request` | Malformed JSON, unknown fields, invalid `name`, unknown `tier`, malformed IDs, or `rate_limits` that widen the inherited Project limits. Code: `invalid_request`. |
+| `401 Unauthorized` | Missing, malformed, or unresolved API key. Codes: `missing_token`, `invalid_token`, `token_revoked`. |
+| `403 Forbidden` | The authenticated Tenant is `SUSPENDED`, or the target Project is `ARCHIVED`. Codes: `tenant_suspended`, `project_archived`. |
+| `404 Not Found` | The supplied `project_id` or `policy_scope_id` does not resolve in the caller's Tenant. Codes: `project_not_found`, `policy_scope_not_found`. |
+| `409 Conflict` | An Environment with the same `name` already exists under this Project, or the supplied `Idempotency-Key` was reused with a different request body. Codes: `environment_name_conflict`, `idempotency_conflict`. |
+| `429 Too Many Requests` | Rate limit exceeded. Code: `rate_limited`. |
+
+## Examples
+
+```bash
+# Production Environment pinned to two deployments
+curl -X POST https://api.kovaserve.com/v1/ks/environments \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9PRJ1",
+    "name": "production",
+    "tier": "prod",
+    "rate_limits": { "requests_per_second": 100, "tokens_per_second": 2000000 },
+    "deployment_restrictions": ["dep_us_east_1", "dep_us_west_2"]
+  }'
+
+# Permissive development Environment, inherits Project rate limits
+curl -X POST https://api.kovaserve.com/v1/ks/environments \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9PRJ1",
+    "name": "development",
+    "tier": "dev"
+  }'
+```
+
+```python
+from kovaserve import KovaClient
+
+kova = KovaClient(api_key="ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b")
+
+env = kova.environments.create(
+    project_id="01J8X9Y2Z3K4M5N6P7Q8R9PRJ1",
+    name="production",
+    tier="prod",
+    rate_limits={"requests_per_second": 100, "tokens_per_second": 2_000_000},
+    deployment_restrictions=["dep_us_east_1", "dep_us_west_2"],
+)
+
+print(f"created {env.id} ({env.tier}) under project {env.project_id}")
+```
+
+## See also
+
+- [`GET /v1/ks/environments/{id}`](/docs/api/tenancy/environments/get) · [`GET /v1/ks/environments`](/docs/api/tenancy/environments/list)
+- [Environments](/docs/concepts/tenancy/environments) — stage isolation under a Project
+- [Tenancy](/docs/concepts/tenancy) — the four-level hierarchy
+- [PolicyScope](/docs/concepts/policy/policy-scopes) — overlay resolution
+- [Manifest-aware routing](/docs/concepts/routing/manifest-aware-routing) — how `tier` partitions cache reuse
+- [Authentication](/docs/api/using-the-api/authentication) · [Idempotency](/docs/api/using-the-api/idempotency) · [Errors](/docs/api/using-the-api/errors)

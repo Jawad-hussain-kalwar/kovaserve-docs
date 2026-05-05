@@ -1,0 +1,138 @@
+---
+title: Rotate a Key
+description: POST /v1/ks/keys/{id}/rotate — issue a new secret for the same Key, with a five-minute grace window for the previous secret.
+---
+
+`POST /v1/ks/keys/{id}/rotate` issues a new secret for an existing [Key](/docs/concepts/tenancy/keys) while preserving the Key ID, name, mode, and bound `(tenant_id, project_id, environment_id)` triple. Rotation is the supported way to replace a leaked or lost secret — the old secret cannot be retrieved because KovaServe holds only its SHA-256 hash.
+
+Rotation provides a **5-minute grace window**: the previous secret continues to authenticate for five minutes after rotation, so a deployment cycle can swap secrets without an outage. The previous secret transitions to `REVOKED` at the end of the grace window. The Key ID does not change — audit logs, event histories, and the `last_used_at` continuity are preserved.
+
+The new secret is returned **once** in the response. Capture it immediately — KovaServe stores only the hash.
+
+## Endpoint
+
+```
+POST /v1/ks/keys/{key_id}/rotate
+```
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_...` — must be an admin-scoped Key. See [Authentication](/docs/api/using-the-api/authentication). |
+| Path parameter | `key_id` — bare 26-character Crockford ULID. |
+| Content type | `application/json` (request body is optional). |
+| Idempotent | Yes, when `Idempotency-Key` is supplied — see [Idempotency](/docs/api/using-the-api/idempotency). |
+| Errors | Native envelope — see [Errors](/docs/api/using-the-api/errors). |
+
+## Request body
+
+The request body is optional. When supplied, it overrides the default grace window.
+
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `grace_seconds` | integer \| null | no | Override the grace-window length, in seconds. Range `0..900`. `0` revokes the previous secret immediately. Default `300` (5 minutes). Values outside the range return `400 invalid_request`. |
+
+### Example
+
+```json
+{
+  "grace_seconds": 60
+}
+```
+
+## Response — `200 OK`
+
+The response includes the new raw secret. Every metadata field — `id`, `name`, `mode`, the bound triple — is unchanged.
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9KEY1",
+  "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9ORG1",
+  "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9PRJ1",
+  "environment_id": "01J8X9Y2Z3K4M5N6P7Q8R9ENV1",
+  "name": "ci-bot",
+  "mode": "live",
+  "status": "ACTIVE",
+  "last4": "8a31",
+  "secret": "ks_live_2c4d8e0f1a3b5c7d9e1f3a5b7c9d1e3f5a7b9c1d8a31",
+  "rotated_at": "2026-05-05T13:00:00Z",
+  "previous_revoked_at": "2026-05-05T13:05:00Z",
+  "created_at": "2026-04-30T12:00:00Z",
+  "expires_at": "2027-04-30T00:00:00Z"
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | string | Key ID. Unchanged across rotation. |
+| `tenant_id` / `project_id` / `environment_id` | string | The bound triple. Unchanged. |
+| `name` / `mode` | string | Unchanged. |
+| `status` | string | `ACTIVE`. Rotation is rejected when the Key is in `REVOKED` or `EXPIRED`. |
+| `last4` | string | Last four characters of the **new** secret. |
+| `secret` | string | **Raw new secret. Returned only here.** |
+| `rotated_at` | string | Instant the rotation took effect. |
+| `previous_revoked_at` | string | Instant the previous secret transitions to `REVOKED` (= `rotated_at + grace_seconds`). |
+| `created_at` | string | Original creation timestamp. Unchanged. |
+| `expires_at` | string \| null | Echo of the configured expiry. Unchanged unless updated separately. |
+
+### Headers
+
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+X-Request-Id: 01J8X9Y2Z3K4M5N6P7Q8R9S0XX
+X-KS-Key-Id:  01J8X9Y2Z3K4M5N6P7Q8R9KEY1
+```
+
+The previous secret continues to authenticate against `/v1/*` and `/v1/ks/*` until `previous_revoked_at`. After that instant, requests carrying the previous secret return `401 Unauthorized` with `error.code = "token_revoked"`.
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `200 OK` | Rotation succeeded. The new secret is returned in the body. |
+| `400 Bad Request` | `grace_seconds` outside `0..900`, malformed JSON, or unknown fields. Code: `invalid_request`. |
+| `401 Unauthorized` | Missing, malformed, or unresolved API key. Codes: `missing_token`, `invalid_token`, `token_revoked`. |
+| `403 Forbidden` | The authenticated Tenant is `SUSPENDED`, or the calling Key lacks permission to rotate Keys. Codes: `tenant_suspended`, `permission_denied`. |
+| `404 Not Found` | The Key does not exist *or* belongs to another Tenant. Code: `key_not_found`. |
+| `409 Conflict` | The Key is in `REVOKED` or `EXPIRED` and cannot be rotated. Code: `key_not_rotatable`. |
+| `429 Too Many Requests` | Rate limit exceeded. Code: `rate_limited`. |
+
+A revoked or expired Key cannot be rotated — issue a new Key instead.
+
+## Examples
+
+```bash
+# Rotate with the default 5-minute grace window
+curl -X POST https://api.kovaserve.com/v1/ks/keys/01J8X9Y2Z3K4M5N6P7Q8R9KEY1/rotate \
+  -H "Authorization: Bearer ks_admin_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# Rotate with no grace window — previous secret revoked instantly
+curl -X POST https://api.kovaserve.com/v1/ks/keys/01J8X9Y2Z3K4M5N6P7Q8R9KEY1/rotate \
+  -H "Authorization: Bearer ks_admin_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b" \
+  -H "Content-Type: application/json" \
+  -d '{ "grace_seconds": 0 }'
+```
+
+```python
+from kovaserve import KovaClient
+import os
+
+admin = KovaClient(api_key=os.environ["KOVASERVE_ADMIN_KEY"])
+
+rotated = admin.keys.rotate(
+    "01J8X9Y2Z3K4M5N6P7Q8R9KEY1",
+    grace_seconds=60,
+)
+
+# Capture the new secret immediately.
+write_secret_to_vault(rotated.id, rotated.secret)
+
+print(f"rotated {rotated.id}  previous revoked at {rotated.previous_revoked_at}")
+```
+
+## See also
+
+- [`POST /v1/ks/keys/{id}/revoke`](/docs/api/tenancy/keys/revoke) — immediate, terminal removal
+- [`POST /v1/ks/keys`](/docs/api/tenancy/keys/create) · [`GET /v1/ks/keys/{id}`](/docs/api/tenancy/keys/get) · [`GET /v1/ks/keys`](/docs/api/tenancy/keys/list)
+- [Keys](/docs/concepts/tenancy/keys) — rotation, revocation, and the resolution flow
+- [Authentication](/docs/api/using-the-api/authentication) · [Errors](/docs/api/using-the-api/errors)

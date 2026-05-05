@@ -1,0 +1,122 @@
+---
+title: List Projects
+description: GET /v1/ks/projects — page through Projects under the authenticated Tenant with cursor pagination, filtered by name prefix, status, or share scope.
+---
+
+`GET /v1/ks/projects` lists [Projects](/docs/concepts/tenancy/projects) under the authenticated Tenant, newest first. The response uses cursor pagination — the same shape as every other list endpoint in the API. Filters narrow the result to a name prefix, status, or default cache-share scope.
+
+The Tenant filter is implicit. Projects in other Tenants never appear, regardless of any query parameter combination.
+
+## Endpoint
+
+```
+GET /v1/ks/projects
+```
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_...` — see [Authentication](/docs/api/using-the-api/authentication). |
+| Pagination | Cursor — see [Pagination](/docs/api/using-the-api/pagination). |
+| Errors | Native envelope — see [Errors](/docs/api/using-the-api/errors). |
+
+## Query parameters
+
+| Parameter | Type | Default | Meaning |
+|---|---|---|---|
+| `limit` | integer | `100` | Maximum Projects to return. Capped at `200`. Values outside `1..200` return `400 invalid_request`. |
+| `after` | string \| null | `null` | Cursor — return Projects strictly after it in descending creation order. |
+| `before` | string \| null | `null` | Cursor — return Projects strictly before it. Mutually exclusive with `after`. |
+| `name_prefix` | string \| null | `null` | Restrict to Projects whose `name` starts with the prefix. Case-sensitive. |
+| `status` | string \| null | `null` | Restrict to one of `ACTIVE` / `ARCHIVED`. |
+| `default_context_share_scope` | string \| null | `null` | Restrict to one of `none` / `project` / `tenant`. |
+| `created_after` | string \| null | `null` | ISO-8601 timestamp — Projects with `created_at >= created_after`. |
+| `created_before` | string \| null | `null` | ISO-8601 timestamp — Projects with `created_at < created_before`. |
+
+## Response — `200 OK`
+
+```json
+{
+  "data": [
+    {
+      "id": "01J8X9Y2Z3K4M5N6P7Q8R9PRJ1",
+      "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9ORG1",
+      "name": "coding-agent",
+      "status": "ACTIVE",
+      "policy_scope_id": "01J8X9Y2Z3K4M5N6P7Q8R9P0K1",
+      "default_context_share_scope": "project",
+      "default_compaction_policy": null,
+      "created_at": "2026-04-30T12:00:00Z"
+    },
+    {
+      "id": "01J8X9Y2Z3K4M5N6P7Q8R9PRJ0",
+      "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9ORG1",
+      "name": "regulated-eu",
+      "status": "ACTIVE",
+      "policy_scope_id": "01J8X9Y2Z3K4M5N6P7Q8R9P0K2",
+      "default_context_share_scope": "none",
+      "default_compaction_policy": null,
+      "created_at": "2026-04-22T08:14:00Z"
+    }
+  ],
+  "page": {
+    "next_cursor": "01J8X9Y2Z3K4M5N6P7Q8R9PRJ0",
+    "prev_cursor": "01J8X9Y2Z3K4M5N6P7Q8R9PRJ1",
+    "has_more": true,
+    "limit": 100
+  }
+}
+```
+
+Each entry in `data` is a Project row in the same shape as [`GET /v1/ks/projects/{id}`](/docs/api/tenancy/projects/get). The pagination envelope is documented at [Pagination](/docs/api/using-the-api/pagination).
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `200 OK` | Returns a page of Projects. Empty `data` is valid. |
+| `400 Bad Request` | Both `before` and `after` supplied, `limit` outside `1..200`, an unrecognized `status` or `default_context_share_scope` value, or a malformed timestamp. Code: `invalid_request`. |
+| `401 Unauthorized` | Missing or invalid bearer token. |
+| `429 Too Many Requests` | Rate limit exceeded. Code: `rate_limited`. |
+
+## Examples
+
+```bash
+# Newest 50 Projects under the Tenant
+curl "https://api.kovaserve.com/v1/ks/projects?limit=50" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# Active Projects with cache isolation per Run
+curl "https://api.kovaserve.com/v1/ks/projects?status=ACTIVE&default_context_share_scope=none" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+
+# Walk every archived Project — name prefix match
+curl "https://api.kovaserve.com/v1/ks/projects?status=ARCHIVED&name_prefix=legacy-" \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+```
+
+```python
+from kovaserve import KovaClient
+
+kova = KovaClient(api_key="ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b")
+
+# Walk every Project under the Tenant
+cursor = None
+while True:
+    page = kova.projects.list(limit=100, after=cursor)
+    for p in page.data:
+        print(f"{p.id}  {p.name:24}  {p.status}")
+    if not page.has_more:
+        break
+    cursor = page.next_cursor
+
+# Built-in iterator helper — auto-paginates
+for p in kova.projects.iter(status="ACTIVE"):
+    print(f"{p.name}  share={p.default_context_share_scope}")
+```
+
+## See also
+
+- [`POST /v1/ks/projects`](/docs/api/tenancy/projects/create) · [`GET /v1/ks/projects/{id}`](/docs/api/tenancy/projects/get)
+- [Projects](/docs/concepts/tenancy/projects) — the logical application boundary
+- [Tenancy](/docs/concepts/tenancy) — the four-level hierarchy
+- [Pagination](/docs/api/using-the-api/pagination) · [IDs](/docs/api/using-the-api/ids) · [Errors](/docs/api/using-the-api/errors)

@@ -1,0 +1,9 @@
+{
+  "title": "Tenancy",
+  "pages": [
+    "tenants",
+    "projects",
+    "environments",
+    "keys"
+  ]
+}

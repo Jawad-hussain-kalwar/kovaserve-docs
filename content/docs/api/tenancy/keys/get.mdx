@@ -1,0 +1,98 @@
+---
+title: Get a Key
+description: GET /v1/ks/keys/{id} — fetch a Key's metadata. The raw secret is never returned outside creation and rotation.
+---
+
+`GET /v1/ks/keys/{id}` returns metadata for a single [Key](/docs/concepts/tenancy/keys) — bound triple, name, mode, status, lifecycle timestamps, and recent activity. The raw secret is **never** returned by this endpoint. The only responses that include the `secret` field are `POST /v1/ks/keys` (creation) and `POST /v1/ks/keys/{id}/rotate` (rotation).
+
+The Key is resolved against the API key's Tenant. Cross-tenant fetches return `404 Not Found` — the same response as a genuinely missing Key — so the surface leaks no information about Keys the caller cannot see.
+
+## Endpoint
+
+```
+GET /v1/ks/keys/{key_id}
+```
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_...` — see [Authentication](/docs/api/using-the-api/authentication). |
+| Path parameter | `key_id` — bare 26-character Crockford ULID. |
+| Errors | Native envelope — see [Errors](/docs/api/using-the-api/errors). |
+
+## Response — `200 OK`
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9KEY1",
+  "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9ORG1",
+  "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9PRJ1",
+  "environment_id": "01J8X9Y2Z3K4M5N6P7Q8R9ENV1",
+  "name": "ci-bot",
+  "mode": "live",
+  "status": "ACTIVE",
+  "last4": "e1f2",
+  "created_at": "2026-04-30T12:00:00Z",
+  "expires_at": "2027-04-30T00:00:00Z",
+  "last_used_at": "2026-05-05T11:58:42Z",
+  "last_rotated_at": null,
+  "request_count_7d": 14820,
+  "admission_decisions_7d": {
+    "allowed": 14702,
+    "denied": 88,
+    "degraded": 30
+  }
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | string | Key ID. |
+| `tenant_id` / `project_id` / `environment_id` | string | The bound triple. Immutable. |
+| `name` | string | Human-readable label. |
+| `mode` | string | `live` or `test`. |
+| `status` | string | `ACTIVE`, `REVOKED`, or `EXPIRED`. |
+| `last4` | string | Last four characters of the secret. |
+| `created_at` | string | ISO-8601 timestamp with `Z` suffix. |
+| `expires_at` | string \| null | Configured expiry, or `null` if the Key never expires. |
+| `last_used_at` | string \| null | Updated on every successful authentication. |
+| `last_rotated_at` | string \| null | Most recent rotation timestamp; `null` if the Key has never been rotated. |
+| `request_count_7d` | integer | Total requests authenticated by this Key in the trailing seven days. |
+| `admission_decisions_7d` | object | Counts of `allowed` / `denied` / `degraded` admission decisions over the trailing seven days. |
+
+The `secret` field is absent. Lost secrets cannot be recovered — [rotate](/docs/api/tenancy/keys/rotate) the Key to replace it.
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `200 OK` | The Key exists and is visible to the caller. |
+| `401 Unauthorized` | Missing or invalid bearer token. Codes: `missing_token`, `invalid_token`, `token_revoked`. |
+| `404 Not Found` | The Key does not exist *or* belongs to another Tenant. Code: `key_not_found`. |
+
+## Examples
+
+```bash
+curl https://api.kovaserve.com/v1/ks/keys/01J8X9Y2Z3K4M5N6P7Q8R9KEY1 \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b"
+```
+
+```python
+from kovaserve import KovaClient
+
+kova = KovaClient(api_key="ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b")
+
+key = kova.keys.get("01J8X9Y2Z3K4M5N6P7Q8R9KEY1")
+
+print(f"{key.name:24} mode={key.mode}  status={key.status}  last4={key.last4}")
+print(f"  bound: project={key.project_id}  env={key.environment_id}")
+print(f"  used:  {key.last_used_at}")
+print(f"  7d:    {key.request_count_7d} requests, {key.admission_decisions_7d['denied']} denied")
+```
+
+## See also
+
+- [`POST /v1/ks/keys`](/docs/api/tenancy/keys/create) · [`GET /v1/ks/keys`](/docs/api/tenancy/keys/list)
+- [`POST /v1/ks/keys/{id}/rotate`](/docs/api/tenancy/keys/rotate) · [`POST /v1/ks/keys/{id}/revoke`](/docs/api/tenancy/keys/revoke)
+- [Keys](/docs/concepts/tenancy/keys) — Bearer credential and scope binding
+- [Authentication](/docs/api/using-the-api/authentication) — the request-side contract
+- [IDs](/docs/api/using-the-api/ids) · [Errors](/docs/api/using-the-api/errors)

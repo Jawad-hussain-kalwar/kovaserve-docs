@@ -1,0 +1,135 @@
+---
+title: Create a Project
+description: POST /v1/ks/projects — create a Project under the authenticated Tenant, with an optional PolicyScope override and default context-share scope.
+---
+
+`POST /v1/ks/projects` creates a [Project](/docs/concepts/tenancy/projects) under the authenticated [Tenant](/docs/concepts/tenancy/tenants). The Project is the logical application boundary that owns Sessions, Runs, ContextArtifacts, and the default cache namespace. Every workload-bearing entity in KovaServe resolves through a Project up to its Tenant.
+
+A Project name is unique within its Tenant. The Project inherits the Tenant's `default_policy_scope_id`, `default_data_boundary`, `default_rate_limits`, and `default_model_acl` unless overridden — overrides may **narrow** but never widen the inherited values.
+
+## Endpoint
+
+```
+POST /v1/ks/projects
+```
+
+| Property | Value |
+|---|---|
+| Auth | `Authorization: Bearer ks_...` — see [Authentication](/docs/api/using-the-api/authentication). |
+| Content type | `application/json`. |
+| Idempotent | Yes, when `Idempotency-Key` is supplied — see [Idempotency](/docs/api/using-the-api/idempotency). |
+| Errors | Native envelope — see [Errors](/docs/api/using-the-api/errors). |
+
+## Request body
+
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `name` | string | yes | Human-readable identifier, unique within the Tenant. 1–64 characters; ASCII letters, digits, hyphens, underscores. |
+| `policy_scope_id` | string \| null | no | An existing [PolicyScope](/docs/concepts/policy/policy-scopes) ID to bind as the Project-level override. Must belong to the same Tenant. When omitted, the Project inherits the Tenant default. |
+| `default_context_share_scope` | string \| null | no | One of `none` / `project` / `tenant`. Sets the default cache and manifest reuse boundary for Runs created in this Project. Defaults to `project`. |
+| `default_compaction_policy` | object \| null | no | Compaction strategy hint for Runs that do not declare their own — see [compaction records](/docs/concepts/context/compaction-records). |
+
+Unknown top-level fields return `400 invalid_request` with `details.field_errors` listing the offending keys. The Tenant is implicit — taken from the authenticated key, never accepted on the request body.
+
+### Example
+
+```json
+{
+  "name": "coding-agent",
+  "policy_scope_id": "01J8X9Y2Z3K4M5N6P7Q8R9P0K1",
+  "default_context_share_scope": "project"
+}
+```
+
+## Response — `201 Created`
+
+The body is the new Project row in `ACTIVE`.
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9PRJ1",
+  "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9ORG1",
+  "name": "coding-agent",
+  "status": "ACTIVE",
+  "policy_scope_id": "01J8X9Y2Z3K4M5N6P7Q8R9P0K1",
+  "default_context_share_scope": "project",
+  "default_compaction_policy": null,
+  "created_at": "2026-05-05T12:00:00Z"
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | string | Project ID — bare 26-character Crockford ULID. |
+| `tenant_id` | string | Owning Tenant. Immutable. |
+| `name` | string | Echo of the request `name`. |
+| `status` | string | `ACTIVE` or `ARCHIVED`. New Projects return in `ACTIVE`. |
+| `policy_scope_id` | string \| null | Resolved Project-level PolicyScope, or `null` when inheriting the Tenant default. |
+| `default_context_share_scope` | string | `none` / `project` / `tenant`. |
+| `default_compaction_policy` | object \| null | Echo of the request field. |
+| `created_at` | string | ISO-8601 timestamp with `Z` suffix. |
+
+### Headers
+
+```http
+HTTP/1.1 201 Created
+Content-Type: application/json
+X-Request-Id:    01J8X9Y2Z3K4M5N6P7Q8R9S0XX
+X-KS-Project-Id: 01J8X9Y2Z3K4M5N6P7Q8R9PRJ1
+```
+
+## Status codes
+
+| Status | When |
+|---|---|
+| `201 Created` | The Project was created and is immediately usable for [Run creation](/docs/api/runs/create) and [Key issuance](/docs/api/tenancy/keys/create). |
+| `400 Bad Request` | Malformed JSON, unknown fields, invalid `name`, unknown `default_context_share_scope`, or a `policy_scope_id` that does not match the canonical [ID format](/docs/api/using-the-api/ids). Code: `invalid_request`. |
+| `401 Unauthorized` | Missing, malformed, or unresolved API key. Codes: `missing_token`, `invalid_token`, `token_revoked`. |
+| `403 Forbidden` | The authenticated Tenant is `SUSPENDED`. Code: `tenant_suspended`. |
+| `404 Not Found` | The supplied `policy_scope_id` does not resolve in the caller's Tenant. Code: `policy_scope_not_found`. |
+| `409 Conflict` | A Project with the same `name` already exists under this Tenant, or the supplied `Idempotency-Key` was reused with a different request body. Codes: `project_name_conflict`, `idempotency_conflict`. |
+| `429 Too Many Requests` | Rate limit exceeded. Code: `rate_limited`. |
+
+## Examples
+
+```bash
+# Project that inherits every Tenant default
+curl -X POST https://api.kovaserve.com/v1/ks/projects \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b" \
+  -H "Content-Type: application/json" \
+  -d '{ "name": "coding-agent" }'
+
+# Project with a stricter Project-level PolicyScope and per-Run cache isolation
+curl -X POST https://api.kovaserve.com/v1/ks/projects \
+  -H "Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: 6c1f8a30-9b22-4f0e-9d6c-12c4f0a1b2c3" \
+  -d '{
+    "name": "regulated-eu",
+    "policy_scope_id": "01J8X9Y2Z3K4M5N6P7Q8R9P0K2",
+    "default_context_share_scope": "none"
+  }'
+```
+
+```python
+from kovaserve import KovaClient
+
+kova = KovaClient(api_key="ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b")
+
+project = kova.projects.create(
+    name="coding-agent",
+    policy_scope_id="01J8X9Y2Z3K4M5N6P7Q8R9P0K1",
+    default_context_share_scope="project",
+)
+
+print(f"created {project.id} under tenant {project.tenant_id}")
+```
+
+## See also
+
+- [`GET /v1/ks/projects/{id}`](/docs/api/tenancy/projects/get) · [`GET /v1/ks/projects`](/docs/api/tenancy/projects/list)
+- [Projects](/docs/concepts/tenancy/projects) — the logical application boundary
+- [Tenancy](/docs/concepts/tenancy) — the four-level hierarchy
+- [PolicyScope](/docs/concepts/policy/policy-scopes) — overlay resolution
+- [Manifest-aware routing](/docs/concepts/routing/manifest-aware-routing) — the consumer of `default_context_share_scope`
+- [Authentication](/docs/api/using-the-api/authentication) · [Idempotency](/docs/api/using-the-api/idempotency) · [Errors](/docs/api/using-the-api/errors)

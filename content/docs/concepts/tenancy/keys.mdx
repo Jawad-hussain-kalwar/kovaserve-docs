@@ -160,12 +160,12 @@ Resolution is the first step on every request; nothing else runs until the AuthC
 
 ## Audit and visibility
 
-Every Key resolution updates `last_used_at`. Every admission decision tagged to the resolved Key emits `ks.policy.evaluated` with the `key_id` in the event envelope. Dashboards and the [`GET /v1/ks/keys`](/docs/api/keys/list) endpoint surface:
+Every Key resolution updates `last_used_at`. Every admission decision tagged to the resolved Key emits `ks.policy.evaluated` with the `key_id` in the event envelope. Dashboards and the [`GET /v1/ks/keys`](/docs/api/tenancy/keys/list) endpoint surface:
 
 - `last_used_at` timestamp
-- Last seven days of request count
-- Last seven days of admission decisions (allowed, denied, degraded)
-- Most recent rotation timestamp
+- Last seven days of request count (`request_count_7d`)
+- Last seven days of admission decisions (`admission_decisions_7d`: allowed, denied, degraded)
+- Most recent rotation timestamp (`last_rotated_at`)
 
 The full secret is never surfaced — only the Key ID, name, last four characters, and metadata.
 
@@ -184,4 +184,4 @@ A Key is a service credential — KovaServe records `key_id` on every request, a
 - [PolicyScope](/docs/concepts/policy/policy-scopes) — the governance binding the Key resolves to
 - [Authentication](/docs/api/using-the-api/authentication) — the request-side contract
 - [Identity and IDs](/docs/concepts/run-hierarchy/identity-and-ids) — `key_id` ULID format
-- [`POST /v1/ks/keys`](/docs/api/keys/create) · [`POST /v1/ks/keys/{id}/rotate`](/docs/api/keys/rotate) · [`POST /v1/ks/keys/{id}/revoke`](/docs/api/keys/revoke)
+- [`POST /v1/ks/keys`](/docs/api/tenancy/keys/create) · [`GET /v1/ks/keys/{id}`](/docs/api/tenancy/keys/get) · [`GET /v1/ks/keys`](/docs/api/tenancy/keys/list) · [`POST /v1/ks/keys/{id}/rotate`](/docs/api/tenancy/keys/rotate) · [`POST /v1/ks/keys/{id}/revoke`](/docs/api/tenancy/keys/revoke)

@@ -1,0 +1,10 @@
+{
+  "title": "Keys",
+  "pages": [
+    "create",
+    "get",
+    "list",
+    "rotate",
+    "revoke"
+  ]
+}
