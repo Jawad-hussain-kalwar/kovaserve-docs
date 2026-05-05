@@ -1,0 +1,136 @@
+---
+title: Idempotency
+description: Mutating endpoints accept an Idempotency-Key header. Replays return the original response — same status, same body — within a 24-hour window.
+---
+
+KovaServe makes mutating operations safely retryable through the **`Idempotency-Key`** header. A client that times out, loses its connection, or otherwise can't tell whether a request landed re-issues the same request with the same key. The gateway either runs it for the first time or returns the original response — never produces a duplicate side effect.
+
+## The header
+
+```
+Idempotency-Key: <client-supplied string>
+```
+
+The value is opaque to the gateway. UUIDs are conventional; ULIDs, hashes of the request body, or any reasonably unique string also work. The constraints are minimal:
+
+- **1–255 characters.** Empty values return `400 invalid_request`.
+- **Printable UTF-8.** Control bytes (`U+0000`–`U+001F`, `U+007F`) are rejected.
+- **No whitespace at the boundaries.** Leading or trailing whitespace returns `400 invalid_request`.
+
+The gateway does not derive structure from the value. A key is a key.
+
+## Which endpoints honor it
+
+Idempotency is honored on every **mutating** endpoint on the OpenAI-compatible and native surfaces:
+
+| Family | Endpoints |
+|---|---|
+| Inference | `POST /v1/chat/completions` |
+| Runs | `POST /v1/ks/runs`, `PATCH /v1/ks/runs/{id}`, `POST /v1/ks/runs/{id}/cancel`, `POST /v1/ks/runs/{id}/branch` |
+| Sessions | `POST /v1/ks/sessions`, `POST /v1/ks/sessions/{id}/archive` |
+| Checkpoints | `POST /v1/ks/runs/{id}/checkpoints`, `POST /v1/ks/checkpoints/{id}/restore` |
+| Context | `POST /v1/ks/context/manifests`, `POST /v1/ks/context/artifacts`, `POST /v1/ks/context/admit`, `POST /v1/ks/context/compact` |
+| Memory | `POST /v1/ks/memory/entries`, `PATCH /v1/ks/memory/entries/{id}`, `DELETE /v1/ks/memory/entries/{id}` |
+| Tools | `POST /v1/ks/tools/catalogs` |
+| Budgets & policy | `POST /v1/ks/budgets`, `PATCH /v1/ks/budgets/{id}`, `POST /v1/ks/context/budgets`, `POST /v1/ks/policy-scopes` |
+| Tenants & keys | `POST /v1/ks/projects`, `POST /v1/ks/environments`, `POST /v1/ks/keys`, `POST /v1/ks/keys/{id}/rotate`, `POST /v1/ks/keys/{id}/revoke` |
+| Runtime | `POST /v1/ks/runtime/sandboxes`, `POST /v1/ks/runtime/workspaces/{id}/snapshot` |
+
+`GET` and `HEAD` are naturally idempotent — sending an `Idempotency-Key` on them is harmless but ignored. Endpoints that are not on this list (the cluster operator surface, health probes) explicitly document it on their page.
+
+## Replay semantics
+
+The first request with a given key runs normally. Subsequent requests with the same key return the **original response** — same status code, same body, same headers — without re-executing the operation:
+
+```
+T0:   POST /v1/ks/runs  Idempotency-Key: 6c1f8a30...  →  201 Created  (new Run created)
+T0+5s: POST /v1/ks/runs  Idempotency-Key: 6c1f8a30...  →  201 Created  (same body as T0; nothing new created)
+T0+1h: POST /v1/ks/runs  Idempotency-Key: 6c1f8a30...  →  201 Created  (still replaying; key not yet expired)
+T0+25h: POST /v1/ks/runs  Idempotency-Key: 6c1f8a30...  →  201 Created  (key expired; treated as fresh — new Run created)
+```
+
+Replays return the original response **including failure**. If the original request returned `429 budget_exceeded`, replaying with the same key returns `429 budget_exceeded`, even if budget has since recovered. Idempotency protects against duplicate side effects, not against retryable failures. To get a fresh attempt, use a new key.
+
+In-flight replays — a second request arriving before the first has produced a response — block briefly, wait for the original to complete, and return the original's response. Two clients independently retrying the same key see the same outcome.
+
+## Scoping
+
+A key is scoped to the **`(api_key, endpoint, key_value)`** triple:
+
+- **Per API key.** Two different API keys may use the same string for unrelated requests; they do not collide.
+- **Per endpoint.** The same string may be reused under the same API key on different endpoints (`POST /v1/ks/runs` and `POST /v1/ks/sessions`) without conflict — each endpoint's idempotency space is independent.
+- **Per value.** Within a single `(api_key, endpoint)` pair, a key value uniquely identifies one request.
+
+This scoping means a client can use a single ULID per logical operation and pass it to every API call that operation triggers, without worrying about collisions across endpoints.
+
+## Body fingerprinting
+
+The gateway fingerprints the request body alongside the key. A replay with the **same key but a different body** is a contract violation — the client is sending two different requests under the same idempotency identifier. The gateway returns `409 idempotency_conflict`:
+
+```http
+HTTP/1.1 409 Conflict
+Content-Type: application/json
+X-Request-Id: 01J8X9Y2Z3K4M5N6P7Q8R9S0XX
+
+{
+  "error_code": "idempotency_conflict",
+  "message": "Idempotency key was previously used with a different request body.",
+  "details": {
+    "idempotency_key": "6c1f8a30-2b1d-4e1a-9c0e-7d2c0ab1f2a8",
+    "endpoint": "POST /v1/ks/runs"
+  }
+}
+```
+
+Body fingerprinting is canonical — JSON keys are ordered, whitespace is normalized, and equivalent representations of the same payload (`{"a":1,"b":2}` and `{"b":2,"a":1}`) match. Headers are not part of the fingerprint; only the request body is.
+
+## Retention
+
+Keys are retained for **24 hours** from first use. After 24 hours, the key is forgettable and reusing it starts a fresh request — the gateway has no memory that the original ever ran. Clients that need stronger durability than 24 hours should use a server-side identifier ([`external_run_id`](/docs/concepts/run-hierarchy/runs#how-a-run-is-created) on Runs, for example) instead of relying on `Idempotency-Key`.
+
+The 24-hour window is fixed across managed and self-hosted deployments. It is long enough to absorb any reasonable retry strategy and short enough to keep the idempotency store bounded.
+
+## Recommended client pattern
+
+Generate a fresh key per logical operation, send it on every retry of that operation, and stop using it once the operation is acknowledged terminal:
+
+```python
+import ulid
+from kovaserve import KovaClient
+
+client = KovaClient(api_key="ks_live_...")
+
+key = str(ulid.new())   # 26-character Crockford ULID — opaque to the gateway
+
+for attempt in range(5):
+    try:
+        run = client.runs.create(
+            project_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+            idempotency_key=key,
+        )
+        break
+    except KovaTransientError:
+        time.sleep(2 ** attempt)
+```
+
+The KovaServe SDK and CLI generate idempotency keys automatically when one is not supplied, which covers the common case of "I want safe retries and don't care about the key value." Pass an explicit key only when you need to coordinate retries across processes or persist the key alongside the operation.
+
+## What `Idempotency-Key` is not
+
+`Idempotency-Key` and the canonical [entity ID conventions](/docs/api/ids) serve different purposes:
+
+| | `Idempotency-Key` | Entity ID (`run_id`, etc.) |
+|---|---|---|
+| Origin | Client-supplied | Server-generated |
+| Lifetime | 24 hours | Lifetime of the entity |
+| Addressable | No — never appears in any URL | Yes — appears in URLs and references |
+| Scope | `(api_key, endpoint, value)` | Tenant + Project |
+
+`Idempotency-Key` belongs on the request. It is not a way to control entity IDs and it is not propagated to downstream events. Use [`external_run_id`](/docs/concepts/run-hierarchy/runs) when you need a long-lived correlation identifier visible on the Run row itself.
+
+## See also
+
+- [IDs](/docs/api/ids) — the difference between idempotency keys and entity IDs
+- [Errors](/docs/api/errors) — the `idempotency_conflict` envelope
+- [Runs — `external_run_id`](/docs/concepts/run-hierarchy/runs#how-a-run-is-created) — the long-lived alternative for runtime correlation
+- [`POST /v1/ks/runs`](/docs/api/runs/create) — the canonical idempotent create

@@ -1,0 +1,202 @@
+---
+title: Streaming
+description: KovaServe streams chat completions over Server-Sent Events using the OpenAI line format. Cost lands on the final chunk's usage block.
+---
+
+KovaServe streams completions using **Server-Sent Events** with the same line format every OpenAI client already knows. Tokens stream as they generate; cost arrives on the final chunk; the connection ends with `data: [DONE]`. Existing client libraries work without changes.
+
+## Opting in
+
+Streaming is opt-in per request via `stream: true` on `POST /v1/chat/completions`:
+
+```http
+POST /v1/chat/completions
+Authorization: Bearer ks_live_...
+Content-Type: application/json
+
+{
+  "model": "qwen3-coder-30b",
+  "messages": [
+    { "role": "user", "content": "Refactor this function." }
+  ],
+  "stream": true,
+  "kovaserve": { "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1" }
+}
+```
+
+The response uses `Content-Type: text/event-stream; charset=utf-8`, `Cache-Control: no-cache`, `Connection: keep-alive`, and `Transfer-Encoding: chunked`.
+
+## Wire format
+
+Streaming responses are SSE — newline-separated frames where each event is one or more `data:` lines, terminated by a blank line:
+
+```
+data: {"id":"chatcmpl-01J8X9...","object":"chat.completion.chunk","choices":[{"delta":{"role":"assistant"},"index":0}]}
+
+data: {"id":"chatcmpl-01J8X9...","object":"chat.completion.chunk","choices":[{"delta":{"content":"def "},"index":0}]}
+
+data: {"id":"chatcmpl-01J8X9...","object":"chat.completion.chunk","choices":[{"delta":{"content":"refactor"},"index":0}]}
+
+...
+
+data: {"id":"chatcmpl-01J8X9...","object":"chat.completion.chunk","choices":[{"delta":{},"index":0,"finish_reason":"stop"}],"usage":{...}}
+
+data: [DONE]
+```
+
+| Frame type | Meaning |
+|---|---|
+| Token chunk | `choices[0].delta` contains a `content` fragment. Concatenate `delta.content` across all chunks to reconstruct the response. |
+| Role chunk | The first chunk of an assistant turn typically has `delta.role = "assistant"` and no `content`. |
+| Final chunk | `choices[0].finish_reason` is set (`stop`, `length`, `tool_calls`, `content_filter`); the chunk also carries the `usage` block — see below. |
+| Termination sentinel | `data: [DONE]` closes the stream. No body, just the sentinel string. |
+
+Frames are individual JSON objects on each `data:` line, not a single concatenated JSON document. Parse one chunk at a time; do not attempt to parse the whole stream as JSON.
+
+## Headers on streaming responses
+
+Streaming responses carry the identity and budget headers in the response head — they are sent before any SSE frame:
+
+```http
+HTTP/1.1 200 OK
+Content-Type: text/event-stream; charset=utf-8
+Cache-Control: no-cache
+Connection: keep-alive
+X-Request-Id: 01J8X9Y2Z3K4M5N6P7Q8R9S0XX
+X-KS-Run-Id: 01J8X9Y2Z3K4M5N6P7Q8R9S0T1
+X-KS-Step-Id: 01J8X9Y2Z3K4M5N6P7Q8R9S0T2
+X-KS-Model-Call-Id: 01J8X9Y2Z3K4M5N6P7Q8R9S0T3
+X-KS-Session-Id: ses_a7f3c2b8d4e1f0925a1b6c3d
+X-KS-Context-Manifest-Id: 01J8X9Y2Z3K4M5N6P7Q8R9S0T7
+X-KS-Budget-State: ACTIVE
+X-KS-Budget-Remaining-Pct: 0.850000
+X-Routed-Node: gpu-node-2
+```
+
+What is **not** on the head: the cost-amount headers (`X-KS-Cost-Cents`, `X-KS-Gross-Cost-Cents`, `X-KS-Cache-Savings-Cents`). The total token count is unknown when the response head is written, so cost cannot be in headers — it lands on the final chunk instead.
+
+## Cost on the final chunk
+
+The final SSE chunk before `[DONE]` carries the `usage` block, augmented with cost fields:
+
+```json
+data: {
+  "id": "chatcmpl-01J8X9Y2Z3K4M5N6P7Q8R9S0",
+  "object": "chat.completion.chunk",
+  "choices": [
+    {
+      "delta": {},
+      "index": 0,
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 1240,
+    "completion_tokens": 482,
+    "total_tokens": 1722,
+    "cached_tokens": 980,
+    "cost_cents": 0.0420,
+    "gross_cost_cents": 0.0612,
+    "cache_savings_cents": 0.0192,
+    "cost_currency": "USD",
+    "cost_status": "ok"
+  }
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `prompt_tokens` | integer | Tokens in the prompt the model saw. |
+| `completion_tokens` | integer | Tokens generated. |
+| `total_tokens` | integer | `prompt_tokens + completion_tokens`. |
+| `cached_tokens` | integer | Prompt tokens served from cache. Counted within `prompt_tokens`, not in addition. |
+| `cost_cents` | number | Net cost of this call in cents (after cache discount). |
+| `gross_cost_cents` | number | Cost before cache discount. |
+| `cache_savings_cents` | number | `gross_cost_cents - cost_cents`. |
+| `cost_currency` | string | Always `USD`. |
+| `cost_status` | string | `ok` when priced; `no-pricing` when the model has no registered price (cost values are `0`). |
+
+The cost fields are JSON numbers, with up to four fractional digits. They represent the same values as the corresponding headers on non-streaming responses; the precision is identical.
+
+`usage` may appear earlier than the final chunk in some clients' shapes — the value is **definitive only on the final chunk** (the one with `finish_reason` set). Earlier `usage` blocks, if present, are partial running totals; do not record them as the final cost.
+
+## Detecting the end
+
+Two signals mark the end of a stream:
+
+1. The chunk with `finish_reason` set — `stop`, `length`, `tool_calls`, or `content_filter`. Use this to know the model is done generating.
+2. The `data: [DONE]` sentinel — the gateway has finished the response. Use this to know the connection will close.
+
+Treat them as ordered: `finish_reason` always precedes `[DONE]`. After `[DONE]`, the connection closes within milliseconds.
+
+## Disconnects
+
+If the client disconnects mid-stream, the gateway:
+
+- Cancels generation on the substrate (best-effort — depending on the substrate, in-flight tokens may complete).
+- Records the [ModelCall](/docs/concepts/run-hierarchy/model-calls) with `status = "FAILED"` and `failure_reason = "client_disconnected"`.
+- Charges the tokens already produced. Cost accounting is based on what the model actually generated, not on what was delivered.
+- Emits `ks.model_call.completed` with the partial counts, so timelines reflect what happened.
+
+There is no resume from a disconnected stream — the produced tokens have been recorded but the response cannot be replayed. Re-issuing the request with the same `Idempotency-Key` does not replay the SSE stream; the gateway returns the original final response (or original failure) as a non-streaming response. To resume long generations safely, use [Checkpoints](/docs/concepts/recovery/checkpoints) at the call boundary instead of relying on stream resumption.
+
+## Errors during a stream
+
+Errors that occur **before** the first SSE frame return a normal HTTP error response with a status code and an [error envelope](/docs/api/errors) — the connection never enters SSE mode.
+
+Errors **after** streaming has begun deliver an error frame and close the stream:
+
+```
+data: {"error":{"type":"server_error","message":"Upstream substrate disconnected.","code":"backend_error"}}
+
+data: [DONE]
+```
+
+The HTTP status of the response head is still `200 OK` — SSE does not have a way to set a status mid-stream. Clients must inspect each frame for the `error` field to detect mid-stream failures. The KovaServe SDK does this automatically.
+
+## Reading a stream
+
+```python
+from kovaserve import KovaClient
+
+client = KovaClient(api_key="ks_live_...")
+
+stream = client.chat.completions.create(
+    model="qwen3-coder-30b",
+    messages=[{"role": "user", "content": "Refactor this function."}],
+    stream=True,
+    kovaserve={"run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1"},
+)
+
+for chunk in stream:
+    if chunk.choices and chunk.choices[0].delta.content:
+        print(chunk.choices[0].delta.content, end="")
+
+# After the stream ends, the SDK exposes the final usage / cost values
+print()
+print(f"cost: {stream.usage.cost_cents} cents")
+print(f"saved: {stream.usage.cache_savings_cents} cents from cache")
+```
+
+```bash
+curl -N \
+  -H "Authorization: Bearer ks_live_..." \
+  -H "Content-Type: application/json" \
+  https://api.kovaserve.com/v1/chat/completions \
+  -d '{
+    "model": "qwen3-coder-30b",
+    "messages": [{"role": "user", "content": "Refactor this function."}],
+    "stream": true,
+    "kovaserve": {"run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1"}
+  }'
+```
+
+`-N` disables curl's output buffering so you can see frames arrive in real time.
+
+## See also
+
+- [Cost headers](/docs/api/cost-headers) — the non-streaming counterpart and the budget headers (which streaming responses also carry)
+- [Errors](/docs/api/errors) — error envelopes and mid-stream error frames
+- [`POST /v1/chat/completions`](/docs/api/inference/chat-completions) — the only endpoint that streams
+- [Idempotency](/docs/api/idempotency) — replay semantics when the connection drops
+- [Checkpoints](/docs/concepts/recovery/checkpoints) — durable resume across long generations

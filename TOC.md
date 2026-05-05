@@ -10,6 +10,8 @@ Living roadmap for `docs.kovaserve.com`. Source of structure for `content/docs/`
 
 **Finished-product rule (binding):** these docs describe KovaServe as a complete, polished product. The blueprint is the source of truth for what the product is; pages reflect the blueprint as built. No hedging, no "not yet shipped", no shipped-vs-deferred breakdowns, no implementation-status disclosures anywhere in `content/docs/`. Implementation status lives in `kova-v1/docs/vertical-slices/SLICE-STATUS.md` and (later) a separate roadmap surface — never in the docs site. The docs are the development target.
 
+**No-internal-language rule (binding):** user-facing pages never leak internal program language. Banned anywhere in `content/docs/`: the words "slice", "pass", "ADR", "blueprint", "positioning brief", "vertical slice"; document filename citations (`SLICE-STATUS.md`, `KovaServe_Blueprint.md`, `kova_serve_product_positioning_brief.md`, `VERTICAL-SLICES-V2.md`, `CLAUDE.md`); identifier citations (`ADR-NNN`, `Slice X.Y`, `Pass N`, `§N.M`, `KI-NNN`, `VS-N`); engineering-process phrasing ("in this slice", "this pass", "per ADR-NNN", "see the blueprint"). Concept and API pages may still cite the canonical entity vocabulary (Run, Step, ContextManifest, etc.) and external standards (RFCs, OpenAI-compatibility callouts) — those are product, not program. The docs describe the product, not the program building it.
+
 **Doc-writing protocol (binding — applies to every page, every time):**
 
 1. **The product blueprint (`D:\Dev\kova\kova-v1\docs\architecture\KovaServe_Blueprint.md`) is the source of truth.** Scope, behavior, entities, state machines, event taxonomy — all of it comes from the blueprint. Code informs concrete shapes (field names, JSON, enums); positioning sets framing on customer-facing pages. The blueprint wins over the code wherever they disagree.
@@ -93,7 +95,7 @@ Living roadmap for `docs.kovaserve.com`. Source of structure for `content/docs/`
 - [x] `concepts/tools/tool-context-disposition.mdx` — `inline_full | inline_preview | summary_required | artifact_ref | drop | blocked`
 - [x] `concepts/tools/tool-governance.mdx` — tool policy enforcement model
 
-### Budgets & policy — Blueprint §5.12, §5.13, §7.2, §7.4
+### Budgets & Policy — Blueprint §5.12, §5.13, §7.2, §7.4
 
 - [x] `concepts/policy/budgets.mdx` — Budget entity
 - [x] `concepts/policy/budget-state-machine.mdx` — `ACTIVE → WARNING → DEGRADED_ALLOWED | HARD_STOP → CLOSED`
@@ -197,7 +199,7 @@ Living roadmap for `docs.kovaserve.com`. Source of structure for `content/docs/`
 - [ ] `guides/registering-tool-catalogs.mdx`
 - [ ] `guides/tool-output-disposition.mdx`
 
-### Budgets & policy
+### Budgets & Policy
 
 - [ ] `guides/per-run-budgets.mdx`
 - [ ] `guides/context-budgets.mdx`
@@ -222,16 +224,18 @@ Living roadmap for `docs.kovaserve.com`. Source of structure for `content/docs/`
 
 ## 5. API Reference (hand-authored MDX; curl + Python tabs)
 
-- [ ] `api/index.mdx` — overview, base URL
-- [ ] `api/authentication.mdx` — Bearer keys; scope hierarchy
-- [ ] `api/errors.mdx` — OpenAI-shape error envelope (ADR-002)
-- [ ] `api/pagination.mdx` — cursor pagination (`before` / `after` / `limit`)
-- [ ] `api/idempotency.mdx`
-- [ ] `api/ids.mdx` — ULID + Session ID conventions
-- [ ] `api/cost-headers.mdx` — `X-KS-Cost-Cents`, cache savings
-- [ ] `api/streaming.mdx` — SSE conventions, final-chunk cost (ADR-021)
+### Using the API
 
-### Inference   (Blueprint §8.1 OpenAI-compat)
+- [x] `api/index.mdx` — overview, base URL
+- [x] `api/authentication.mdx` — Bearer keys; scope hierarchy
+- [x] `api/errors.mdx` — OpenAI-style envelope on `/v1/*`; native `error_code` envelope on `/v1/ks/*`
+- [x] `api/pagination.mdx` — cursor pagination (`before` / `after` / `limit`)
+- [x] `api/idempotency.mdx` — idempotency keys
+- [x] `api/ids.mdx` — ULID + Session ID conventions
+- [x] `api/cost-headers.mdx` — `X-KS-Cost-Cents`, cache savings
+- [x] `api/streaming.mdx` — SSE conventions; final-chunk cost delivery
+
+### Chat & Models
 
 - [ ] `api/inference/chat-completions.mdx` — `POST /v1/chat/completions`
 - [ ] `api/inference/models.mdx` — `GET /v1/models`
@@ -264,7 +268,7 @@ Living roadmap for `docs.kovaserve.com`. Source of structure for `content/docs/`
 - [ ] `api/checkpoints/list.mdx`
 - [ ] `api/checkpoints/restore.mdx`
 
-### Context engineering   (Blueprint §8.1 Context APIs)
+### Context
 
 - [ ] `api/context/manifests/get.mdx`
 - [ ] `api/context/manifests/list.mdx`
@@ -291,7 +295,7 @@ Living roadmap for `docs.kovaserve.com`. Source of structure for `content/docs/`
 - [ ] `api/tools/catalogs/get.mdx`
 - [ ] `api/tools/catalogs/list.mdx`
 
-### Budgets & policy
+### Budgets & Policy
 
 - [ ] `api/budgets/create.mdx`
 - [ ] `api/budgets/get.mdx`
@@ -302,12 +306,12 @@ Living roadmap for `docs.kovaserve.com`. Source of structure for `content/docs/`
 - [ ] `api/policy-scopes/get.mdx`
 - [ ] `api/policy-scopes/list.mdx`
 
-### Metering
+### Usage & Cost
 
 - [ ] `api/metering/usage.mdx` — `GET /v1/ks/metering/usage`
 - [ ] `api/metering/export.mdx` — `GET /v1/ks/metering/export`
 
-### Tenancy
+### Tenants & Keys
 
 - [ ] `api/tenants/get.mdx`
 - [ ] `api/projects/create.mdx`
@@ -322,7 +326,7 @@ Living roadmap for `docs.kovaserve.com`. Source of structure for `content/docs/`
 - [ ] `api/keys/rotate.mdx`
 - [ ] `api/keys/revoke.mdx`
 
-### Runtime APIs   (Blueprint §8.1)
+### Workers & Sandboxes
 
 - [ ] `api/runtime/workers/list.mdx`
 - [ ] `api/runtime/sandboxes/create.mdx`
@@ -331,7 +335,7 @@ Living roadmap for `docs.kovaserve.com`. Source of structure for `content/docs/`
 - [ ] `api/runtime/workspaces/snapshot.mdx`
 - [ ] `api/runtime/tool-invocations/list.mdx`
 
-### Events   (Blueprint §8.3, pulled-stream surface)
+### Events
 
 - [ ] `api/events/index.mdx` — envelope + cursor
 - [ ] `api/events/execution.mdx`
@@ -345,14 +349,14 @@ Living roadmap for `docs.kovaserve.com`. Source of structure for `content/docs/`
 - [ ] `api/events/memory.mdx`
 - [ ] `api/events/sub-run.mdx`
 
-### Operator / cluster
+### Cluster
 
 - [ ] `api/cluster/nodes.mdx` — `/v1/ks/nodes`
 - [ ] `api/cluster/cache-lookup.mdx` — `/v1/ks/cache/lookup`
 - [ ] `api/cluster/routing-plan.mdx` — `/v1/ks/routing/plan`
 - [ ] `api/cluster/state-handles.mdx`
 
-### Health
+### Health & Metrics
 
 - [ ] `api/health/health.mdx` — `/health`
 - [ ] `api/health/metrics.mdx` — `/metrics`

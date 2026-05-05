@@ -1,0 +1,98 @@
+---
+title: API Reference
+description: KovaServe exposes two API families on a single base URL — an OpenAI-compatible inference surface and a native control-plane surface. This page is the entry point.
+---
+
+KovaServe's HTTP API is the public interface to the [control plane](/docs/concepts/layers/control-plane). It exposes two coexistent families on the same base URL:
+
+- **OpenAI-compatible inference** — `/v1/chat/completions` and `/v1/models`. Drop-in usage from any OpenAI SDK works without code changes; the `kovaserve` extension envelope opts into native features when you want them.
+- **Native control plane** — `/v1/ks/*` for [Runs](/docs/concepts/run-hierarchy/runs), [Sessions](/docs/concepts/continuity/sessions), [Checkpoints](/docs/concepts/recovery/checkpoints), context engineering, budgets, policy, metering, tenancy, runtime, events, and cluster operations. These endpoints use KovaServe's native vocabulary.
+
+Both families share authentication, idempotency, ID conventions, and cost accounting. Where they diverge is the error envelope and the streaming convention — see [Errors](/docs/api/errors) and [Streaming](/docs/api/streaming).
+
+## Base URL
+
+The managed cloud base URL is:
+
+```
+https://api.kovaserve.com
+```
+
+Self-hosted deployments expose the gateway on a configurable HTTP endpoint set during installation; consult your cluster operator for the local URL. The path layout (`/v1/...`, `/v1/ks/...`) is identical across managed and private deployments — the same SDK, same paths, same request shapes work in both.
+
+## How a request flows
+
+Every authenticated request resolves through the same admission ordering before it reaches a model:
+
+```
+client request
+   │
+   ▼
+authentication                  resolve API key → AuthContext
+   │
+   ▼
+tenancy resolution              Tenant → Project → Environment → Deployment
+   │
+   ▼
+context assembly                build the ContextManifest for this call
+   │
+   ▼
+context admission               ContextBudget evaluates the manifest
+   │
+   ▼
+run-budget pre-check            Budget evaluates against the admitted manifest
+   │
+   ▼
+routing                         Cache-Aware Router selects placement
+   │
+   ▼
+substrate execution             Layer 1 runs the model
+   │
+   ▼
+response + metering             cost headers, execution events, usage records
+```
+
+Each stage is observable through the [event taxonomy](/docs/concepts/events) and recorded on the [ContextManifest](/docs/concepts/context/context-manifests) the call consumed.
+
+## What every page on this surface gives you
+
+API pages on `docs.kovaserve.com` follow one shape:
+
+1. A one-line description of the endpoint.
+2. The HTTP method and path.
+3. The authentication scope required.
+4. Request schema with a JSON example.
+5. Response schema with a JSON example.
+6. Status-code semantics — what each non-2xx response means, including the error envelope.
+7. A `See also` block linking to the relevant concept page, SDK method, and CLI subcommand.
+
+Every example uses concrete IDs, shapes, and headers that match the wire format the gateway emits.
+
+## Conventions covered in this section
+
+Eight cross-cutting concerns are documented once and referenced everywhere else:
+
+| Page | What it covers |
+|---|---|
+| [Authentication](/docs/api/authentication) | Bearer keys, scope hierarchy, the `AuthContext` every endpoint resolves. |
+| [Errors](/docs/api/errors) | The OpenAI-style envelope on `/v1/*` and the native envelope on `/v1/ks/*`. |
+| [Pagination](/docs/api/pagination) | Cursor pagination (`before`, `after`, `limit`) for every list endpoint. |
+| [Idempotency](/docs/api/idempotency) | The `Idempotency-Key` header for safe retries on mutating operations. |
+| [IDs](/docs/api/ids) | Bare 26-character Crockford ULIDs across the surface; `ses_<24hex>` for Sessions. |
+| [Cost headers](/docs/api/cost-headers) | `X-KS-Cost-Cents`, `X-KS-Cache-Savings-Cents`, and the budget headers on every native response. |
+| [Streaming](/docs/api/streaming) | SSE conventions and how cost is delivered on the final chunk. |
+
+Read these once and the rest of the API reference reads as a thin layer over them.
+
+## Compatibility
+
+KovaServe versions its API additively. New optional fields and new endpoints may appear within `/v1/`; existing fields and existing endpoints retain their shape. Breaking changes ship under a new major version path.
+
+The `kovaserve` extension envelope on `/v1/chat/completions` is the seam for native features that have no OpenAI counterpart. Clients that ignore the envelope continue to work as plain OpenAI clients; clients that opt in get [run identity](/docs/concepts/run-hierarchy/runs), [context manifests](/docs/concepts/context/context-manifests), [policy scopes](/docs/concepts/policy/policy-scopes), [placement hints](/docs/concepts/routing/placement-hints), and the rest of the native surface inline with their existing call.
+
+## See also
+
+- [Layers — control plane](/docs/concepts/layers/control-plane) — what the control plane is responsible for
+- [Authentication](/docs/api/authentication) — start here before any other API page
+- [`POST /v1/chat/completions`](/docs/api/inference/chat-completions) — the highest-traffic endpoint
+- [`POST /v1/ks/runs`](/docs/api/runs/create) — the canonical entry into the native control plane

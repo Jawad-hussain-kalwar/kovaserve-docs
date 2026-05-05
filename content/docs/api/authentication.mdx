@@ -1,0 +1,149 @@
+---
+title: Authentication
+description: KovaServe authenticates every request with a Bearer API key. The key resolves to an AuthContext bound to one Tenant, Project, and Environment.
+---
+
+KovaServe authenticates every request with a Bearer API key over HTTPS. There is exactly one authentication primitive — the API key — and there is exactly one place it appears: the `Authorization` header.
+
+## The header
+
+Every request to `/v1/*` and `/v1/ks/*` carries:
+
+```
+Authorization: Bearer ks_live_<32 hex characters>
+```
+
+A request without the header, with a non-`Bearer` scheme, or with a key the gateway cannot resolve fails before any tenancy or scope logic runs. The error envelope follows the family of the path — OpenAI-style on `/v1/*`, native on `/v1/ks/*`. See [Errors](/docs/api/errors).
+
+## Key format
+
+A live API key is the literal prefix `ks_live_` followed by 32 lowercase hex characters:
+
+```
+ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b
+```
+
+Properties:
+
+- **Opaque to clients.** The hex tail carries no structure beyond uniqueness; clients should not parse it.
+- **One-way stored.** The gateway stores only a SHA-256 hash; the raw key is shown exactly once at creation and is never retrievable afterward. A lost key must be rotated.
+- **Case-sensitive.** Lowercase canonical; uppercase is rejected on input.
+
+Test keys carry the prefix `ks_test_` and are scoped to a Tenant's `development` Environment. They are otherwise indistinguishable in shape from live keys and use the same hashing and rotation flow.
+
+## What a key resolves to
+
+On every authenticated request, the gateway resolves the API key to an `AuthContext`:
+
+```json
+{
+  "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+  "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+  "environment": "production",
+  "key_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T3"
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `tenant_id` | The owning [Tenant](/docs/concepts/tenancy/tenants). Immutable for the lifetime of the key. |
+| `project_id` | The [Project](/docs/concepts/tenancy/projects) the key was issued under. Determines the default scope for new Runs, budgets, and policy bindings. |
+| `environment` | One of `production`, `staging`, `development`. Selects the [Environment](/docs/concepts/tenancy/environments) and any environment-scoped policy or budget overrides. |
+| `key_id` | The opaque ID of the [Key](/docs/concepts/tenancy/keys) row, recorded on every audit event the request produces. |
+
+This `AuthContext` is propagated into every downstream module — [Canonical Execution Service](/docs/concepts/run-hierarchy/runs), [Global Context Manager](/docs/concepts/context/context-manifests), [Cache-Aware Router](/docs/concepts/routing/manifest-aware-routing), [Policy](/docs/concepts/policy/admission), [Metering](/docs/concepts/cost/cost-model). No subsystem in KovaServe runs without one.
+
+## The scope hierarchy
+
+Every API key sits at one node in the four-level hierarchy:
+
+```
+Tenant
+└── Project
+    └── Environment
+        └── Key
+```
+
+A key inherits visibility from its position. A key issued at the Project / Environment level can read and write entities owned by that `(Tenant, Project, Environment)` triple and nothing outside it. Cross-tenant probes — reading another Tenant's Run, Session, or Checkpoint — return `404 Not Found`, the same response as a genuinely missing entity. Probing leaks no information.
+
+See [Tenants](/docs/concepts/tenancy/tenants), [Projects](/docs/concepts/tenancy/projects), [Environments](/docs/concepts/tenancy/environments), and [Keys](/docs/concepts/tenancy/keys) for the full hierarchy.
+
+## Authorization is layered on top
+
+Authentication answers *who is calling*. Authorization answers *what they may do*, and it runs in this order on every authenticated request:
+
+1. **Model ACL** — does the resolved [PolicyScope](/docs/concepts/policy/policy-scopes) admit the requested model?
+2. **Rate limit** — is the key within its requests-per-second and tokens-per-minute quotas?
+3. **Run-level admission** — does the [Budget](/docs/concepts/policy/budgets) and [ContextBudget](/docs/concepts/policy/context-budgets) admit the call?
+
+Each layer can independently reject a request. Failures carry distinct error codes — `model_access_denied`, `rate_limited`, `budget_exceeded`, `context_budget_exceeded` — so clients can distinguish them. See [Errors](/docs/api/errors) for the full list.
+
+## Failure modes
+
+| Status | Native `error_code` | OpenAI `type` / `code` | When |
+|---|---|---|---|
+| `401` | `missing_token` | `authentication_error` / `missing_token` | No `Authorization` header, or scheme is not `Bearer`. |
+| `401` | `invalid_token` | `authentication_error` / `invalid_token` | Bearer header present but the key does not resolve. |
+| `401` | `token_revoked` | `authentication_error` / `token_revoked` | The key existed but has been rotated or revoked. |
+| `403` | `model_access_denied` | `permission_error` / `model_access_denied` | The key authenticated, but the resolved PolicyScope blocks the requested model. |
+| `429` | `rate_limited` | `rate_limit_error` / `rate_limited` | The key exceeded its rate limit. The `Retry-After` header indicates when to retry. |
+
+`401` failures never expose whether a key existed and was rejected versus never existed — the response is uniform. Clients that need to distinguish "no header" from "bad header" must inspect the request they sent, not the response.
+
+## Bootstrap
+
+A self-hosted deployment ships with no Tenants. The first administrative key is supplied through the `KOVASERVE_BOOTSTRAP_KEY` environment variable on the control-plane process. On startup, the gateway resolves the key to a default Tenant + Project + Environment, creating them if needed. Subsequent restarts with the same value are idempotent — the same `(tenant_id, project_id, environment)` triple resolves on every boot.
+
+The bootstrap key is intended for first-run provisioning only. Production traffic should use keys minted through the [Keys API](/docs/api/keys/create) once a Tenant is set up, with the bootstrap key rotated and removed from the cluster's environment.
+
+## Example request
+
+```http
+GET /v1/ks/runs/01J8X9Y2Z3K4M5N6P7Q8R9S0T1
+Authorization: Bearer ks_live_a7f3c2b8d4e1f0925a1b6c3d4e5f6a7b
+```
+
+Successful:
+
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+X-Request-Id: 01J8X9Y2Z3K4M5N6P7Q8R9S0XX
+
+{ "id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1", "status": "RUNNING", ... }
+```
+
+Missing or invalid key:
+
+```http
+HTTP/1.1 401 Unauthorized
+Content-Type: application/json
+X-Request-Id: 01J8X9Y2Z3K4M5N6P7Q8R9S0XX
+
+{
+  "error_code": "missing_token",
+  "message": "Invalid or missing authentication token.",
+  "details": null
+}
+```
+
+Same call with a key whose PolicyScope does not admit the requested model:
+
+```http
+HTTP/1.1 403 Forbidden
+Content-Type: application/json
+
+{
+  "error_code": "model_access_denied",
+  "message": "Model 'qwen3-coder-30b' is not admitted by the resolved policy scope.",
+  "details": { "model": "qwen3-coder-30b", "policy_scope_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T4" }
+}
+```
+
+## See also
+
+- [Errors](/docs/api/errors) — the two error envelopes and the full code list
+- [IDs](/docs/api/ids) — what a `key_id` looks like and how IDs propagate
+- [Tenants](/docs/concepts/tenancy/tenants) · [Projects](/docs/concepts/tenancy/projects) · [Environments](/docs/concepts/tenancy/environments) · [Keys](/docs/concepts/tenancy/keys) — the four-level hierarchy
+- [PolicyScopes](/docs/concepts/policy/policy-scopes) — what a key's scope governs
+- [`POST /v1/ks/keys`](/docs/api/keys/create) · [`POST /v1/ks/keys/{id}/rotate`](/docs/api/keys/rotate) · [`POST /v1/ks/keys/{id}/revoke`](/docs/api/keys/revoke)

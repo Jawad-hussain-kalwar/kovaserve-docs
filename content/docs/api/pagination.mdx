@@ -1,0 +1,133 @@
+---
+title: Pagination
+description: List endpoints page through results with opaque cursors — before, after, limit — over a stable creation-time ordering.
+---
+
+KovaServe paginates every list endpoint with **opaque cursors** over a **stable creation-time ordering**. There are no offset / page-number parameters. There is no in-band counting that would tax the database for a number callers rarely use. Pages are bounded; cursors are durable across calls; the surface is identical whether you are listing Runs, Sessions, Checkpoints, ContextManifests, events, or any other entity.
+
+## The three parameters
+
+Every list endpoint accepts:
+
+| Parameter | Type | Default | Meaning |
+|---|---|---|---|
+| `limit` | integer | `100` | Maximum entities to return in this page. Capped at `200`. Values outside `1..200` return `400 invalid_request`. |
+| `after` | string \| null | `null` | Opaque cursor. Return entities **strictly after** this cursor in the endpoint's stable ordering. |
+| `before` | string \| null | `null` | Opaque cursor. Return entities **strictly before** this cursor in the endpoint's stable ordering. |
+
+`after` and `before` are mutually exclusive. Supplying both returns `400 invalid_request`.
+
+The default page (no `after`, no `before`) returns the most recent `limit` entities in descending creation order — the shape clients want for "show me the latest" listings.
+
+## Response shape
+
+Every paginated response uses the same envelope:
+
+```json
+{
+  "data": [
+    { "id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1", ... },
+    { "id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0", ... }
+  ],
+  "page": {
+    "next_cursor": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+    "prev_cursor": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    "has_more": true,
+    "limit": 100
+  }
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `data` | The page of entities, ordered by the endpoint's stable ordering (creation time, descending, unless documented otherwise on the endpoint). |
+| `page.next_cursor` | Cursor to pass as `after` to fetch the next page. `null` when no further pages exist. |
+| `page.prev_cursor` | Cursor to pass as `before` to fetch the previous page. `null` when at the start. |
+| `page.has_more` | `true` when more entities exist beyond `next_cursor`. Cheaper than fetching to confirm. |
+| `page.limit` | The effective limit applied to this page. Echoes the request `limit` clamped to `[1, 200]`. |
+
+Empty pages are valid. A list endpoint with no matching entities returns `data: []`, `next_cursor: null`, `prev_cursor: null`, `has_more: false`.
+
+## Cursors are opaque
+
+A cursor is an opaque string. Clients **must not** parse, decode, or otherwise interpret it. The current implementation derives cursors from entity IDs, but this is not part of the contract — KovaServe reserves the right to change the cursor encoding without notice.
+
+The only valid operation on a cursor is to pass it back to the same endpoint (or its sibling endpoints sharing the same listing) as `after` or `before`. Round-tripping a cursor through any other system — logging, persistence, manual editing — works only by accident and is not supported.
+
+## Stable ordering
+
+Every paginated endpoint has a **stable ordering** that determines the position of each entity. The default ordering is **descending by creation time** — newest entities first. Endpoints that need a different ordering (for example, oldest-first event timelines) document the variation on the endpoint page itself.
+
+Stable ordering means:
+
+- A cursor returned at time `T` continues to work correctly when used at time `T + N`, even if new entities have been inserted in the meantime.
+- Pagination never duplicates an entity across pages.
+- Pagination never skips an entity that existed when the cursor was issued.
+- Entities created *after* a cursor was issued may appear in earlier (newer) pages — they were not yet present when the cursor pointed into the stream, so they slot in ahead of it. Pagination is consistent over the *snapshot at cursor issuance*, not over a time-frozen view.
+
+## Walking forward
+
+```http
+GET /v1/ks/runs?limit=50
+Authorization: Bearer ks_live_...
+```
+
+Returns the 50 newest Runs and a `next_cursor`. Walk forward by passing it back:
+
+```http
+GET /v1/ks/runs?limit=50&after=01J8X9Y2Z3K4M5N6P7Q8R9S0T0
+Authorization: Bearer ks_live_...
+```
+
+Continue until `has_more` is `false`:
+
+```python
+cursor = None
+while True:
+    page = client.runs.list(limit=50, after=cursor)
+    for run in page.data:
+        process(run)
+    if not page.has_more:
+        break
+    cursor = page.next_cursor
+```
+
+## Walking backward
+
+`before` walks toward older entities and is symmetric to `after`. Most clients do not need it; it exists for UIs that display pages around a focused entity (a timeline scroll position, for example).
+
+```http
+GET /v1/ks/runs?limit=20&before=01J8X9Y2Z3K4M5N6P7Q8R9S0T0
+Authorization: Bearer ks_live_...
+```
+
+Returns the 20 entities ordered *before* the cursor in the stable ordering — that is, 20 entities older than the one the cursor points at.
+
+## Filtering coexists with pagination
+
+Endpoints frequently support filter parameters — `status=COMPLETED`, `model=qwen3-coder-30b`, `created_after=2026-04-01T00:00:00Z`. Filters are applied **before** pagination; cursors index into the filtered stream. Changing a filter invalidates the cursor — restart from `after=null` whenever the filter set changes.
+
+The endpoint page documents the filter parameters available. Common filters across listing endpoints are:
+
+| Filter | Type | Meaning |
+|---|---|---|
+| `created_after` | RFC 3339 timestamp | Include entities created strictly after this time. |
+| `created_before` | RFC 3339 timestamp | Include entities created strictly before this time. |
+| `status` | string | Filter by entity state — endpoint-specific enum. |
+| `project_id` | ULID | Restrict to a single Project (when the caller's scope spans multiple). |
+
+## Limits and quotas
+
+`limit` is capped at `200` per page. Listings that would return more than 200 entities require pagination — there is no `?all=true` escape hatch.
+
+Pagination calls do not consume Run-level [Budget](/docs/concepts/policy/budgets) tokens; they count against the API key's request rate limit only. Pulling a large dataset by walking pages is a supported pattern.
+
+For bulk export use cases, prefer the dedicated export endpoints (for example, [`GET /v1/ks/metering/export`](/docs/api/metering/export)) — they stream JSONL rather than paginating, and have separate quota accounting designed for high-volume reads.
+
+## See also
+
+- [IDs](/docs/api/ids) — the ULID format that opaque cursors derive from
+- [Errors](/docs/api/errors) — `invalid_request` for malformed pagination parameters
+- [`GET /v1/ks/runs`](/docs/api/runs/list) — the canonical paginated listing
+- [`GET /v1/ks/runs/{id}/timeline`](/docs/api/runs/timeline) — paginated event timeline
+- [`GET /v1/ks/metering/export`](/docs/api/metering/export) — the streaming export alternative for bulk reads

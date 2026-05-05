@@ -1,0 +1,133 @@
+---
+title: Cost headers
+description: Native non-streaming responses always carry cost, cache savings, and budget headers. Streaming delivers cost on the final SSE chunk instead.
+---
+
+KovaServe makes every model call's economics visible on the response itself. Non-streaming responses carry a fixed set of `X-KS-*` headers; streaming responses deliver the same numbers on the final SSE chunk's `usage` block. Cost is not an after-the-fact dashboard query — it lands in the response.
+
+## Cost-related headers
+
+Every non-streaming response that ran inference (whether through `/v1/chat/completions` or a native variant) carries:
+
+| Header | Type | Always present? | Meaning |
+|---|---|---|---|
+| `X-KS-Cost-Cents` | decimal string, 4 fractional digits | yes | Net cost of this call in cents, after cache discount. `"0.0000"` when no model executed. |
+| `X-KS-Gross-Cost-Cents` | decimal string, 4 fractional digits | yes | Cost before cache discount applies. |
+| `X-KS-Cache-Savings-Cents` | decimal string, 4 fractional digits | yes | The amount the cache saved on this call. Always equals `X-KS-Gross-Cost-Cents` minus `X-KS-Cost-Cents`. |
+| `X-KS-Cost-Currency` | string | yes | Currency of the cost values. Always `USD`. |
+| `X-KS-Cost-Status` | string | only when not `ok` | Set to `no-pricing` when the model has no registered price. Cost values are `"0.0000"` in that case. Absent otherwise. |
+
+The decimal-string format guarantees fixed precision on the wire — every cost field has exactly 4 fractional digits and represents fractional cents. `"3.4000"` is three cents and four-tenths; `"0.0042"` is forty-two ten-thousandths of a cent.
+
+The identity `X-KS-Gross-Cost-Cents = X-KS-Cost-Cents + X-KS-Cache-Savings-Cents` holds exactly. There is no rounding error; the gateway computes and rounds once at the cents level.
+
+## Run, Step, and ModelCall identity
+
+Every native (`kovaserve` extension) response carries the execution-record IDs the call materialized:
+
+| Header | Type | Always present? | Meaning |
+|---|---|---|---|
+| `X-KS-Run-Id` | 26-char Crockford ULID | yes (native) | The Run this call belongs to. |
+| `X-KS-Step-Id` | 26-char Crockford ULID | yes (native) | The Step that hosts this call. |
+| `X-KS-Model-Call-Id` | 26-char Crockford ULID | yes (native) | The ModelCall row written for this call. |
+| `X-KS-Session-Id` | `ses_<24hex>` \| empty | when the call binds a Session | The Session bound to the Run, if any. |
+| `X-KS-Context-Manifest-Id` | 26-char Crockford ULID | yes (native) | The ContextManifest the call consumed. |
+| `X-Routed-Node` | string | yes (native) | The opaque node ID the Cache-Aware Router selected. |
+
+Identity headers also accompany streaming responses — they are sent in the response head, before the SSE body begins.
+
+## Budget headers
+
+When the Run carries a [Budget](/docs/concepts/policy/budgets), every response includes its current state:
+
+| Header | Type | Always present? | Meaning |
+|---|---|---|---|
+| `X-KS-Budget-State` | enum | when a Budget is bound | One of `ACTIVE`, `WARNING`, `DEGRADED_ALLOWED`, `HARD_STOP`, `CLOSED`. See the [Budget state machine](/docs/concepts/policy/budget-state-machine). |
+| `X-KS-Budget-Remaining-Pct` | decimal string, 6 fractional digits | when a Budget is bound | Fraction of budget remaining, e.g. `0.850000`. Drops monotonically across calls in a Run. |
+| `X-KS-Budget-Degraded` | `"true"` | only when state is `DEGRADED_ALLOWED` | Signals the gateway applied a degradation action to this call (cheaper model, shorter context, or reduced `max_tokens`). Absent otherwise. |
+
+When the Run has a [ContextBudget](/docs/concepts/policy/context-budgets), the analogous header pair is also present:
+
+| Header | Type | Always present? | Meaning |
+|---|---|---|---|
+| `X-KS-Context-Budget-State` | enum | when a ContextBudget is bound | One of `ACTIVE`, `WARN`, `OFFLOAD_REQUIRED`, `COMPACT_REQUIRED`, `DEGRADE`, `HARD_STOP`, `CLOSED`. |
+| `X-KS-Context-Action` | enum | only when an action was advised | One of `offload_required`, `compact_required`, `degrade`. Tells the runtime what transformation to apply before the next call. Absent on `ACTIVE` and `WARN`. |
+
+## Anonymous traffic
+
+Requests to `/v1/chat/completions` **without** a `kovaserve` extension envelope do not produce execution records — no Run, Step, ModelCall, or ContextManifest is materialized. The corresponding identity and execution headers are also omitted. Cost headers (`X-KS-Cost-Cents`, `X-KS-Gross-Cost-Cents`, `X-KS-Cache-Savings-Cents`) are still emitted when pricing is available — anonymous traffic still has a cost, and the gateway still surfaces it.
+
+## When cost is `no-pricing`
+
+If the resolved model has no registered price entry, cost values are `"0.0000"` and `X-KS-Cost-Status: no-pricing` is set:
+
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+X-KS-Cost-Cents: 0.0000
+X-KS-Gross-Cost-Cents: 0.0000
+X-KS-Cache-Savings-Cents: 0.0000
+X-KS-Cost-Currency: USD
+X-KS-Cost-Status: no-pricing
+```
+
+`no-pricing` is the operator's signal that a model needs to be added to the pricing table — the call still ran successfully and is fully metered, but it cannot be costed. Treat `no-pricing` as a non-fatal observability signal, not a request failure.
+
+## Streaming responses
+
+Streaming responses do **not** carry `X-KS-Cost-Cents`, `X-KS-Gross-Cost-Cents`, or `X-KS-Cache-Savings-Cents` headers. The total token count — and therefore the cost — isn't known when the response head is written. Cost lands instead on the final SSE chunk:
+
+```
+data: {
+  "id": "chatcmpl-01J8X9...",
+  "choices": [],
+  "usage": {
+    "prompt_tokens": 1240,
+    "completion_tokens": 482,
+    "total_tokens": 1722,
+    "cached_tokens": 980,
+    "cost_cents": 0.0420,
+    "gross_cost_cents": 0.0612,
+    "cache_savings_cents": 0.0192,
+    "cost_currency": "USD",
+    "cost_status": "ok"
+  }
+}
+
+data: [DONE]
+```
+
+The streaming `usage` block uses JSON numbers (not strings) for cost fields, with up to four fractional digits. Identity and budget headers (`X-KS-Run-Id`, `X-KS-Budget-State`, etc.) are still present on the response head — only the cost-amount headers are omitted from streaming. See [Streaming](/docs/api/streaming) for the full final-chunk shape.
+
+## Reading cost in client code
+
+The headers are CORS-exposed (`X-KS-Cost-Cents`, `X-KS-Cache-Savings-Cents`, `X-KS-Run-Id`, etc. all appear in `Access-Control-Expose-Headers`), so browser clients can read them directly:
+
+```javascript
+const res = await fetch("/v1/chat/completions", { ... });
+const cost = parseFloat(res.headers.get("X-KS-Cost-Cents"));
+const savings = parseFloat(res.headers.get("X-KS-Cache-Savings-Cents"));
+console.log(`This call cost ${cost} cents (saved ${savings} from cache).`);
+```
+
+The KovaServe SDK exposes them through a structured `response.kovaserve` object on every native response, including streaming — for streaming, the SDK reads the final chunk's `usage` block and surfaces the same fields:
+
+```python
+response = client.chat.completions.create(...)
+print(response.kovaserve.cost_cents)         # decimal.Decimal('0.0420')
+print(response.kovaserve.cache_savings_cents) # decimal.Decimal('0.0192')
+print(response.kovaserve.run_id)              # '01J8X9Y2Z3K4M5N6P7Q8R9S0T1'
+```
+
+## Aggregations and exports
+
+The headers are per-call. For aggregations across many calls — per Run, per Project, per Tenant, per day — use [`GET /v1/ks/metering/usage`](/docs/api/metering/usage). For bulk export of every priced row, use [`GET /v1/ks/metering/export`](/docs/api/metering/export). Both surfaces use the same 4-fractional-digit decimal precision as the headers, so numbers compare exactly.
+
+## See also
+
+- [Cost model](/docs/concepts/cost/cost-model) — how `gross`, `net`, and cache savings relate
+- [Pricing snapshots](/docs/concepts/cost/pricing-snapshots) — how a usage row stays self-contained for audit
+- [Cost per completed run](/docs/concepts/cost/cost-per-completed-run) — the unit of value
+- [Streaming](/docs/api/streaming) — the final-chunk cost convention
+- [Errors](/docs/api/errors) — `budget_exceeded` and `context_budget_exceeded` envelopes
+- [`GET /v1/ks/metering/usage`](/docs/api/metering/usage) · [`GET /v1/ks/metering/export`](/docs/api/metering/export)

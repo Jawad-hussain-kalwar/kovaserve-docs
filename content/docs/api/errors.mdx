@@ -1,0 +1,206 @@
+---
+title: Errors
+description: Two error envelopes — OpenAI-compatible on /v1/*, native on /v1/ks/* — with stable error codes, status semantics, and a request ID on every response.
+---
+
+KovaServe returns two error envelope shapes — one for each API family — and a stable set of `error_code` values that callers can branch on. Both envelopes include enough context to debug without inspecting server logs and never leak entity IDs the caller is not authorized to see.
+
+## The two envelopes
+
+### OpenAI-compatible (`/v1/*`)
+
+The OpenAI-compatible inference endpoints (`/v1/chat/completions`, `/v1/models`) return errors in OpenAI's wire shape:
+
+```json
+{
+  "error": {
+    "type": "authentication_error",
+    "message": "Invalid or missing authentication token.",
+    "code": "missing_token",
+    "details": null
+  }
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `error.type` | string | High-level family — one of `invalid_request_error`, `authentication_error`, `permission_error`, `not_found_error`, `rate_limit_error`, `server_error`. |
+| `error.message` | string | Human-readable explanation. Stable across patches; safe to log but not to branch on. |
+| `error.code` | string \| null | Stable machine-readable code. Branch on this when the failure path matters. |
+| `error.details` | object \| null | Optional structured context — model name, scope ID, retry hint. |
+
+This envelope matches the shape any OpenAI SDK already understands; existing error-handling code works unchanged.
+
+### Native (`/v1/ks/*`)
+
+The native control plane uses a flat envelope with the same information:
+
+```json
+{
+  "error_code": "model_access_denied",
+  "message": "Model 'qwen3-coder-30b' is not admitted by the resolved policy scope.",
+  "details": {
+    "model": "qwen3-coder-30b",
+    "policy_scope_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T4"
+  }
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `error_code` | string | Stable machine-readable code from the native code list (below). Branch on this. |
+| `message` | string | Human-readable explanation. |
+| `details` | object \| null | Structured context for the failure — entity IDs, limits, expected vs. actual values. |
+
+The native envelope is flat (no `error` wrapper) because the native surface owns the response shape end-to-end and does not need to mimic an upstream API.
+
+## Stable native error codes
+
+The full list of `error_code` values the native surface returns, grouped by domain:
+
+### Authentication and authorization
+
+| Code | Status | Meaning |
+|---|---|---|
+| `missing_token` | `401` | No `Authorization` header, or scheme is not `Bearer`. |
+| `invalid_token` | `401` | Bearer header present but the key does not resolve. |
+| `token_revoked` | `401` | The key existed but has been rotated or revoked. |
+| `model_access_denied` | `403` | Authenticated, but the resolved [PolicyScope](/docs/concepts/policy/policy-scopes) blocks the requested model. |
+
+### Validation and request shape
+
+| Code | Status | Meaning |
+|---|---|---|
+| `validation_error` | `422` | Request body or query parameters failed schema validation. `details` lists offending fields. |
+| `invalid_request` | `400` | The request shape is well-formed but semantically invalid for this endpoint. |
+| `invalid_id` | `400` | A path or body ID does not match the canonical [ID format](/docs/api/ids). |
+| `invalid_scope` | `400` | A scope query parameter (`scope=run`, `scope=project`) is not admissible at this endpoint. |
+| `unsupported_format` | `400` | An export endpoint received a `format` value other than the supported set (`jsonl`). |
+| `missing_date_range` | `400` | An aggregation endpoint was called without the required `start` / `end` parameters. |
+
+### Entities and lookup
+
+| Code | Status | Meaning |
+|---|---|---|
+| `unknown_session` | `404` | Session ID is not visible to the caller's Tenant scope. |
+| `unknown_model` | `404` | Model is not registered or not admitted by the resolved scope. |
+| `unknown_agent_run` | `404` | Runtime agent run not visible to the caller. |
+| `run_not_found` | `404` | Run ID is not visible to the caller's Tenant scope. |
+| `policy_scope_not_found` | `404` | Referenced PolicyScope does not exist. |
+| `budget_not_found` | `404` | Referenced Budget does not exist. |
+
+### State machines
+
+| Code | Status | Meaning |
+|---|---|---|
+| `run_not_runnable` | `409` | Operation requires a Run in a runnable state; the Run is in a state that disallows it. |
+| `illegal_state_transition` | `409` | Requested transition is not in the entity's [state machine](/docs/concepts/run-hierarchy/run-state-machine). |
+| `invalid_run_state` | `409` | Run is in a state where the requested operation is not meaningful (e.g., cancel on a completed Run). |
+| `illegal_budget_transition` | `409` | Requested [Budget transition](/docs/concepts/policy/budget-state-machine) is not admissible. |
+| `invalid_budget_state` | `409` | Budget is in a state where the requested operation is not meaningful. |
+| `budget_already_exists` | `409` | A Budget already exists for the target Run. |
+| `budget_closed` | `409` | Budget is in `CLOSED` and cannot be operated on. |
+
+### Idempotency
+
+| Code | Status | Meaning |
+|---|---|---|
+| `idempotency_conflict` | `409` | The same `Idempotency-Key` was reused with a different request body. See [Idempotency](/docs/api/idempotency). |
+
+### Rate, budget, and admission
+
+| Code | Status | Meaning |
+|---|---|---|
+| `rate_limited` | `429` | The key exceeded its requests-per-second or tokens-per-minute quota. `Retry-After` indicates when to retry. |
+| `budget_exceeded` | `429` | The Run-level [Budget](/docs/concepts/policy/budgets) reached `HARD_STOP`. |
+| `context_budget_exceeded` | `429` | The per-call [ContextBudget](/docs/concepts/policy/context-budgets) returned `HARD_STOP` before GPU dispatch. |
+
+### Referential integrity
+
+| Code | Status | Meaning |
+|---|---|---|
+| `policy_scope_fk_violation` | `409` | An attempted delete or transition would violate a foreign-key constraint from a Run, Budget, or other dependent entity. |
+
+### Internal
+
+| Code | Status | Meaning |
+|---|---|---|
+| `internal_error` | `500` | An unexpected condition. Check `X-Request-Id` and report. |
+| `kv_index_unavailable` | `503` | The KV Index is temporarily unreachable; retry with backoff. |
+| `router_unavailable` | `503` | The Cache-Aware Router is temporarily unreachable; retry with backoff. |
+
+## Status code semantics
+
+| Status | Meaning |
+|---|---|
+| `400 Bad Request` | The request shape, ID format, or scope is invalid. The body explains. |
+| `401 Unauthorized` | Authentication failed. The body uses `missing_token`, `invalid_token`, or `token_revoked`; clients cannot distinguish "no key" from "bad key" beyond the code. |
+| `403 Forbidden` | Authenticated, but authorized policy denies the operation. |
+| `404 Not Found` | The entity does not exist *or* is not visible to the caller's Tenant scope. The two cases are deliberately indistinguishable — cross-tenant probing leaks no information. |
+| `409 Conflict` | The request collides with current state — illegal transition, idempotency body mismatch, foreign-key dependency. |
+| `413 Payload Too Large` | Request body exceeded the gateway's configured maximum. |
+| `422 Unprocessable Entity` | The request shape parsed but failed schema validation. `details` lists field-level errors. |
+| `429 Too Many Requests` | Rate, Budget, or ContextBudget admission rejected the request. `Retry-After` is set when retry timing is meaningful. |
+| `500 Internal Server Error` | Unexpected server condition; treat as transient and retry with backoff. |
+| `502 Bad Gateway` | The upstream substrate returned an unrecoverable error. |
+| `503 Service Unavailable` | A dependency is temporarily down. Retry with exponential backoff. |
+
+`2xx` responses are never error envelopes. Any `2xx` body is the success shape documented for that endpoint.
+
+## Every response carries a request ID
+
+Every response — success or failure — carries `X-Request-Id`, a 26-character Crockford ULID assigned at the gateway:
+
+```http
+HTTP/1.1 429 Too Many Requests
+Content-Type: application/json
+Retry-After: 30
+X-Request-Id: 01J8X9Y2Z3K4M5N6P7Q8R9S0XX
+
+{
+  "error_code": "budget_exceeded",
+  "message": "Run budget reached HARD_STOP at 100% of cost limit.",
+  "details": {
+    "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    "budget_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T4",
+    "cost_used_cents": "5.0000",
+    "cost_limit_cents": "5.0000"
+  }
+}
+```
+
+When reporting an issue, include the `X-Request-Id` value. The gateway records it on every execution event and audit row, so a single ID suffices to reconstruct what happened.
+
+If a W3C `traceparent` was supplied on the request — or generated by the gateway when absent — it is propagated through every downstream module and recorded on the [ModelCall](/docs/concepts/run-hierarchy/model-calls). See [IDs](/docs/api/ids) for trace correlation.
+
+## Branching on errors
+
+The recommended pattern is to branch on the machine-readable code, not the message:
+
+```python
+from kovaserve import KovaClient, KovaError
+
+try:
+    run = client.runs.create(project_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T0")
+except KovaError as exc:
+    if exc.code == "rate_limited":
+        time.sleep(int(exc.headers["Retry-After"]))
+    elif exc.code == "budget_exceeded":
+        notify_owner(exc.details["budget_id"])
+    elif exc.code == "model_access_denied":
+        raise
+    else:
+        raise
+```
+
+Codes are stable across patches. New codes may appear in additive releases; clients should treat unknown codes the same as `internal_error` — log and surface to the operator.
+
+Messages are not stable. Treat them as human-readable hints, not as parse targets.
+
+## See also
+
+- [Authentication](/docs/api/authentication) — the auth-failure error codes
+- [IDs](/docs/api/ids) — `X-Request-Id` and `traceparent` correlation
+- [Idempotency](/docs/api/idempotency) — `idempotency_conflict` semantics
+- [Budgets](/docs/concepts/policy/budgets) · [ContextBudgets](/docs/concepts/policy/context-budgets) — the admission decisions that produce `budget_exceeded` and `context_budget_exceeded`
+- [Policy admission](/docs/concepts/policy/admission) — the layered authorization order
