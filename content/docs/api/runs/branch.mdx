@@ -38,7 +38,7 @@ POST /v1/ks/runs/{run_id}/branch
 | `session_id` | string \| null | no | Session to bind the child Run to. Defaults to the parent Run's `session_id`. Pass `null` (explicitly) to detach the child from any Session. The Session must be visible to the same Tenant. |
 | `external_run_id` | string \| null | no | External-runtime correlation ID for the child Run. |
 | `external_runtime` | string \| null | no | Originating runtime name for the child. Defaults to the parent's value. |
-| `budget_overrides` | object \| null | no | Optional clamp on the child's inherited Budget — `{ "cost_limit_cents": "5.0000", "token_limit": 100000, "step_limit": 50, "time_limit_seconds": 3600, "tool_limit": 200 }`. Each field is optional; missing fields inherit verbatim. Overrides may only **lower** the parent's limits, never raise them; raises return `400 invalid_request`. |
+| `budget_overrides` | object \| null | no | Optional clamp on the child's inherited Budget — `{ "cost_limit_cents": "500.0000", "token_limit": 100000, "step_limit": 50, "time_limit_seconds": 3600, "tool_limit": 200 }`. Each field is optional; missing fields inherit verbatim. Overrides may only **lower** the parent's limits, never raise them; raises return `400 invalid_request`. |
 | `metadata` | object \| null | no | Free-form metadata recorded on the child Run row. |
 
 ```json
