@@ -1,0 +1,61 @@
+---
+title: "`kova sessions get`"
+description: Fetch one Session by ID, optionally with turn history and the current Run hydrated inline.
+---
+
+Fetch one [Session](/docs/concepts/continuity/sessions) by ID. Session IDs follow the `ses_<24hex>` format.
+
+## Synopsis
+
+```bash
+kova sessions get <SESSION_ID> [OPTIONS]
+```
+
+## Options
+
+| Option | Meaning |
+|---|---|
+| `--expand <path>` | Hydrate nested resources. Valid paths: `turns`, `current_run`, `current_manifest`. Repeat for multiple. |
+| `--limit-turns <n>` | When `--expand turns` is set, cap the number of turns returned. Default unbounded. |
+| `--json` | Emit the Session as one JSON document. |
+
+## Examples
+
+```bash
+# Bare Session row
+kova sessions get ses_a7f3c2b8d4e1f0925a1b6c3d
+
+# With turn history
+kova sessions get ses_a7f3c2b8d4e1f0925a1b6c3d --expand turns
+
+# With turn history and current Run details
+kova sessions get ses_a7f3c2b8d4e1f0925a1b6c3d --expand turns --expand current_run
+
+# JSON for scripting
+kova sessions get ses_a7f3c2b8d4e1f0925a1b6c3d --expand turns --json | jq '.turns[].role'
+```
+
+## Output
+
+```
+Session ses_a7f3c2b8d4e1f0925a1b6c3d  OPEN
+Project:         proj_review_bot
+Model:           meta-llama/Llama-3-70B-Instruct
+Turn count:      12
+Last accessed:   2026-05-15T11:42:01Z
+Expires:         2026-05-16T11:42:01Z
+Current Run:     01J8X9Y2Z3K4M5N6P7Q8R9S0T1
+Current manifest: 01J8X9Y2Z3K4M5N6P7Q8R9SCM07
+─────────────────────────────────────────────────────────────────────
+Turns (with --expand turns)
+1   user       Review PR #42
+2   assistant  I'll start by examining the diff...
+3   user       Focus on test coverage
+...
+```
+
+## See also
+
+- [`kova sessions list`](/docs/cli/sessions/list) — list all Sessions
+- [`client.sessions.get`](/docs/sdk/control/sessions) — the SDK equivalent
+- [Session state machine](/docs/concepts/continuity/session-state-machine)

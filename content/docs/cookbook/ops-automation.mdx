@@ -1,0 +1,126 @@
+---
+title: Ops automation (OpsRuns)
+description: A reference recipe for a managed IT-ops agent — incident investigation, log analysis, runbook execution. End-to-end with tool governance, policy-controlled remediation, and audit trail.
+---
+
+**OpsRuns** is the managed-agent SKU for IT, cloud, and security operations. This recipe walks through a complete OpsRuns agent — receive an alert, investigate logs, diagnose the issue, propose remediation, execute under policy approval, and produce an incident report. The pattern fits incident response, log analysis, runbook execution, infrastructure diagnostics, and policy-controlled remediation.
+
+## The recipe
+
+```python
+from kovaserve import OpenAI, KovaControlClient, kova
+from kovaserve.context import ArtifactClient
+
+inference = OpenAI()
+ks = KovaControlClient()
+artifacts = ArtifactClient(ks)
+
+@kova.budget(cost_cents="30.0000", tokens=1_000_000, time_seconds=1800)
+@kova.run(project="proj_opsruns", model="meta-llama/Llama-3-70B-Instruct")
+def investigate_alert(alert_id: str) -> dict:
+    @kova.tool(name="fetch_alert")
+    def fetch():
+        return alerts.get(alert_id)
+
+    @kova.tool(name="query_logs")
+    def logs(service, window):
+        result = log_search.query(service=service, since=window)
+        # Logs can be large — offload
+        ref = artifacts.upload_content(
+            result.encode(),
+            name="logs.jsonl",
+            mime_type="application/x-ndjson",
+            artifact_type="tool_output",
+            run_id=kova.current_run().id,
+        )
+        return {"artifact_id": ref.id, "summary": result[:2000]}
+
+    @kova.tool(name="check_metrics")
+    def metrics(service, window):
+        return metrics_store.fetch(service=service, since=window)
+
+    @kova.checkpoint(trigger="before_shell_command")
+    def remediate(action):
+        # Destructive action — checkpoint first
+        return shell.run(action)
+
+    # 1. Read the alert
+    alert = fetch()
+
+    # 2. Triage
+    plan = inference.chat.completions.create(
+        model="meta-llama/Llama-3-70B-Instruct",
+        messages=[{"role": "user", "content": f"Alert:\n{alert}\nWhat to investigate?"}],
+    ).choices[0].message.content
+
+    # 3. Gather evidence
+    log_data = logs(service=alert.service, window="-15m")
+    metric_data = metrics(service=alert.service, window="-15m")
+
+    # 4. Diagnose
+    diagnosis = inference.chat.completions.create(
+        model="meta-llama/Llama-3-70B-Instruct",
+        messages=[{"role": "user", "content": f"Plan:\n{plan}\nLogs (summary):\n{log_data['summary']}\nMetrics:\n{metric_data}\nDiagnose."}],
+    ).choices[0].message.content
+
+    # 5. Propose remediation
+    remediation = inference.chat.completions.create(
+        model="meta-llama/Llama-3-70B-Instruct",
+        messages=[{"role": "user", "content": f"Diagnosis:\n{diagnosis}\nPropose a runbook command."}],
+        response_format={"type": "json_schema", "json_schema": REMEDIATION_SCHEMA},
+    ).choices[0].message.content
+
+    # 6. Execute under policy approval
+    if remediation["requires_approval"]:
+        # PolicyScope tool policy gates the action
+        approval = require_approval(remediation)
+        if not approval.granted:
+            return {"status": "halted_pending_approval", "diagnosis": diagnosis}
+
+    remediation_result = remediate(remediation["command"])
+
+    return {
+        "alert_id": alert_id,
+        "diagnosis": diagnosis,
+        "remediation": remediation_result,
+    }
+```
+
+## What the recipe demonstrates
+
+- **Log offloading.** Logs can be large — multi-megabyte JSONL is unsuitable inline. The recipe uploads the full log as a [ContextArtifact](/docs/sdk/control/context-artifacts) and feeds the model a bounded summary.
+- **Policy-controlled remediation.** Before executing a destructive command, the recipe consults the PolicyScope's tool policy. Actions that require approval halt the run pending human sign-off.
+- **Checkpoint before destructive actions.** `@kova.checkpoint(trigger="before_shell_command")` captures the state right before the runbook executes. Failures roll back to that point.
+- **Audit trail.** Every step is recorded — the alert, the logs queried, the metrics fetched, the diagnosis, the proposed action, the approval (or lack of), the execution outcome. Operators replay any incident end-to-end.
+
+## SKU summary
+
+OpsRuns ships with default toolchain access for:
+
+- Log search and retrieval.
+- Metrics queries.
+- Runbook execution under policy approval.
+- Infrastructure diagnostics (k8s, AWS, GCP, on-prem).
+- Cloud provider API calls under scoped credentials.
+- Approval workflows (Slack, PagerDuty, email).
+
+The toolset is configurable per Project. The exact composition depends on the deployment.
+
+## Common OpsRuns workflows
+
+| Workflow | Inputs | Outputs |
+|---|---|---|
+| Incident investigation | An alert from monitoring | Diagnosis, recommended action, executed remediation. |
+| Log analysis | A service + time window | Anomaly report, error clustering. |
+| Runbook execution | A runbook + parameters | Step-by-step execution log, success / failure status. |
+| Infrastructure diagnostics | An object (cluster, VM, bucket) | Health summary, anomalies, recommended changes. |
+| Policy-controlled cleanup | A retention policy + target scope | Listed candidate resources, executed deletions with audit. |
+
+## Where to go next
+
+<Cards>
+  <Card title="CodeRuns" href="/docs/cookbook/coding-agent" description="The coding-agent SKU." />
+  <Card title="DocRuns" href="/docs/cookbook/document-review" description="The document-review SKU." />
+  <Card title="Tool loops with budget kill" href="/docs/cookbook/tool-loops-with-budget-kill" description="Runaway-loop protection patterns." />
+  <Card title="Policy scopes" href="/docs/guides/policy/policy-scopes" description="Tool-policy governance." />
+</Cards>

@@ -1,0 +1,87 @@
+---
+title: Framework adapters
+description: Optional integration packages — LangGraph, Pydantic AI, OpenAI Agents SDK, Temporal. Each integrates via the framework's existing extension seam — no monkey-patching, no orchestration replacement.
+---
+
+KovaServe sits **below** your runtime, not in place of it. The SDK ships four framework adapters as optional install extras. Each integrates via the framework's own extension seam — middleware, hooks, typed dependency injection, or interceptor — so KovaServe state flows under your existing orchestration without replacing it.
+
+```bash
+pip install "kovaserve[langgraph]"        # LangGraph
+pip install "kovaserve[pydantic-ai]"      # Pydantic AI
+pip install "kovaserve[openai-agents]"    # OpenAI Agents SDK
+pip install "kovaserve[temporal]"         # Temporal
+pip install "kovaserve[all]"              # every adapter at once
+```
+
+Each adapter is a separate module under `kovaserve.adapters.<framework>`. Adapters do not import from each other — installing the LangGraph extra does not pull in Pydantic AI's deps.
+
+## Which adapter to pick
+
+| Framework | Adapter | Integration seam |
+|---|---|---|
+| [LangGraph](/docs/sdk/adapters/langgraph) | `KovaCheckpointer(BaseCheckpointSaver)` + `KovaStore(BaseStore)` + `KovaMiddleware(AgentMiddleware)` | LangChain 1.0 middleware + framework-native checkpointer / store interfaces. |
+| [Pydantic AI](/docs/sdk/adapters/pydantic-ai) | `RunContext[KovaDeps]` typed dependency injection | The framework's native deps mechanism — no middleware, no wrappers. ~80 lines, cleanest typed integration. |
+| [OpenAI Agents SDK](/docs/sdk/adapters/openai-agents) | `KovaSession(Session)` + `KovaRunHooks(RunHooks)` + `KovaTracingExporter` | The framework's `Session` protocol, `RunHooks` lifecycle, and tracing-exporter plug points. |
+| [Temporal](/docs/sdk/adapters/temporal) | `@kova_activity` decorator + `KovaInterceptor(WorkerInterceptor)` | Activity wrappers + the framework's interceptor chain. Workflow stays deterministic. |
+
+The choice is determined by which framework you already use — none of the adapters are interchangeable.
+
+## What every adapter does
+
+Adapters are application-agnostic — they wire the framework's lifecycle hooks to KovaServe state. Every adapter does the same four things:
+
+1. **Open Runs at the right boundary.** The runtime's notion of "an execution" maps to a KovaServe Run. LangGraph's `before_agent` opens a Run, Temporal's Workflow opens a Run, OpenAI Agents SDK's `on_agent_start` opens a Run.
+2. **Record Steps at the right boundary.** Each framework's smallest unit of progression maps to a KovaServe Step. LangGraph nodes → `MODEL_CALL` Steps, Temporal Activities → `TOOL_EXECUTE` Steps, OpenAI Agents SDK tool calls → `TOOL_EXECUTE` Steps.
+3. **Propagate identity through nested calls.** The same `httpx.event_hooks` machinery the decorators use; the adapter installs the hooks once on entry.
+4. **Map framework state to KovaServe entities.** LangGraph threads → KovaServe Sessions; OpenAI Agents conversations → KovaServe Sessions; Pydantic AI `RunContext` → typed KovaServe deps.
+
+What adapters **do not** do:
+
+- They do not replace the framework's own state machine. LangGraph's checkpointer is still LangGraph's; the KovaServe adapter references it.
+- They do not invent orchestration. The runtime's planner / executor / loop stays in place; KovaServe records its outcome.
+- They do not monkey-patch. Every integration is via the framework's published extension surface.
+
+## Composition with decorators
+
+Decorators and adapters work together. The common pattern is to wrap node bodies with `@kova.run` *inside* an adapter-managed application:
+
+```python
+from kovaserve import kova
+from kovaserve.adapters.langgraph import KovaMiddleware
+from langgraph.graph import StateGraph
+
+graph = StateGraph(MyState)
+graph.set_middleware([KovaMiddleware(client=ks_client, project_id="proj_review_bot")])
+
+@kova.run(project="proj_review_bot", model="meta-llama/Llama-3-70B-Instruct")
+def review_node(state):
+    # KovaMiddleware opened a Run on before_agent. @kova.run sees it via the contextvar
+    # and binds to it as the active Run rather than creating a new one.
+    ...
+
+graph.add_node("review", review_node)
+app = graph.compile(checkpointer=KovaCheckpointer(ks_client))
+```
+
+When a decorator detects an active Run already in the context (because the adapter opened one), it **binds** to that Run instead of creating a new one. This is intentional — the adapter is the outer scope; decorators inside a node body are inner scopes. See [decorator composition](/docs/sdk/decorators/composition) for the full rule.
+
+## Frameworks without a packaged adapter
+
+For runtimes outside the four supported above — Inngest, AutoGen, CrewAI, LlamaIndex, or a custom in-house framework — the [BYO runtime](/docs/concepts/deployment/byo-runtime) pattern works directly. Use the OpenAI re-export for inference, the control client for Run / Budget / Checkpoint operations, and the decorators for lifecycle boundaries. The packaged adapters are sugar over that same surface; nothing in them is exclusive to the four supported frameworks.
+
+Reach out through the support channel if you have a runtime with a clean lifecycle seam that would benefit from a packaged adapter — integrations are short to land when the framework exposes a stable extension surface.
+
+## Where to go next
+
+<Cards>
+  <Card title="LangGraph adapter" href="/docs/sdk/adapters/langgraph" description="`KovaCheckpointer` + `KovaStore` + `KovaMiddleware`." />
+  <Card title="Pydantic AI adapter" href="/docs/sdk/adapters/pydantic-ai" description="`RunContext[KovaDeps]` typed dependency injection." />
+  <Card title="OpenAI Agents SDK adapter" href="/docs/sdk/adapters/openai-agents" description="`KovaSession` + `KovaRunHooks` + `KovaTracingExporter`." />
+  <Card title="Temporal adapter" href="/docs/sdk/adapters/temporal" description="Activity wrapper + `KovaInterceptor`." />
+</Cards>
+
+## See also
+
+- [Hooks](/docs/sdk/hooks) — every adapter is a `RunHooks` subclass internally
+- [Decorators composition](/docs/sdk/decorators/composition) — how decorators bind to adapter-opened Runs
+- [BYO runtime mode](/docs/concepts/deployment/byo-runtime) — what runs underneath every adapter

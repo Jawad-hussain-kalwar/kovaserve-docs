@@ -1,0 +1,170 @@
+---
+title: "`@kova.step`"
+description: The Step decorator — record a typed Step inside the active Run and seed `parent_step_id` on every nested ModelCall. Includes the four named aliases `@kova.tool`, `@kova.observe`, `@kova.think`, `@kova.compact`.
+---
+
+`@kova.step` records a [Step](/docs/concepts/run-hierarchy/steps) inside the active [Run](/docs/concepts/run-hierarchy/runs) for the duration of the decorated function. Any chat completion issued from inside the body inherits `parent_step_id` from this Step automatically — the resulting `MODEL_CALL` Step nests under your Step in the timeline.
+
+The decorator is the SDK's path to **hierarchical step trees**: a `TOOL_PLAN` parent owning multiple `TOOL_EXECUTE` children, a `THINK` parent owning a `MODEL_CALL`, a `@kova.step`-wrapped tool function whose internal model calls all nest under it.
+
+```python
+from kovaserve import kova
+
+@kova.run(project="proj_review_bot", model="meta-llama/Llama-3-70B-Instruct")
+def review_pr(pr_url: str) -> str:
+    @kova.step(type="TOOL_EXECUTE", name="fetch_pr")
+    def fetch():
+        return github.get_pr(pr_url)
+
+    @kova.step(type="TOOL_EXECUTE", name="run_tests")
+    def test(branch):
+        return ci.run_tests(branch)
+
+    pr = fetch()
+    tests = test(pr.head)
+    return summarize(pr, tests)
+```
+
+## Signature
+
+```python
+def step(
+    *,
+    type: str,                                    # required — canonical StepType value
+    name: str | None = None,                      # optional label, surfaces in events & UI
+    metadata: dict | None = None,                 # runtime-supplied annotations
+    parent_step_id: str | None = None,            # explicit parent, defaults to top of context stack
+    hooks: RunHooks | None = None,
+    client: KovaControlClient | None = None,
+) -> Callable[[F], F]: ...
+```
+
+`type` is required and must be a canonical `StepType` value (`MODEL_CALL`, `TOOL_PLAN`, `TOOL_EXECUTE`, `FILE_READ`, `FILE_WRITE`, `PROCESS_START`, `OBSERVE`, `THINK`, `CHECKPOINT`, `PAUSE`, `RESUME`, `BRANCH`, `COMPLETE`, `FAIL`, `COMPACT`). Auto-detection from function name fails silently on rename — the explicit `type=` argument is the only supported path.
+
+## Named aliases
+
+The four most common step types ship as named aliases for brevity:
+
+```python
+@kova.tool(name="fetch_pr")        # type="TOOL_EXECUTE"
+@kova.observe(name="record_state") # type="OBSERVE"
+@kova.think(name="reason_about")   # type="THINK"
+@kova.compact()                    # type="COMPACT"
+```
+
+The aliases are sugar — `@kova.tool` is `@kova.step(type="TOOL_EXECUTE")` with no other change. Use the aliases when the type is one of the four named values; use the explicit `@kova.step(type=...)` when it's anything else.
+
+Other step types (`FILE_READ`, `FILE_WRITE`, `PROCESS_START`, etc.) stay explicit because they're wedge-specific and rare on BYO runtimes; an alias for every step type would create surface bloat that obscures the four most common cases.
+
+## Step nesting via contextvar
+
+The decorator maintains a **step stack** in a `contextvars.ContextVar`. On entry, the new Step is pushed onto the stack; on exit, it is popped. Any chat completion issued from inside the body reads the top of the stack and writes `parent_step_id = <top.id>` into the resulting `MODEL_CALL` Step.
+
+```python
+@kova.run(project="proj_review_bot", model="meta-llama/Llama-3-70B-Instruct")
+def review_pr(pr_url: str):
+    @kova.step(type="TOOL_PLAN", name="plan_review")
+    def plan():
+        # This chat completion's MODEL_CALL Step gets parent_step_id pointing at the TOOL_PLAN.
+        response = inference.chat.completions.create(
+            model="meta-llama/Llama-3-70B-Instruct",
+            messages=[{"role": "user", "content": f"Plan a review of {pr_url}"}],
+        )
+        return parse_plan(response)
+
+    @kova.step(type="TOOL_EXECUTE", name="execute_search")
+    def execute_search(query):
+        return code_search(query)
+
+    plan_result = plan()
+    for query in plan_result.queries:
+        execute_search(query)
+```
+
+Reconstructing the tree client-side is straightforward — group on `parent_step_id`:
+
+```python
+run = client.runs.get(run_id, expand=["steps"])
+top_level = [s for s in run.steps if s.parent_step_id is None]
+children_by_parent = {p.id: [s for s in run.steps if s.parent_step_id == p.id]
+                      for p in run.steps}
+```
+
+The flat ordinal-ordered list is the canonical wire shape; the tree is a view over it.
+
+## On entry
+
+1. Reads the active Run from the `@kova.run` ContextVar. Raises `NoActiveRunError` if there is none.
+2. If `parent_step_id` is supplied, uses it explicitly. Otherwise reads the top of the step stack.
+3. Calls `client.runs.steps(...)` to create the Step row with `step_type=type`, `parent_step_id=<resolved>`, `metadata=metadata`.
+4. Pushes the new Step onto the step stack.
+5. The Step starts in `PENDING` and transitions to `STARTED` immediately.
+
+## On normal return
+
+The Step transitions to `SUCCEEDED`. The step stack is popped.
+
+## On exception
+
+The Step transitions to `FAILED` with `details.exception_type`. The original exception is re-raised. The step stack is popped.
+
+## Outside any `@kova.run`
+
+The decorator raises `NoActiveRunError` at call time when there is no surrounding `@kova.run`:
+
+```python
+@kova.step(type="TOOL_EXECUTE")
+def fetch_pr():
+    ...
+
+fetch_pr()    # raises NoActiveRunError — no Run to attach the Step to
+```
+
+For ad-hoc usage without a wrapping decorator, create the Run explicitly first or use `client.runs.steps(...)` imperatively.
+
+## Streaming and generator support
+
+A `@kova.step`-decorated function that returns a generator stays in `STARTED` until the generator is exhausted, mirroring `@kova.run` semantics. Early consumer stop transitions the Step to `CANCELED`.
+
+A function that yields tokens via a streaming chat completion has its Step stay open for the duration of the stream — chat completions issued from inside the body inherit the parent step until the stream completes.
+
+## Async
+
+```python
+@kova.run(project="proj_review_bot", model="meta-llama/Llama-3-70B-Instruct")
+async def review_pr(pr_url: str):
+    @kova.tool(name="fetch_pr")
+    async def fetch():
+        return await github.get_pr(pr_url)
+
+    pr = await fetch()
+    return await summarize(pr)
+```
+
+Async dispatch uses task-scoped `contextvars`, so concurrent steps under `asyncio.gather` each see their own step-stack — siblings under one parent, not nested.
+
+## Reading the active Step
+
+```python
+@kova.step(type="TOOL_EXECUTE", name="run_tests")
+def test(branch):
+    step = kova.current_step()
+    print(step.id, step.step_type, step.parent_step_id)
+```
+
+`kova.current_step()` returns the top of the step stack, or `None` outside any `@kova.step`-decorated body. Use it to attach Step-aware behaviour (logging, metrics) without threading the Step ID through every function signature.
+
+## Where to go next
+
+<Cards>
+  <Card title="`@kova.run`" href="/docs/sdk/decorators/run" description="The Run a Step belongs to." />
+  <Card title="`@kova.checkpoint`" href="/docs/sdk/decorators/checkpoint" description="The other body-wrapping decorator — Checkpoint captures around a function." />
+  <Card title="`client.runs.steps`" href="/docs/sdk/control/runs" description="The imperative alternative." />
+  <Card title="Step types" href="/docs/concepts/run-hierarchy/step-types" description="The canonical enum the `type=` argument accepts." />
+</Cards>
+
+## See also
+
+- [Step concept](/docs/concepts/run-hierarchy/steps) — `parent_step_id` and nesting in depth
+- [Step state machine](/docs/concepts/run-hierarchy/step-state-machine) — `PENDING → STARTED → terminal`
+- [Decorators overview](/docs/sdk/decorators) — the lifecycle contract

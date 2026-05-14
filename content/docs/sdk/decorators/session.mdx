@@ -1,0 +1,165 @@
+---
+title: "`@kova.session`"
+description: The Session decorator — open a Session around a function body so multiple sequential Runs share turn history, the current ContextManifest, and warm-prefix affinity.
+---
+
+`@kova.session` opens a [Session](/docs/concepts/continuity/sessions) for the duration of the decorated function. The Session hosts one or more sequential [Runs](/docs/concepts/run-hierarchy/runs) and accumulates a turn history visible to every model call that binds to it.
+
+```python
+from kovaserve import kova
+
+@kova.session(model="meta-llama/Llama-3-70B-Instruct")
+def chat_loop():
+    while True:
+        user_input = input("> ")
+        response = run_one_turn(user_input)        # each turn issues a Run inside the Session
+        print(response)
+```
+
+## Signature
+
+```python
+def session(
+    *,
+    model: str,                                   # required — default model for the Session
+    expires_in_hours: int = 24,                   # TTL in hours, range 1..720
+    session_id: str | None = None,                # bind to an existing Session
+    complete: bool = False,                       # whether to archive on exit (see below)
+    hooks: RunHooks | None = None,
+    client: KovaControlClient | None = None,
+) -> Callable[[F], F]: ...
+```
+
+`model` is required and sets the Session's default model — Runs and ModelCalls bound to the Session may override per call. `expires_in_hours` sets the Session's TTL (range 1..720, default 24).
+
+## On entry
+
+1. If `session_id` is supplied, the decorator binds to the existing Session and validates it is in a non-terminal state (`OPEN` or `IDLE`).
+2. Otherwise the decorator calls `client.sessions.create(model=model, expires_in_hours=expires_in_hours)`.
+3. The Session ID is stored in a `contextvars.ContextVar` so nested `@kova.run` decorators automatically bind to it.
+
+The Session starts in `OPEN` and transitions to `IDLE` after a configurable inactivity period without an active Run.
+
+## On normal return
+
+By default — `complete=False` — the Session stays in its current state (`OPEN` or `IDLE`) after the function returns. The Session is durable; closing it implicitly on every decorator exit would defeat the purpose of multi-turn continuity.
+
+Set `complete=True` to archive the Session on exit:
+
+```python
+@kova.session(model="...", complete=True)
+def one_shot_chat():
+    # ... single conversation
+    return result
+# Session transitions to ARCHIVED on return.
+```
+
+`complete=True` is the right path when the function represents one full conversation and the Session is not intended to outlive it. The default `complete=False` is correct for long-running or repeated chat loops where the Session should persist across decorator invocations.
+
+## On exception
+
+The Session is **not** transitioned on exception by default. The reason: a Session may host many Runs, and one Run failing does not mean the Session as a whole has failed. Use `archive_on_exception=True` if you want different behaviour:
+
+```python
+@kova.session(model="...", archive_on_exception=True)
+def chat_loop():
+    ...
+# An uncaught exception archives the Session instead of leaving it OPEN.
+```
+
+The exception itself is always re-raised unchanged — the decorator's outcome flag does not affect propagation.
+
+## Binding Runs to the Session
+
+Stacked decorators bind automatically:
+
+```python
+@kova.run(project="proj_review_bot", model="meta-llama/Llama-3-70B-Instruct")
+@kova.session(model="meta-llama/Llama-3-70B-Instruct")
+def chat_turn(user_input: str) -> str:
+    ...
+```
+
+The Session opens innermost, the Run binds to it on creation. Each call to `chat_turn` creates a *new Run inside the same Session*, accumulating turn history.
+
+For the imperative case — multiple Runs created explicitly inside the body — read the Session ID from the context:
+
+```python
+@kova.session(model="meta-llama/Llama-3-70B-Instruct")
+def chat_loop(client):
+    session = kova.current_session()
+    for user_input in get_inputs():
+        run = client.runs.create(
+            project_id="proj_review_bot",
+            session_id=session.id,
+            model="meta-llama/Llama-3-70B-Instruct",
+        )
+        # ...
+```
+
+`kova.current_session()` returns `None` outside any `@kova.session`-decorated body.
+
+## Implicit session-ID propagation
+
+Inference calls inside the decorator body inherit the Session ID automatically — the same `httpx.event_hooks` mechanism that propagates `run_id` propagates `session_id`. You can opt out with `extra_body={"kovaserve": {"session_id": None}}` on a specific call, but the common case is to let it flow:
+
+```python
+@kova.session(model="meta-llama/Llama-3-70B-Instruct")
+def chat_turn(user_input: str) -> str:
+    response = inference.chat.completions.create(
+        model="meta-llama/Llama-3-70B-Instruct",
+        messages=[{"role": "user", "content": user_input}],
+        # session_id inherited from the decorator — no extra_body needed
+    )
+    return response.choices[0].message.content
+```
+
+The inherited Session ID means the response's `X-KS-Session-Id` header always matches the wrapping decorator.
+
+## Cache-affinity benefit
+
+Beyond turn history, a Session-bound call gets warm-prefix affinity from the Cache-Aware Router. The Session tracks `last_node_id` — the node that served the most recent ModelCall — and the router biases placement toward that node when its KV state is still resident. Successive turns in the same Session typically land on the same node and inherit the cached prefix.
+
+This is invisible to the application; the Session existing is sufficient for the router to apply the affinity.
+
+## Async
+
+```python
+@kova.session(model="meta-llama/Llama-3-70B-Instruct")
+async def chat_turn(user_input: str) -> str:
+    response = await async_inference.chat.completions.create(
+        model="meta-llama/Llama-3-70B-Instruct",
+        messages=[{"role": "user", "content": user_input}],
+    )
+    return response.choices[0].message.content
+```
+
+The async version uses task-scoped `contextvars`, so concurrent calls each see their own Session — no cross-talk.
+
+## Reading turn history inside the body
+
+```python
+@kova.session(model="meta-llama/Llama-3-70B-Instruct")
+def chat_turn(client):
+    session = kova.current_session()
+    full = client.sessions.get(session.id, expand=["turns"])
+    history = [{"role": t.role, "content": t.content} for t in full.turns]
+    # ... use history
+```
+
+For routine use, the gateway auto-injects Session history into chat completions — you don't need to fetch it manually. Reading via `expand=["turns"]` is the right call when the runtime needs the typed turn shape (e.g., to display the conversation in a UI).
+
+## Where to go next
+
+<Cards>
+  <Card title="`@kova.run`" href="/docs/sdk/decorators/run" description="The Run decorator that binds to the Session." />
+  <Card title="`client.sessions`" href="/docs/sdk/control/sessions" description="The imperative alternative." />
+  <Card title="Composition" href="/docs/sdk/decorators/composition" description="Why Session is innermost in `budget → run → session`." />
+  <Card title="Current manifest" href="/docs/concepts/continuity/current-manifest" description="What the Session tracks across turns." />
+</Cards>
+
+## See also
+
+- [Session concept](/docs/concepts/continuity/sessions) — what a Session is
+- [Session state machine](/docs/concepts/continuity/session-state-machine) — `OPEN → IDLE → RESUMABLE → ARCHIVED | EXPIRED`
+- [Decorators overview](/docs/sdk/decorators) — the lifecycle contract

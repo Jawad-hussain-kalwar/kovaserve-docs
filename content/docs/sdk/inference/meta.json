@@ -1,0 +1,8 @@
+{
+  "title": "Inference path",
+  "pages": [
+    "openai-compat",
+    "extension-envelope",
+    "cost-and-streaming"
+  ]
+}

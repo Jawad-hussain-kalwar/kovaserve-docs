@@ -1,0 +1,158 @@
+---
+title: OpenAI Agents SDK adapter
+description: Three components — `KovaSession`, `KovaRunHooks`, `KovaTracingExporter` — plug into the OpenAI Agents SDK's Session protocol, lifecycle hooks, and tracing exporter slots.
+---
+
+The **OpenAI Agents SDK adapter** integrates through three of the framework's official extension points: the `Session` protocol for conversation persistence, the `RunHooks` lifecycle interface for agent / tool / handoff events, and the custom tracing exporter slot for trace forwarding. Install with `pip install "kovaserve[openai-agents]"`.
+
+```python
+from openai_agents import Agent, Runner
+from kovaserve.adapters.openai_agents import KovaSession, KovaRunHooks, KovaTracingExporter
+
+agent = Agent(
+    name="reviewer",
+    instructions="You are a code-review agent.",
+    tools=[fetch_pr, run_tests, post_review],
+    hooks=KovaRunHooks(client=ks_client, project_id="proj_review_bot"),
+)
+
+session = KovaSession(client=ks_client, project_id="proj_review_bot")
+result = await Runner.run(agent, "Review PR #42", session=session)
+```
+
+## The three components
+
+| Component | Implements | What it does |
+|---|---|---|
+| `KovaSession(Session)` | OpenAI Agents SDK `Session` protocol | Stores conversation items as KovaServe `SessionTurn`s with embedded `step_id` / `model_call_id` references. |
+| `KovaRunHooks(RunHooks)` | OpenAI Agents SDK `RunHooks` protocol | Opens a Run on `on_agent_start`; records TOOL_EXECUTE Steps on `on_tool_start`; records BRANCH Steps on `on_handoff`; closes the Run on `on_agent_end`. |
+| `KovaTracingExporter` | OpenAI Agents SDK tracing exporter | Forwards SDK trace spans into the KovaServe Event stream so traces and KovaServe events live in one timeline. |
+
+Each component is independent; install only what you need. The common setup uses all three.
+
+## `KovaSession`
+
+```python
+from kovaserve.adapters.openai_agents import KovaSession
+
+session = KovaSession(
+    client=ks_client,
+    project_id="proj_review_bot",
+    session_id=None,                            # optional — bind to an existing Session
+    model="meta-llama/Llama-3-70B-Instruct",    # default model for the Session
+    expires_in_hours=24,
+)
+```
+
+`KovaSession` implements every method of the OpenAI Agents SDK `Session` protocol:
+
+| Method | Backed by |
+|---|---|
+| `get_items()` | `client.sessions.get(..., expand=["turns"])` — reads accumulated turn history. |
+| `add_items(items)` | Appends `SessionTurn` rows with `step_id` and `model_call_id` populated from the active execution context. |
+| `pop_item()` | Marks the most recent turn as removed; never deletes (audit preservation). |
+| `clear_session()` | Archives the Session (`state` → `ARCHIVED`). |
+
+Pass `session=KovaSession(...)` to `Runner.run(...)` and the framework's conversation history transparently lives in KovaServe.
+
+## `KovaRunHooks`
+
+```python
+from kovaserve.adapters.openai_agents import KovaRunHooks
+
+hooks = KovaRunHooks(
+    client=ks_client,
+    project_id="proj_review_bot",
+    default_budget={"cost_limit_cents": "500.0000", "token_limit": 100_000},
+)
+
+agent = Agent(name="reviewer", instructions="...", hooks=hooks)
+```
+
+Lifecycle:
+
+| OpenAI Agents SDK hook | KovaServe action |
+|---|---|
+| `on_agent_start(ctx, agent)` | Opens a Run; binds it to the active `KovaSession` if present. Sets the ContextVar. |
+| `on_tool_start(ctx, agent, tool)` | Records a `TOOL_EXECUTE` Step with `parent_step_id` from the step stack. |
+| `on_tool_end(ctx, agent, tool, result)` | Transitions the Step to `SUCCEEDED`. |
+| `on_handoff(ctx, agent, source)` | Records a `BRANCH` Step capturing the handoff lineage. |
+| `on_agent_end(ctx, agent, output)` | Transitions the Run to `COMPLETED`. Clears the ContextVar. |
+
+`KovaRunHooks` is a direct `RunHooks` subclass internally. You can extend it with your own `on_x` methods — those compose with the adapter's lifecycle handling rather than replacing it.
+
+## `KovaTracingExporter`
+
+```python
+from openai_agents.tracing import set_tracing_export_processor
+from kovaserve.adapters.openai_agents import KovaTracingExporter
+
+set_tracing_export_processor(KovaTracingExporter(client=ks_client))
+```
+
+The OpenAI Agents SDK ships a tracing system that emits structured spans for every agent run, tool call, and handoff. `KovaTracingExporter` is a custom processor that forwards those spans into KovaServe's [event stream](/docs/sdk/control/events) under the `runtime` family. SDK-native traces and KovaServe events live on one timeline.
+
+This is the right path for teams that want one observability surface across both frameworks. For teams that already export OpenAI Agents traces to Datadog / Langfuse / etc., skip the KovaTracingExporter — the SDK-native events remain available without it.
+
+## Mixing with decorators
+
+`@kova.run` inside a tool function sees the Run that `KovaRunHooks` opened and binds to it:
+
+```python
+@agent.tool
+@kova.tool(name="search_repo")
+async def search_repo(query: str) -> list[str]:
+    # KovaRunHooks already opened a Run + TOOL_EXECUTE Step.
+    # @kova.tool sees the active Step via the contextvar — no-op or noting nested calls.
+    results = await my_search(query)
+    return results
+```
+
+The decorator detects the active Step in the contextvar and binds to it rather than creating a sibling. This is the same composition rule that applies to [LangGraph](/docs/sdk/adapters/langgraph) and [Temporal](/docs/sdk/adapters/temporal).
+
+## Streaming and tool-call dispatch
+
+The OpenAI Agents SDK supports streaming chat completions and parallel tool dispatch. The adapter handles both transparently:
+
+- A streaming agent run keeps the Run in `RUNNING` until the stream is consumed to completion.
+- Parallel tool dispatch creates sibling `TOOL_EXECUTE` Steps under one `TOOL_PLAN` parent. The step stack maintains the tree.
+
+No application code needed for either case — the adapter's lifecycle handling covers them.
+
+## Configuration
+
+| Kwarg | Default | Meaning |
+|---|---|---|
+| `client` | required | The `KovaControlClient` to use. |
+| `project_id` | required | The Project all Runs belong to. |
+| `default_budget` | `None` | Inline Budget config applied on Run creation. |
+| `default_context_budget` | `None` | Inline ContextBudget config applied on Run creation. |
+| `step_type_for_tool` | `"TOOL_EXECUTE"` | The default step_type for tool calls. |
+| `step_type_for_handoff` | `"BRANCH"` | The default step_type for handoffs. |
+
+## Async
+
+The OpenAI Agents SDK is async-first. The adapter ships only the async implementation:
+
+```python
+async def main() -> None:
+    agent = Agent(name="reviewer", ..., hooks=KovaRunHooks(client=ks_client, project_id="..."))
+    session = KovaSession(client=ks_client, project_id="...")
+    result = await Runner.run(agent, "Review PR #42", session=session)
+
+asyncio.run(main())
+```
+
+## Where to go next
+
+<Cards>
+  <Card title="Adapters overview" href="/docs/sdk/adapters" description="Which adapter to pick." />
+  <Card title="Hooks" href="/docs/sdk/hooks" description="`KovaRunHooks` is a direct `RunHooks` subclass." />
+  <Card title="Sessions" href="/docs/sdk/control/sessions" description="What `KovaSession` reads and writes." />
+  <Card title="Events" href="/docs/sdk/control/events" description="Where `KovaTracingExporter` forwards spans." />
+</Cards>
+
+## See also
+
+- [BYO runtime mode](/docs/concepts/deployment/byo-runtime) — the broader pattern OpenAI Agents adapts to
+- [Decorators composition](/docs/sdk/decorators/composition) — how decorators bind to adapter-opened Runs

@@ -1,0 +1,120 @@
+---
+title: Retries and idempotency
+description: Auto-retry with jittered exponential backoff on transient failures. Auto-generated `Idempotency-Key` on POSTs, reused across retries. `Retry-After` honoured.
+---
+
+The SDK retries transient failures automatically. Every POST gets an auto-generated `Idempotency-Key` reused across retries so a network blip mid-flight doesn't produce a duplicate resource.
+
+## What is retried
+
+| Class | Retried? | Notes |
+|---|---|---|
+| `KovaConnectionError` | yes | Connection refused, DNS failure, EOF before response. |
+| `KovaTimeoutError` | yes | Read / write / pool timeout. |
+| `408 Request Timeout` | yes | |
+| `409 Conflict` with `error_code=idempotency_conflict` | yes | Server-side stale processing; retry resolves it. |
+| `409 Conflict` with `error_code=illegal_state_transition` | **no** | Permanent invalidity. |
+| `409 Conflict` with `error_code=budget_already_exists` | **no** | Permanent invalidity. |
+| `429 Too Many Requests` | yes | Honours `Retry-After` / `retry-after-ms` / HTTP-date. |
+| `5xx` | yes | Server errors. |
+| `400 / 401 / 403 / 404 / 410 / 422` | **no** | Client errors — request is permanently invalid. |
+
+GETs and DELETEs are retried for transient failures only. POSTs are retried with the idempotency contract described below.
+
+## Backoff
+
+Jittered exponential backoff. The base formula is `min(0.5 * 2^n, 8.0)` seconds with 75–100% jitter — the first retry is 0.5–1.0 s away, the second 1.0–2.0 s, the third 2.0–4.0 s, capped at 8 s.
+
+`Retry-After` headers (in seconds, as an HTTP date, or as `retry-after-ms` in milliseconds) override the backoff schedule when present. The SDK uses the larger of the server's recommendation and its own backoff floor — a server suggesting 30 s gets 30 s, not 2 s.
+
+## Configuration
+
+```python
+client = KovaControlClient(
+    max_retries=2,                            # default — 2 retries (3 attempts total)
+)
+```
+
+`max_retries=0` disables retries entirely. The default `max_retries=2` is the sweet spot for transient failures without burning too much time on permanent issues. Set higher for batch / background workflows; lower for interactive paths where you'd rather surface the failure to a human quickly.
+
+Per-call override:
+
+```python
+run = client.runs.create(
+    project_id="...",
+    model="...",
+    max_retries=5,        # this one call gets 5 retries
+)
+```
+
+## Tracking
+
+Every request carries an `X-Kova-Retry-Count` header on egress so the server can see how many times the SDK is retrying. Mirrors OpenAI's `x-stainless-retry-count` shape, namespaced to KovaServe. Use it in server-side logs and dashboards to spot pathological retry storms.
+
+## Idempotency
+
+Every POST gets an auto-generated `Idempotency-Key` (UUIDv4) reused across retries. The server stores the key for 24 h and returns the original response on duplicate keys:
+
+```python
+# Auto-generated: this and any retries share one key
+run = client.runs.create(project_id="proj_review_bot", model="...")
+
+# Override: supply your own
+run = client.runs.create(
+    project_id="proj_review_bot",
+    model="...",
+    idempotency_key="lg-task-9821",
+)
+```
+
+User-supplied keys are the right path when an upstream system already has a stable identifier — a LangGraph thread ID, a Temporal Workflow run ID, a request ID from your gateway. The natural value for a Run is the `external_run_id`; for a Budget, a stable label derived from the user request; for a Checkpoint, a stable trigger label plus a sequence number.
+
+## Idempotency conflict
+
+Reusing the same key with **different parameters** returns `409 idempotency_conflict`:
+
+```python
+client.runs.create(
+    project_id="proj_review_bot",
+    model="meta-llama/Llama-3-70B-Instruct",
+    idempotency_key="lg-task-9821",
+)
+
+# Same key, different model — fails
+try:
+    client.runs.create(
+        project_id="proj_review_bot",
+        model="meta-llama/Llama-3-8B",
+        idempotency_key="lg-task-9821",
+    )
+except IdempotencyConflictError as e:
+    # the key was previously used with different params
+    ...
+```
+
+The 409 with `idempotency_conflict` is **retryable** — it indicates server-side stale processing of an in-flight request, not a permanent disagreement. Other 409 error codes (`illegal_state_transition`, `budget_already_exists`) are permanent and not retried.
+
+## GET and DELETE
+
+GETs and DELETEs don't get an idempotency key (Stripe convention). GETs are inherently idempotent; DELETEs against a `404`-resolving endpoint are also idempotent (re-deleting a deleted resource returns the same `404` either way). Retries apply for transient network failures only — there's no key to coordinate against.
+
+## Async parallel
+
+Retry and idempotency behaviour is identical on `KovaControlClient` and `AsyncKovaControlClient`. Async retries use `asyncio.sleep` on the calling task; the backoff floor and jitter formula match the sync path.
+
+## Streaming responses
+
+Streaming chat completions and event tails follow a different retry path — see [streaming](/docs/sdk/streaming) for the `Last-Event-ID` reconnection contract. The `max_retries` config applies to the **initial connection**; in-flight stream reconnections use the WHATWG SSE rules independently.
+
+## Where to go next
+
+<Cards>
+  <Card title="Errors" href="/docs/sdk/errors" description="Which exceptions trigger retries and which don't." />
+  <Card title="Configuration" href="/docs/sdk/configuration" description="`KOVASERVE_MAX_RETRIES` env var." />
+  <Card title="Idempotency (API)" href="/docs/api/using-the-api/idempotency" description="The wire-side contract the SDK implements." />
+  <Card title="Streaming" href="/docs/sdk/streaming" description="The separate reconnection contract for streams." />
+</Cards>
+
+## See also
+
+- [`X-Kova-Retry-Count` header](/docs/api/using-the-api/cost-headers) — visible in server-side logs

@@ -1,0 +1,166 @@
+---
+title: Pydantic AI adapter
+description: `KovaDeps` typed dependency injection through Pydantic AI's `RunContext[T]` mechanism — the cleanest typed integration in the SDK. No middleware, no wrappers, no monkey-patching.
+---
+
+The **Pydantic AI adapter** integrates through Pydantic AI's native typed-dependency-injection mechanism — `RunContext[T]`. There is no middleware, no decorator stack, no monkey-patching. Pydantic AI calls every tool function with a `RunContext[KovaDeps]`; you read the KovaServe state off the deps directly. Install with `pip install "kovaserve[pydantic-ai]"`.
+
+```python
+from pydantic_ai import Agent, RunContext
+from kovaserve.adapters.pydantic_ai import KovaDeps, kova_agent
+
+agent: Agent[KovaDeps, str] = kova_agent(
+    model="meta-llama/Llama-3-70B-Instruct",
+    project_id="proj_review_bot",
+    system_prompt="You are a code-review agent.",
+)
+
+@agent.tool
+async def fetch_pr(ctx: RunContext[KovaDeps], url: str) -> str:
+    # ctx.deps.client → KovaControlClient
+    # ctx.deps.run_id → active Run ID
+    # ctx.deps.session_id → bound Session ID (if any)
+    pr = await github.get_pr(url)
+    return pr.diff
+
+result = await agent.run(
+    "Review https://github.com/foo/bar/pull/42",
+    deps=KovaDeps.create(project_id="proj_review_bot"),
+)
+```
+
+## `KovaDeps` shape
+
+```python
+class KovaDeps(BaseModel):
+    client: KovaControlClient            # the active KovaServe control-plane client
+    run_id: str                          # the active Run
+    session_id: str | None               # the active Session, if any
+    budget_id: str | None                # the active Budget, if any
+
+    # convenience accessors
+    @property
+    def run(self) -> Run: ...
+    @property
+    def session(self) -> Session | None: ...
+    @property
+    def budget(self) -> Budget | None: ...
+```
+
+`KovaDeps` is a frozen dataclass. Construct it via `KovaDeps.create(project_id=...)` (the factory that opens the Run + Session) or by binding to existing IDs:
+
+```python
+# New Run; new Session if not supplied
+deps = KovaDeps.create(
+    project_id="proj_review_bot",
+    model="meta-llama/Llama-3-70B-Instruct",
+    session_id=None,                      # let the factory open one
+    budget={"cost_limit_cents": "500.0000", "token_limit": 100_000},
+)
+
+# Bind to existing
+deps = KovaDeps.bind(
+    run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    client=ks_client,
+)
+```
+
+## `kova_agent` — the typed agent factory
+
+```python
+from kovaserve.adapters.pydantic_ai import kova_agent
+
+agent = kova_agent(
+    model="meta-llama/Llama-3-70B-Instruct",       # required — pydantic_ai model
+    project_id="proj_review_bot",                   # required — KovaServe Project
+    system_prompt="You are a code-review agent.",   # optional
+    result_type=str,                                # optional — pydantic_ai result type
+    retries=2,                                      # pydantic_ai retry count
+    default_budget={"cost_limit_cents": "500.0000"},
+    default_context_budget={"active_token_limit": 8000},
+    client=ks_client,                               # override default client
+)
+```
+
+`kova_agent` is a thin wrapper around `pydantic_ai.Agent[KovaDeps, ResultT]` that pre-configures the model client to talk to KovaServe and ensures `KovaDeps` is the dep type. You can also use `pydantic_ai.Agent` directly with `KovaDeps` if you prefer — the wrapper is sugar:
+
+```python
+from pydantic_ai import Agent
+
+agent: Agent[KovaDeps, str] = Agent(
+    model=KovaModel(),                              # the SDK ships KovaModel for pydantic_ai
+    deps_type=KovaDeps,
+    system_prompt="...",
+)
+```
+
+## Tool functions read deps directly
+
+Pydantic AI passes `RunContext[KovaDeps]` as the first argument to every tool function. Tools read the active Run, Session, and Budget through `ctx.deps`:
+
+```python
+@agent.tool
+async def search_repo(ctx: RunContext[KovaDeps], query: str) -> list[str]:
+    # Run is active; the model call inside this tool inherits run_id automatically
+    results = await my_search(query)
+
+    # Record a Step explicitly if needed
+    step = await ctx.deps.client.runs.steps_create(
+        run_id=ctx.deps.run_id,
+        step_type="TOOL_EXECUTE",
+        metadata={"tool": "search_repo", "query": query},
+    )
+    return results
+```
+
+## Implicit metadata propagation
+
+Inside a tool function, the model client (`pydantic_ai`'s underlying inference call) inherits the Run ID from the deps automatically. The mechanism is the same `httpx.event_hooks` patching the decorators use — `KovaDeps.create(...)` installs the hook on the underlying HTTP transport for the duration of the agent run.
+
+This means a Pydantic AI agent does not need to thread `extra_body={"kovaserve": ...}` through every model call. The deps carry the state; the HTTP layer reads the deps; the metadata flows.
+
+## Why this is the cleanest typed integration
+
+Pydantic AI's `RunContext[T]` is the typed-dependency-injection mechanism the framework was designed around. The adapter doesn't add a middleware layer or a wrapper class — it just provides the `T` for `RunContext[T]`. Every type annotation is honest: `RunContext[KovaDeps]` carries exactly the deps the function sees, no hidden state.
+
+This shape works because Pydantic AI made one early design decision: deps are first-class, not framework-internal. Other adapters need to weave through middleware or hooks; Pydantic AI lets the SDK declare a typed deps shape and step out.
+
+## Composing with decorators
+
+`@kova.run` decorators *can* wrap a Pydantic AI agent invocation, but the common pattern is to skip them and let `KovaDeps.create` open the Run:
+
+```python
+# Idiomatic — KovaDeps.create opens the Run; no decorator
+async def review_pr(url: str) -> str:
+    deps = KovaDeps.create(project_id="proj_review_bot")
+    result = await agent.run(f"Review {url}", deps=deps)
+    deps.close()                          # marks the Run COMPLETED
+    return result.data
+
+# Alternative — @kova.run opens the Run; KovaDeps.bind picks it up
+@kova.run(project="proj_review_bot", model="meta-llama/Llama-3-70B-Instruct")
+async def review_pr(url: str) -> str:
+    deps = KovaDeps.bind(run_id=kova.current_run().id, client=ks_client)
+    result = await agent.run(f"Review {url}", deps=deps)
+    return result.data
+```
+
+Both work. Prefer `KovaDeps.create` for one-shot agent runs; prefer the decorator for cases where the agent run is a sub-step inside a larger workflow.
+
+## Async
+
+Pydantic AI is async-first. Every snippet in this page uses `async def` and `await`. The adapter ships only an async implementation — there is no sync Pydantic AI variant, matching the framework's design.
+
+## Where to go next
+
+<Cards>
+  <Card title="Adapters overview" href="/docs/sdk/adapters" description="Comparing the four adapters." />
+  <Card title="`@kova.run`" href="/docs/sdk/decorators/run" description="The decorator that opens the Run if you don't want to use `KovaDeps.create`." />
+  <Card title="`KovaDeps` reference" href="/docs/sdk/adapters/pydantic-ai" description="Full deps shape and factory methods." />
+  <Card title="BYO runtime mode" href="/docs/concepts/deployment/byo-runtime" description="The pattern the adapter implements." />
+</Cards>
+
+## See also
+
+- [Hooks](/docs/sdk/hooks) — `RunHooks` for cases where deps aren't enough
+- [LangGraph adapter](/docs/sdk/adapters/langgraph) — the middleware-based alternative

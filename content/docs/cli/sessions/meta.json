@@ -1,0 +1,8 @@
+{
+  "title": "sessions",
+  "pages": [
+    "list",
+    "get",
+    "archive"
+  ]
+}

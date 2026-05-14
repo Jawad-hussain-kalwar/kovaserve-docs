@@ -1,0 +1,60 @@
+---
+title: Auto-generated reference
+description: The `pdoc`-rendered API dump — every module, class, and function in `kovaserve` with inline annotations and docstrings. Generated at build time; the hand-authored pages above are the canonical reference.
+---
+
+The hand-authored pages above are the **canonical** reference — they describe the SDK as you should use it, with the conceptual model intact. The auto-generated dump below is the **machine** view: every public name in the `kovaserve` package, every signature, every docstring, rendered straight from the code by [`pdoc`](https://pdoc.dev/).
+
+Use this page when you need to find something not covered above:
+
+- An internal helper exported for power users that hasn't yet earned a hand-authored page.
+- The full method signature with every typed kwarg.
+- Whether a specific function is sync, async, or both.
+
+When this page disagrees with a hand-authored page, the hand-authored page wins — auto-generated content reflects code-level reality, not necessarily intent. File an issue when you spot the disagreement; either the docstring is missing or the hand-authored page needs an update.
+
+## Build mechanics
+
+The dump is generated at docs build time from the installed `kovaserve` wheel. The build pipeline:
+
+1. Installs the matching SDK version into a clean virtualenv.
+2. Runs `pdoc --output-dir <build>/auto kovaserve` against the install.
+3. Renders the result as a sub-tree under `/docs/sdk/reference/auto-generated/`.
+
+The dump is **versioned with the docs site**, not with the SDK itself. The page reflects the SDK version that was installed when the docs were built; an SDK upgrade in a user's environment doesn't change what this page shows.
+
+## What's included
+
+| Included | Why |
+|---|---|
+| Every public name in `kovaserve/__init__.py` | The package's intended API surface. |
+| Every Pydantic model under `kovaserve.types.*` | Type model reference. |
+| Every framework adapter under `kovaserve.adapters.*` | Adapter API surface. |
+| Every context primitive under `kovaserve.context.*` | Primitive class signatures. |
+| Every decorator | Function signatures and docstrings. |
+| Every exception class under `kovaserve.errors.*` | The full hierarchy. |
+
+## What's excluded
+
+| Excluded | Why |
+|---|---|
+| Underscore-prefixed modules (`kovaserve._*`) | Implementation detail; not public API. |
+| Vendored dependencies | Belongs in the vendor's docs. |
+| Test helpers (`kovaserve._tests`) | Internal only. |
+| Internal `_base_client` types | Implementation of `KovaControlClient`; the public surface is on the namespaces. |
+
+## Navigating
+
+The dump is heaviest at the top — `kovaserve` itself is a re-export of every public name. Skip to the specific module that interests you:
+
+- `kovaserve.types` — every Pydantic response model and `TypedDict` request shape.
+- `kovaserve.errors` — every exception class.
+- `kovaserve.adapters.langgraph` (etc.) — adapter classes.
+- `kovaserve.context` — `ContextBuilder`, `ArtifactClient`, the rest.
+- `kovaserve.cli` — Typer command definitions (rarely needed; the [CLI reference](/docs/cli) is the right path).
+
+## See also
+
+- [Type model](/docs/sdk/type-model) — the conceptual overview of what's in `kovaserve.types`
+- [Errors reference](/docs/sdk/reference/errors) — the hand-authored exception class table
+- [SDK overview](/docs/sdk) — start here for the conceptual map

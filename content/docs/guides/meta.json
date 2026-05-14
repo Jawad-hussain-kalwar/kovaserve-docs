@@ -1,0 +1,12 @@
+{
+  "title": "Guides",
+  "pages": [
+    "migration",
+    "authoring-runs",
+    "context",
+    "policy",
+    "observability",
+    "tenancy",
+    "deployment"
+  ]
+}

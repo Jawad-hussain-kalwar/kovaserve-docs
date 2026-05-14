@@ -1,0 +1,173 @@
+---
+title: Sync vs async
+description: The `kovaserve` SDK ships parallel sync and async clients with identical method names. Pick one and stay with it — they do not bridge implicitly.
+---
+
+The SDK exposes every client as a sibling pair: `OpenAI` and `AsyncOpenAI`, `KovaControlClient` and `AsyncKovaControlClient`. Same method names, same return shapes, same error hierarchy, same retry and idempotency behaviour. Only the HTTP transport differs.
+
+```python
+# sync
+from kovaserve import KovaControlClient
+sync_client = KovaControlClient()
+run = sync_client.runs.get("01J8X9Y2Z3K4M5N6P7Q8R9S0T1")
+
+# async
+from kovaserve import AsyncKovaControlClient
+async_client = AsyncKovaControlClient()
+run = await async_client.runs.get("01J8X9Y2Z3K4M5N6P7Q8R9S0T1")
+```
+
+## Why parallel classes
+
+Two patterns from the broader ecosystem were considered and rejected:
+
+| Pattern | Example | Why we did not adopt it |
+|---|---|---|
+| **`.aio` accessor** — one client, two transports | `client.aio.runs.get(...)` (google-genai shape) | Forces a single client object to hold both sync and async transports, doubling the resource cost at construction time and leaking the unused half through `__dir__`, `pickle`, and IDE autocomplete. |
+| **`_async` method suffix** — sync and async methods on the same class | `client.runs.get(...)` vs `client.runs.get_async(...)` (Stripe-shape) | Doubles the method count on a surface that already has 50+ resource methods. Documentation, type stubs, autocomplete, and grep all show double the noise without giving the caller new capability. |
+| **Parallel classes** — `Client` and `AsyncClient` | `KovaControlClient(...)` / `AsyncKovaControlClient(...)` (OpenAI / Anthropic shape) | Each client holds exactly one transport. Imports make the choice explicit. The two classes share URL construction, retries, idempotency, error mapping, and pagination — only the HTTP call differs. |
+
+The parallel-class shape is also the pattern every Python developer who has used the OpenAI or Anthropic SDK already recognises. The SDK matches that mental model on purpose.
+
+## What is shared, what differs
+
+Both clients sit on the same `_base_client` foundation. The shared surface includes:
+
+- URL construction and query / header / body serialisation
+- Pydantic v2 response parsing
+- The `KovaError` exception hierarchy and status-code to exception mapping
+- Automatic `Idempotency-Key` generation on POSTs
+- Jittered exponential-backoff retries (`max_retries=2` default, honours `Retry-After`)
+- Cursor-based pagination iterators
+- `expand=` parameter handling
+- Idempotency-conflict detection
+- `with_raw_response`, `with_streaming_response`, `extra_body`, `extra_headers`, `extra_query`
+
+What differs is exactly one thing: the underlying HTTP call uses `httpx.Client.send(...)` on the sync side and `await httpx.AsyncClient.send(...)` on the async side. Connection pools are not shared between the two clients — a sync client and an async client each open their own pool.
+
+## Picking one
+
+The rule is: **pick the transport that matches your program's existing concurrency model.** Do not mix.
+
+- A sync program (Flask, Django request handler without `async def`, a CLI script, a Jupyter cell) uses `KovaControlClient`.
+- An async program (FastAPI, `asyncio.run(...)`, a LangGraph node defined with `async def`, an `aiohttp` worker) uses `AsyncKovaControlClient`.
+
+If you maintain a library that may be imported into either kind of program, expose both transports through your own API and let the caller decide. Do not pick one and wrap it in the other.
+
+## The `nest_asyncio` policy
+
+`nest_asyncio` is a popular library that monkey-patches CPython's event loop to permit nested `asyncio.run(...)` calls — usually to call `await` from a Jupyter cell or to embed `await` inside an otherwise-sync codebase. Python 3.14 broke `nest_asyncio` outright.
+
+The SDK does not depend on `nest_asyncio`, does not detect-and-accommodate it, and does not silently work around an active monkey-patch. At import time the SDK checks whether the running event loop has been monkey-patched and raises a clear error if it has:
+
+```text
+kovaserve.RuntimeError:
+  nest_asyncio monkey-patch detected on the active event loop.
+  This pattern is unsupported. Use AsyncKovaControlClient with native
+  async, or switch to KovaControlClient.
+```
+
+The supported patterns for "I want to call an async API from a sync context" are:
+
+| You are in | Use |
+|---|---|
+| Plain sync Python | `KovaControlClient` |
+| Jupyter on Python 3.14+ | Top-level `await` with `AsyncKovaControlClient` |
+| Jupyter on Python 3.11–3.13 | `await` inside an `asyncio.run(...)` block, or `KovaControlClient` |
+| FastAPI / aiohttp / a LangGraph `async def` node | `AsyncKovaControlClient` |
+| A library that needs to support both | Expose both in your own API; do not bridge inside |
+
+## Side-by-side
+
+The two clients are method-for-method identical. The same recipe shows the difference:
+
+```python
+# sync
+from kovaserve import KovaControlClient
+
+client = KovaControlClient()
+run = client.runs.create(
+    project_id="proj_review_bot",
+    model="meta-llama/Llama-3-70B-Instruct",
+    expand=["steps.model_calls.context_manifest"],
+)
+for step in client.runs.steps(run.id):
+    print(step.ordinal, step.step_type, step.status)
+client.runs.cancel(run.id)
+```
+
+```python
+# async
+import asyncio
+from kovaserve import AsyncKovaControlClient
+
+async def main() -> None:
+    client = AsyncKovaControlClient()
+    run = await client.runs.create(
+        project_id="proj_review_bot",
+        model="meta-llama/Llama-3-70B-Instruct",
+        expand=["steps.model_calls.context_manifest"],
+    )
+    async for step in client.runs.steps(run.id):
+        print(step.ordinal, step.step_type, step.status)
+    await client.runs.cancel(run.id)
+
+asyncio.run(main())
+```
+
+Notice that pagination is `for ... in` on the sync side and `async for ... in` on the async side. Streaming responses follow the same rule — `Stream[T]` for sync, `AsyncStream[T]` for async. See [streaming](/docs/sdk/streaming).
+
+## Construction cost is real
+
+Each client owns its own `httpx` connection pool. Sized for high-RPM agent workloads (200 max connections, 50 keep-alive by default), the pool is a real resource. Construct each client once and reuse it; do not construct a new client per request.
+
+```python
+# good — module-level client, reused
+_client = KovaControlClient()
+
+def handle_request(...):
+    run = _client.runs.create(...)
+    ...
+
+# bad — new client per call (opens and closes pools repeatedly)
+def handle_request(...):
+    client = KovaControlClient()      # don't do this
+    run = client.runs.create(...)
+    ...
+```
+
+The async client follows the same rule — construct it once inside `asyncio.run(...)` or your framework's startup hook, and reuse it for the lifetime of the event loop.
+
+## Closing a client
+
+Both clients implement context-manager protocols and explicit `close()` methods. The connection pool is released when the client is closed; the SDK does not rely on garbage collection to clean up sockets.
+
+```python
+# context manager (recommended for short-lived scripts)
+with KovaControlClient() as client:
+    run = client.runs.create(...)
+
+# explicit close (recommended for long-lived processes at shutdown)
+client = KovaControlClient()
+try:
+    ...
+finally:
+    client.close()
+```
+
+The async equivalents are `async with AsyncKovaControlClient() as client:` and `await client.aclose()`.
+
+## Where to go next
+
+<Cards>
+  <Card title="OpenAI compatibility" href="/docs/sdk/inference/openai-compat" description="The drop-in re-export — also sync / async parallel." />
+  <Card title="KovaControlClient" href="/docs/sdk/control" description="Resource namespaces and the method surface." />
+  <Card title="Streaming" href="/docs/sdk/streaming" description="`Stream[T]` and `AsyncStream[T]` parallels." />
+  <Card title="Pagination" href="/docs/sdk/pagination" description="Cursor iterators on both transports." />
+</Cards>
+
+## See also
+
+- [Configuration](/docs/sdk/configuration) — connection pool sizing and timeouts
+- [Retries and idempotency](/docs/sdk/retries-and-idempotency) — identical behaviour on sync and async
+- [Errors](/docs/sdk/errors) — same exception hierarchy on both transports

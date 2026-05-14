@@ -1,0 +1,128 @@
+---
+title: "`expand=` parameter"
+description: Stripe-style graph hydration. Collapse multiple round trips into one by expanding nested resources inline — `expand=["steps.model_calls.context_manifest"]`.
+---
+
+The SDK ships **`expand=`** on every read endpoint that returns a resource with related entities. Pass a list of dotted paths; the server hydrates the named subresources inline and returns one document. This collapses four round trips into one for a typical Run + Steps + ModelCalls + ContextManifest query.
+
+```python
+run = client.runs.get(
+    "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    expand=["steps.model_calls.context_manifest"],
+)
+
+for step in run.steps:
+    for call in step.model_calls:
+        print(call.context_manifest.stable_context_id, call.cost_cents)
+```
+
+Without `expand`, each level is a separate API call. With `expand`, the server walks the graph once and returns the whole thing. P99 latency for the four-level hydrate is bounded at 500 ms on the server side.
+
+## Path syntax
+
+Paths use **dot-notation** to traverse nested resources. Each segment is the field name on the parent object:
+
+| Path | What hydrates |
+|---|---|
+| `steps` | `run.steps` is populated. |
+| `steps.model_calls` | Each `run.steps[].model_calls` is populated. |
+| `steps.model_calls.context_manifest` | Each `run.steps[].model_calls[].context_manifest` is populated. |
+| `steps.model_calls.context_manifest.segments` | The four-level deep case. |
+| `session` | The Run's `session` is populated (when bound). |
+| `budget` | The Run's `budget` is populated (when attached). |
+| `context_budget` | The Run's `context_budget` is populated. |
+| `policy_scope` | The Run's `policy_scope` is populated. |
+
+The maximum depth is four levels. Paths beyond four return `400 invalid_request`.
+
+## Multiple paths
+
+`expand=` accepts a list. Each path is independent — all of them hydrate:
+
+```python
+run = client.runs.get(
+    "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    expand=[
+        "steps.model_calls",            # Steps + their ModelCalls
+        "session",                       # Plus the Session
+        "budget",                        # Plus the Budget
+    ],
+)
+```
+
+## What can be expanded where
+
+Each resource has an allow-list of valid expand paths. Invalid paths return `400 invalid_request` with `details.allowed` listing what is acceptable:
+
+```python
+try:
+    run = client.runs.get("01J...", expand=["steps.unknown_field"])
+except BadRequestError as e:
+    print(e.details["allowed"])         # ["steps", "steps.model_calls", "steps.model_calls.context_manifest", ...]
+```
+
+The server publishes the allow-list at `/v1/ks/openapi-info` for tooling integration; the SDK validates against a cached copy at decoration time when possible.
+
+## Server-side cycle detection
+
+Paths that would produce cycles are rejected on the server. The four-level cap and the allow-list combined prevent every cycle the resource graph can produce, but the server still validates explicitly — operator-level audit configurations or future graph extensions cannot accidentally create a quadratic blowup.
+
+## Combining with pagination
+
+`expand=` works on both `get` and `list`. On `list`, the expansion applies to every item in the page:
+
+```python
+for run in client.runs.list(
+    project_id="proj_review_bot",
+    expand=["steps.model_calls"],
+):
+    print(len(run.steps), sum(len(s.model_calls) for s in run.steps))
+```
+
+The per-page latency budget rises with expansion depth — a fully-expanded list of 50 Runs at depth-4 is slower per page than a flat list of 50 Runs. The SDK does not change the per-page cap based on expansion; tune `limit=` down when expanding deeply if latency matters.
+
+## What you read with vs without `expand`
+
+| Field | Without `expand` | With `expand=["steps"]` |
+|---|---|---|
+| `run.id` | populated | populated |
+| `run.status` | populated | populated |
+| `run.step_count` | populated | populated |
+| `run.steps` | `None` | populated `list[Step]` |
+| `run.steps[].model_calls` | — | `None` (need `steps.model_calls`) |
+
+The pattern is: fields that are always cheap to compute (counts, IDs, timestamps) are always populated; collection fields are `None` until you ask for them by name.
+
+## Use it when the call site needs the whole graph
+
+`expand=` is the right tool when one call site needs deep traversal. The wrong tool when:
+
+- You're listing for filtering / counting — `run.step_count` is already there.
+- You need only one part of the graph — fetch that part explicitly via its own endpoint.
+- You're iterating across many Runs and only need one or two nested fields per Run — paginating fully expanded is more expensive than several targeted calls.
+
+Used right, `expand=` is the difference between "Run detail page renders in 800 ms" and "Run detail page renders in 200 ms." Used wrong, it ships large responses over the wire for fields the caller will never read.
+
+## Async parallel
+
+`expand=` works identically on `AsyncKovaControlClient`:
+
+```python
+run = await async_client.runs.get(
+    "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    expand=["steps.model_calls.context_manifest"],
+)
+```
+
+## Where to go next
+
+<Cards>
+  <Card title="Runs" href="/docs/sdk/control/runs" description="The most common consumer of `expand=`." />
+  <Card title="Pagination" href="/docs/sdk/pagination" description="How `expand=` composes with cursor iteration." />
+  <Card title="Type model" href="/docs/sdk/type-model" description="How `None`-vs-populated fields flow through Pydantic." />
+</Cards>
+
+## See also
+
+- [API: Runs get](/docs/api/runs/get) — the wire surface
+- [Sessions](/docs/sdk/control/sessions) — `expand=["turns"]` and `expand=["current_run"]`

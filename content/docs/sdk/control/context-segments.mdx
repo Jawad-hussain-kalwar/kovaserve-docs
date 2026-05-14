@@ -1,0 +1,159 @@
+---
+title: Context segments
+description: The `client.context.segments` namespace — retrieve individual ContextSegments, the typed fragments that compose a ContextManifest.
+---
+
+The `client.context.segments` namespace operates on [ContextSegments](/docs/concepts/context/context-segments), the typed fragments of context that compose a [ContextManifest](/docs/sdk/control/context-manifests). A segment carries the smallest unit of context KovaServe reasons about: a single semantic role (tools, system prompt, history-prefix, summary, agent state, tool result) with its own digest, token count, byte count, memory class, and optional artifact reference for offloaded payloads.
+
+```python
+from kovaserve import KovaControlClient
+
+client = KovaControlClient()
+segment = client.context.segments.get("01J8X9Y2Z3K4M5N6P7Q8R9SSG12")
+
+print(segment.context_type)             # e.g. "session_history"
+print(segment.memory_class)             # e.g. "durable"
+print(segment.token_count)
+print(segment.artifact_ref_id)          # null if inline; populated if offloaded
+```
+
+## Methods
+
+| Method | Wire | What it does |
+|---|---|---|
+| [`get`](#get) | `GET /v1/ks/context/segments/{id}` | Fetch a segment with its body (inline) or artifact reference (offloaded). |
+
+Segments are created automatically by the Global Context Manager during manifest assembly. There is no `create`, `update`, or `delete` method — segments are immutable artifacts of manifest assembly. Listing segments belonging to a manifest is done via `expand=["segments"]` on `client.context.manifests.get(...)`.
+
+## The ContextSegment shape
+
+```python
+class ContextSegment(BaseModel):
+    id: str
+    tenant_id: str
+    project_id: str
+
+    # Position in the manifest
+    context_type: ContextType            # persistent_context | system_prompt | session_history |
+                                         # summary | agent_state | tool_result
+
+    # Retention intent
+    memory_class: MemoryClass            # ephemeral | volatile | session | durable | archival
+
+    # Content
+    digest: str                          # sha256 of the canonical-ordered content
+    content_inline: str | None           # the body, when inline
+    artifact_ref_id: str | None          # the ContextArtifact ID, when offloaded
+    preview: str | None                  # short summary text rendered into the manifest in lieu of bytes
+
+    # Accounting
+    token_count: int
+    byte_count: int
+
+    # Retention metadata
+    checkpoint_relevant: bool            # included in Checkpoint snapshots
+    stable_prefix_part: bool             # contributes to stable_prefix_id
+
+    # Scope
+    scope_id: str
+    retention_policy: dict | None        # {expire_with, max_age_hours, ...}
+
+    source: str | None                   # opaque label the runtime set: "ContextBuilder", "RAG-retriever", ...
+    created_at: datetime
+    expires_at: datetime | None
+    metadata: dict
+```
+
+## `get`
+
+```python
+segment = client.context.segments.get("01J8X9Y2Z3K4M5N6P7Q8R9SSG12")
+```
+
+Returns the full segment row. For inline segments (`content_inline` populated, `artifact_ref_id` is `None`) the body is returned in the response. For offloaded segments (`content_inline` is `None`, `artifact_ref_id` populated) only the `preview` is returned inline — resolve the artifact with [`client.context.artifacts.get(...)`](/docs/sdk/control/context-artifacts) when the full payload is needed.
+
+Cross-tenant or cross-Project resolution returns `404 segment_not_found` — segment access follows the same scope rules as the manifest it composes.
+
+## The six `context_type` values
+
+Segments occupy one of six canonical positions. The position is set by the Global Context Manager during assembly and never changes thereafter:
+
+| `context_type` | Tier | What it is |
+|---|---|---|
+| `persistent_context` | 0 (tools) | Tool definitions and long-lived material. Anchors the leftmost cache prefix. |
+| `system_prompt` | 1 | The runtime-supplied system prompt. |
+| `session_history` | 2 | Verbatim turn history back to the most recent compaction point. |
+| `summary` | 3 | Compaction outputs replacing older history. Rendered after the verbatim tail so compaction invalidates only the summary tier. |
+| `agent_state` | volatile tail | The runtime's per-step scratchpad, planner output, or current draft. Recomputed every call. |
+| `tool_result` | volatile tail | The latest tool result that has not yet been summarized into the running context. |
+
+The first four positions (`persistent_context` through `summary`) form the **four-tier prefix** the Cache-Aware Router exploits. The volatile tail (`agent_state`, `tool_result`) is appended after the prefix and is expected to change on every call.
+
+## The five `memory_class` values
+
+`memory_class` is a label — it signals retention intent to the Global Context Manager, the router, and the metering layer. It is **not** a persistence backend; KovaServe does not implement memory stores for runtimes.
+
+| `memory_class` | Retention intent |
+|---|---|
+| `ephemeral` | Lives only for the current ModelCall. Dropped on the next call. |
+| `volatile` | Lives within the current Step. Recomputed each call. |
+| `session` | Lives within the current Session. Survives multiple Runs in the same Session. |
+| `durable` | Lives beyond the Session. Eligible for cross-Session reuse via [handles](/docs/sdk/control/handles). |
+| `archival` | Eligible for cold storage; rehydrated on demand. |
+
+The router prefers `durable` and `session` segments when selecting warm placements. The metering layer attributes storage cost to `durable` and `archival` segments separately from active prompt tokens. The Compaction Lineage Service compacts `session_history` segments first, then `summary`, when the manifest exceeds its ContextBudget thresholds.
+
+## Inline vs offloaded
+
+A segment is either **inline** (body lives on the segment row, `content_inline` populated) or **offloaded** (body lives in object storage as a [ContextArtifact](/docs/sdk/control/context-artifacts), `artifact_ref_id` populated). The choice is made at assembly time based on size, type, and retention metadata:
+
+- Inline is the default for small segments and short-lived content.
+- Offloaded is the default for large tool outputs, file diffs, retrieved documents, and workspace snapshots.
+
+Offloaded segments still contribute their `preview` text to the manifest, so the model sees a bounded reference instead of the full payload. The full payload is fetched only when the runtime explicitly resolves the artifact.
+
+## Querying segments by manifest
+
+The canonical way to list segments for a manifest is `expand=`:
+
+```python
+manifest = client.context.manifests.get(
+    "01J8X9Y2Z3K4M5N6P7Q8R9SCM07",
+    expand=["segments"],
+)
+
+for segment in manifest.segments:
+    print(segment.ordinal, segment.context_type, segment.token_count)
+```
+
+`expand=["segments"]` returns the segment list embedded in the manifest response, ordered by the manifest's canonical position. The standalone `client.context.segments.get(id)` is the right path when you have a segment ID from an event payload, a checkpoint state ref, or a compaction record, and want to inspect that one segment without round-tripping through the manifest.
+
+## Async parallel
+
+```python
+import asyncio
+from kovaserve import AsyncKovaControlClient
+
+async def main() -> None:
+    client = AsyncKovaControlClient()
+    segment = await client.context.segments.get("01J8X9Y2Z3K4M5N6P7Q8R9SSG12")
+    print(segment.context_type, segment.token_count)
+
+asyncio.run(main())
+```
+
+## Where to go next
+
+<Cards>
+  <Card title="Context manifests" href="/docs/sdk/control/context-manifests" description="The manifest a segment belongs to." />
+  <Card title="Context artifacts" href="/docs/sdk/control/context-artifacts" description="The object-storage backing for offloaded segments." />
+  <Card title="ContextBuilder" href="/docs/sdk/primitives/context-builder" description="The SDK-side builder that produces the segments KovaServe assembles." />
+  <Card title="Compaction" href="/docs/sdk/control/compaction" description="How session history segments become summary segments." />
+</Cards>
+
+## See also
+
+- [ContextSegment concept](/docs/concepts/context/context-segments) — what a segment is
+- [Segment types](/docs/concepts/context/segment-types) — the canonical six `context_type` values
+- [Memory class](/docs/concepts/context/segment-types) — the five retention-intent labels
+- [API: Context segments](/docs/api/context/segments/get) — the wire surface

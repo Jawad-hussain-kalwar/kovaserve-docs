@@ -1,0 +1,131 @@
+---
+title: Provisioning keys for end users
+description: Issue Bearer Keys bound to a `(tenant, project, environment)` triple with one of four roles. The raw key is displayed once; rotate or revoke to manage lifecycle.
+---
+
+A Bearer Key is the credential surface. Every API call authenticates with one. Keys bind to a `(tenant, project, environment)` triple — orthogonal to the tenancy hierarchy, not a level in it.
+
+This guide walks through provisioning keys for customers, services, and CI.
+
+## Issue a key
+
+```python
+key = client.tenancy.keys.create(
+    project_id="proj_review_bot",
+    environment_id="env_prod",
+    name="customer-1234",
+    role="inference",                    # admin | write | read | inference
+    rate_limit_rpm=600,
+    rate_limit_tpm=60_000,
+    expires_at="2027-01-01T00:00:00Z",
+)
+
+print(key.raw)        # ks_live_AKIAxxxxxxxxxxxxxxxxxx — displayed exactly once
+```
+
+Or from the CLI:
+
+```bash
+kova keys create \
+    --project-id proj_review_bot \
+    --environment-id env_prod \
+    --name customer-1234 \
+    --role inference \
+    --rate-limit-rpm 600
+```
+
+The raw key is displayed exactly once. Store it now — KovaServe never returns it again.
+
+## Pick the right role
+
+| Role | Can do | Best for |
+|---|---|---|
+| `admin` | All operations, including Tenant updates, Project create/archive, Key issuance. | Provisioning automation. |
+| `write` | Create / update / cancel Runs, Sessions, Budgets, Checkpoints, Handles. | CI runners, orchestrators. |
+| `read` | Read-only across the scope. | Dashboards, monitoring tools. |
+| `inference` | Chat completions and the implicit Runs/Sessions they imply. | End-user application clients. |
+
+The `inference` role is the right key to hand to an application calling the model — it cannot read or modify other resources. `write` is the right key for a CI runner that needs to create Runs explicitly. `admin` should be scoped narrowly.
+
+## Per-key rate limits
+
+Two ceiling fields:
+
+| Field | Meaning |
+|---|---|
+| `rate_limit_rpm` | Requests per minute on this key. |
+| `rate_limit_tpm` | Tokens per minute on this key. |
+
+Hitting either ceiling returns `429 rate_limit_exceeded`. Rate limits are per-key, not per-Project — fan out keys across customers to keep one noisy customer from rate-limiting another.
+
+## Expiry
+
+Set `expires_at` for keys that should auto-revoke:
+
+```python
+key = client.tenancy.keys.create(
+    project_id="proj_review_bot",
+    name="trial-1234",
+    role="inference",
+    expires_at="2026-06-15T00:00:00Z",     # 30 days from now
+)
+```
+
+Expired keys return `401 expired_api_key`. The key row stays for audit; the credential cannot authenticate further requests.
+
+## Rotation
+
+Atomically replace a key with a new one of equal scope:
+
+```python
+new = client.tenancy.keys.rotate(
+    "01J8X9Y2Z3K4M5N6P7Q8R9KY04",
+    grace_period_seconds=300,        # 5-minute overlap for deployment
+)
+print(new.raw)        # store the new raw key
+```
+
+CLI:
+
+```bash
+kova keys rotate 01J... --grace-period-seconds 300
+```
+
+The grace period lets you deploy the new key across environments without downtime. After the period, the old key revokes automatically.
+
+## Revocation
+
+For permanent retirement:
+
+```python
+client.tenancy.keys.revoke("01J8X9Y2Z3K4M5N6P7Q8R9KY04", reason="Customer offboarded")
+```
+
+CLI:
+
+```bash
+kova keys revoke 01J... --reason "Suspected compromise"
+```
+
+After revocation, the next request with the key returns `401 invalid_api_key`. Audit the key's `last_used_at` to detect post-revocation usage attempts:
+
+```bash
+kova keys list --state REVOKED --revoked-after $(date -u -d "-1 day" +%Y-%m-%dT%H:%M:%SZ) --json
+```
+
+## Auditing key usage
+
+Every API call attributes to a key fingerprint. Audit the `last_used_at` and the `last_used_from_ip` (operator scope) on every key:
+
+```bash
+kova keys list --json | jq '.[] | {name, last_used_at, fingerprint}'
+```
+
+## Where to go next
+
+<Cards>
+  <Card title="Managing environments" href="/docs/guides/tenancy/managing-environments" description="Prod / staging / dev key separation." />
+  <Card title="`kova keys`" href="/docs/cli/keys/create" description="CLI reference." />
+  <Card title="Tenancy concept" href="/docs/concepts/tenancy" description="The hierarchy keys bind to." />
+  <Card title="Tenancy SDK" href="/docs/sdk/control/tenancy" description="The full client surface." />
+</Cards>

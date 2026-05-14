@@ -1,0 +1,59 @@
+---
+title: Install the SDK
+description: One `pip install kovaserve` gets you the Python SDK and the `kova` CLI together. Python 3.11+. Adapter extras available for LangGraph, Pydantic AI, OpenAI Agents SDK, and Temporal.
+---
+
+```bash
+pip install kovaserve
+```
+
+That single line installs:
+
+- The `kovaserve` Python package — the SDK for managed agent runs.
+- The `kova` console script — the CLI ships in the same package.
+- All required runtime dependencies.
+
+## Requirements
+
+- **Python 3.11 or newer.**
+- A working `pip` and write access to your Python environment.
+
+## Verify the install
+
+```python
+from kovaserve import KovaControlClient
+client = KovaControlClient(api_key="test")
+print(client.__class__.__name__)        # → KovaControlClient
+```
+
+```bash
+kova --version
+# kova 1.x.y
+```
+
+## Adapter extras
+
+If you use a framework, install the matching extra alongside the core package:
+
+```bash
+pip install "kovaserve[langgraph]"        # LangGraph
+pip install "kovaserve[pydantic-ai]"      # Pydantic AI
+pip install "kovaserve[openai-agents]"    # OpenAI Agents SDK
+pip install "kovaserve[temporal]"         # Temporal
+pip install "kovaserve[all]"              # every adapter
+```
+
+Adapters are optional — the core SDK works with any runtime through the OpenAI re-export and the typed control client.
+
+## Next
+
+<Cards>
+  <Card title="Install the CLI" href="/docs/quickstart/install-cli" description="Same package — confirm the CLI works." />
+  <Card title="Set your API key" href="/docs/quickstart/environment" description="`KOVASERVE_API_KEY` and base URL." />
+  <Card title="Your first managed run" href="/docs/quickstart/first-run" description="Run end-to-end." />
+</Cards>
+
+## See also
+
+- [SDK install](/docs/sdk/install) — full installation reference
+- [Framework adapters](/docs/sdk/adapters) — which adapter for which runtime

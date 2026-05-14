@@ -1,0 +1,113 @@
+---
+title: Reading run timelines
+description: The timeline is the canonical observability surface for a managed run. Steps, model calls, tool calls, checkpoints — all in one ordered tree with cost attribution.
+---
+
+The run timeline shows every step a managed agent took, every model call it issued, every tool it executed, every checkpoint it captured — ordered, tree-shaped, with cost attributed per node. The timeline replaces ad-hoc trace dashboards: one query reconstructs the full execution.
+
+## From the CLI
+
+```bash
+kova runs get 01J8X9Y2Z3K4M5N6P7Q8R9S0T1 --expand steps.model_calls.context_manifest
+```
+
+```
+Run 01J8X9Y2Z3K4M5N6P7Q8R9S0T1  COMPLETED
+Project:  proj_review_bot
+Model:    meta-llama/Llama-3-70B-Instruct
+Budget:   $0.0820 / $5.0000  CLOSED
+─────────────────────────────────────────────────────────────────────
+Steps
+├─ 1  TOOL_EXECUTE   SUCCEEDED  240ms  (fetch_pr)
+├─ 2  TOOL_EXECUTE   SUCCEEDED  120ms  (run_tests)
+├─ 3  THINK          SUCCEEDED  890ms  (plan_review)
+│  └─ ModelCall  meta-llama/Llama-3-70B  cached=940/1247  $0.0420
+├─ 4  CHECKPOINT     SUCCEEDED  140ms  (before_file_write)
+├─ 5  MODEL_CALL     SUCCEEDED  710ms
+│  └─ ModelCall  meta-llama/Llama-3-70B  cached=820/1303  $0.0400
+└─ 6  COMPLETE       SUCCEEDED  20ms
+```
+
+The tree captures the full execution. Cost rolls up from leaves; each step shows its duration; the budget is closed at the end.
+
+## Live tailing
+
+For runs that are still executing:
+
+```bash
+kova runs tail 01J8X9Y2Z3K4M5N6P7Q8R9S0T1
+```
+
+Each event lands as it happens. `Ctrl+C` stops cleanly. The tail terminates automatically when the run reaches a terminal state.
+
+## From the SDK
+
+```python
+run = client.runs.get(
+    "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    expand=["steps.model_calls.context_manifest"],
+)
+
+for step in run.steps:
+    print(f"{step.ordinal:>3}  {step.step_type:<14}  {step.status}")
+    for call in step.model_calls:
+        print(f"      model={call.model_id} cached={call.cached_tokens}/{call.prompt_tokens}  ${call.cost_cents}")
+```
+
+## Four views over one run
+
+The portal renders the same timeline in four shapes:
+
+| View | What it shows |
+|---|---|
+| **Timeline** (default) | Inngest-style waterfall — gray queue + colored execute bars; steps as rows; ms-precision hover; rerun-from-step button. |
+| **Tree** | LangSmith-style nested tree — Run → Steps → ModelCalls; cost / token / latency per node. |
+| **Events** | Raw event log — every `ks.*` event ordered by timestamp; filterable. |
+| **JSON** | Full Run object dump for copy-paste-grep. |
+
+Pick the view by what you're investigating: timeline for latency / queueing analysis; tree for cost attribution; events for forensic replay; JSON for grep-friendly inspection.
+
+## Joining to traces
+
+Every event carries the W3C `trace_id` from the originating request:
+
+```python
+for event in client.runs.timeline("01J..."):
+    print(event.trace_id, event.event_type, event.payload)
+```
+
+Join the `trace_id` to your tracing tool (Datadog / Honeycomb / Tempo / etc.) to see the full distributed trace alongside the KovaServe run.
+
+## Filtering
+
+For a specific class of events:
+
+```bash
+kova runs tail 01J... --streams budget --streams checkpoint
+```
+
+For just the cost-bearing events:
+
+```bash
+kova runs timeline 01J... --json | jq 'select(.event_type == "ks.model_call.completed") | {step: .step_id, cost: .payload.cost_cents}'
+```
+
+## What goes in the timeline, what doesn't
+
+| In the timeline | Not in the timeline |
+|---|---|
+| Every Step (TOOL_EXECUTE, THINK, MODEL_CALL, FILE_WRITE, CHECKPOINT, etc.). | The function bodies that produced the steps — those are application code. |
+| Every ModelCall with real token counts, cost, cache_hit_ratio. | The full prompt / response text — that lives on the ContextManifest. |
+| Every Checkpoint and its state-handle refs. | The KV cache bytes themselves — those live in object storage. |
+| Every Budget transition and admission decision. | The Budget configuration history. |
+
+For full prompt text, fetch the ContextManifest the ModelCall references — `kova context manifests get <id> --expand segments`.
+
+## Where to go next
+
+<Cards>
+  <Card title="OpenTelemetry export" href="/docs/guides/observability/opentelemetry-export" description="Join the timeline to your tracing tool." />
+  <Card title="Consuming events" href="/docs/guides/observability/consuming-events" description="Stream the same events into your analytics pipeline." />
+  <Card title="`kova runs get`" href="/docs/cli/runs/get" description="CLI reference." />
+  <Card title="Runs concept" href="/docs/concepts/run-hierarchy/runs" description="What a Run is." />
+</Cards>

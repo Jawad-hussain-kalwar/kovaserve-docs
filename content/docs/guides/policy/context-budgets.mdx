@@ -1,0 +1,130 @@
+---
+title: Context budgets
+description: Per-request admission control over context size. Six dimensions, six decisions — `ALLOW | WARN | OFFLOAD_REQUIRED | COMPACT_REQUIRED | DEGRADE | HARD_STOP`. Distinct from run-level Budgets.
+---
+
+A [ContextBudget](/docs/concepts/policy/context-budgets) bounds **context size per request**. The admission service evaluates the assembled ContextManifest before GPU dispatch and returns one of six decisions; transformations (offload, compaction, degradation) bring the manifest under threshold before the call proceeds.
+
+ContextBudgets are **distinct** from run-level [Budgets](/docs/guides/policy/per-run-budgets). Run-level Budgets bound cost / tokens / steps / time / tools across all model calls in a Run. ContextBudgets bound the size of any single call's context.
+
+## Create a ContextBudget
+
+```python
+context_budget = client.context.budgets.create(
+    run_id=run.id,
+    active_token_limit=8000,
+    stable_token_limit=5000,
+    volatile_token_limit=3000,
+    tool_result_token_limit=2000,
+    artifact_byte_limit=10 * 1024 * 1024,
+    compaction_required_threshold=0.90,
+    offload_required_threshold=0.80,
+    warning_threshold=0.70,
+    on_exceed="hard_stop",      # or "degrade"
+)
+```
+
+Or from the CLI:
+
+```bash
+kova context budgets create --run-id 01J... \
+    --active-tokens 8000 --artifact-bytes 10485760 \
+    --on-exceed hard_stop
+```
+
+## The six decisions
+
+| Decision | Meaning | Recorded action |
+|---|---|---|
+| `ALLOW` | Under all thresholds. | None. |
+| `WARN` | Crossed the warning threshold. Informational; never blocks. | None. |
+| `OFFLOAD_REQUIRED` | Crossed `offload_required_threshold`. | Eligible large segments transformed to artifact refs; manifest re-admitted. |
+| `COMPACT_REQUIRED` | Crossed `compaction_required_threshold`. | Runtime is asked to compact; manifest re-admitted after report. |
+| `DEGRADE` | Crossed terminal threshold but `on_exceed="degrade"`. | `max_tokens` reduced, optional segments dropped; manifest re-admitted. |
+| `HARD_STOP` | Crossed terminal threshold; `on_exceed="hard_stop"`. | Request rejected with `429 context_budget_exceeded` before GPU dispatch. |
+
+The five non-`ALLOW` non-terminal decisions are **transient advisories** — the runtime applies the transformation and the manifest is re-admitted.
+
+## Preflight admission
+
+Run the admission check before dispatching:
+
+```python
+from kovaserve.context import ContextBuilder, ContextBudgetClient
+
+budgets = ContextBudgetClient(client)
+ctx = ContextBuilder()
+ctx.add_tools([...])
+ctx.add_user_message("Review PR #42")
+
+decision = budgets.admit(run_id=run.id, builder=ctx)
+if decision.decision == "COMPACT_REQUIRED":
+    # Compact before dispatch
+    ...
+```
+
+The preflight never changes state; state transitions happen on real admission during inference.
+
+## React to admission via hooks
+
+```python
+from kovaserve import RunHooks
+from kovaserve.context import CompactionClient
+
+compaction = CompactionClient(client)
+
+class AdmissionReactor(RunHooks):
+    def on_compact_required(self, decision):
+        # Runtime compacts and reports
+        compaction.reduce_and_retry(
+            run_id=decision.run_id,
+            decision=decision,
+            compactor=my_summarizer,
+            model_id="meta-llama/Llama-3-70B-Instruct",
+        )
+
+    def on_offload_required(self, decision):
+        # Eligible large segments are auto-offloaded by the admission service;
+        # use this hook for metrics / alerts
+        offload_counter.inc()
+
+    def on_admission_rejected(self, rejection):
+        if rejection.reason == "context_budget_exceeded":
+            # Capture state for review
+            ...
+```
+
+## On-exceed: `hard_stop` vs `degrade`
+
+| `on_exceed` | When the budget hits a terminal threshold |
+|---|---|
+| `hard_stop` (default) | Reject with `429 context_budget_exceeded` before GPU dispatch. The Run sees the rejection. |
+| `degrade` | Apply degradation: smaller `max_tokens`, dropped optional segments, model downgrade. The call proceeds but the output may differ from the un-degraded path. |
+
+`degrade` is the right setting for budget-fragile workloads where partial output beats no output. `hard_stop` is the safer default — the operator sees the failure and decides whether to raise the limit, compact, or stop.
+
+## Compose with run-level Budgets
+
+Both budgets attach to the same Run. The admission order on every model call:
+
+```
+1. GCM assembles the ContextManifest.
+2. Context Admission Service evaluates against the ContextBudget.
+   ├─ OFFLOAD / COMPACT / DEGRADE → transformations applied, re-admit
+   └─ HARD_STOP → reject before Step creation
+3. Run-level Budget pre-check runs against the admitted manifest.
+   └─ HARD_STOP → reject before Step creation
+4. Step is created.
+5. Router consults KV Index and dispatches.
+```
+
+Both rejections happen **before a Step row is created**, so hard-stopped calls leave no Step trace on the Run row.
+
+## Where to go next
+
+<Cards>
+  <Card title="Per-run budgets" href="/docs/guides/policy/per-run-budgets" description="The distinct run-level Budget surface." />
+  <Card title="Compaction strategies" href="/docs/guides/context/compaction-strategies" description="What `COMPACT_REQUIRED` triggers." />
+  <Card title="Managing artifacts" href="/docs/guides/context/managing-artifacts" description="What `OFFLOAD_REQUIRED` produces." />
+  <Card title="ContextBudgetClient" href="/docs/sdk/primitives/context-budget-client" description="Primitive reference." />
+</Cards>

@@ -1,0 +1,86 @@
+---
+title: Set your API key
+description: `KOVASERVE_API_KEY` is the only environment variable you need to set. Optional base-URL override for staging or private deployments.
+---
+
+KovaServe authenticates through one environment variable:
+
+```bash
+export KOVASERVE_API_KEY=ks_live_...
+```
+
+That's it. Both the SDK and the CLI read this variable. The SDK and CLI also resolve `KOVASERVE_BASE_URL` for non-default gateways:
+
+```bash
+export KOVASERVE_BASE_URL=https://api.kovaserve.com/v1     # default
+export KOVASERVE_BASE_URL=https://kovaserve.internal/v1    # private deployment
+export KOVASERVE_BASE_URL=https://staging.kovaserve.com/v1 # staging
+```
+
+## Where keys come from
+
+Keys are issued through the [`kova keys create`](/docs/cli/keys/create) command — or through the web portal if your deployment ships one. A key is bound to a `(tenant, project, environment)` triple:
+
+```bash
+kova keys create --project-id proj_review_bot --name local-dev --role write
+# Raw key (displayed once — store it now):
+#   ks_live_AKIAxxxxxxxxxxxxxxxxxx
+```
+
+The raw value is displayed exactly once. Store it in an environment variable, a secrets manager, or `~/.config/kova/credentials` via `kova auth login`.
+
+## SDK vs CLI configuration
+
+| Surface | Reads `KOVASERVE_API_KEY` | Reads `~/.config/kova/credentials` |
+|---|---|---|
+| Python SDK | ✅ | ❌ |
+| CLI | ✅ | ✅ (after `kova auth login`) |
+
+The separation keeps tests reproducible — a Python test process always passes its key explicitly or has the env var set; it does not pick up a developer's CLI credentials accidentally.
+
+## Multiple environments
+
+For switching between deployments — production / staging / private — the CLI supports profiles:
+
+```bash
+kova auth login --profile prod
+kova auth login --profile staging --base-url https://staging.kovaserve.com/v1
+kova --profile staging runs list
+```
+
+For the SDK, instantiate one client per credential pairing:
+
+```python
+from kovaserve import KovaControlClient
+
+prod = KovaControlClient(api_key=os.environ["PROD_KEY"])
+staging = KovaControlClient(
+    api_key=os.environ["STAGING_KEY"],
+    base_url="https://staging.kovaserve.com/v1",
+)
+```
+
+## All environment variables
+
+| Variable | Default | What it does |
+|---|---|---|
+| `KOVASERVE_API_KEY` | — | Required. The bearer token. |
+| `KOVASERVE_BASE_URL` | `https://api.kovaserve.com/v1` | Gateway URL. |
+| `KOVASERVE_LOG` | `off` | Log level: `debug` / `info` / `warn` / `off`. |
+| `KOVASERVE_TIMEOUT` | `60` | Request timeout in seconds. |
+| `KOVASERVE_MAX_RETRIES` | `2` | Retry count for transient failures. |
+| `KOVA_PROFILE` | `default` | CLI profile selector. |
+
+The full reference is on [SDK configuration](/docs/sdk/configuration) and [CLI configuration](/docs/cli/configuration).
+
+## Next
+
+<Cards>
+  <Card title="Your first managed run" href="/docs/quickstart/first-run" description="Run an agent end-to-end." />
+  <Card title="Managed vs private" href="/docs/quickstart/managed-vs-private" description="Pick your deployment." />
+</Cards>
+
+## See also
+
+- [`kova keys create`](/docs/cli/keys/create) — issue a Bearer Key
+- [SDK configuration](/docs/sdk/configuration) — every kwarg the SDK accepts

@@ -1,0 +1,163 @@
+---
+title: "`@kova.checkpoint`"
+description: The Checkpoint decorator — capture a Checkpoint at a function boundary with a typed trigger. Split-phase by default — logical context captures synchronously; KV export attaches asynchronously.
+---
+
+`@kova.checkpoint` captures a [Checkpoint](/docs/concepts/recovery/checkpoints) on the active [Run](/docs/concepts/run-hierarchy/runs) when the decorated function is entered. The intent is to mark **before-risky-action boundaries**: file mutations, shell commands, irreversible API calls. If the body raises or the worker crashes mid-action, the Checkpoint just before it lets you resume from the safe state.
+
+```python
+from kovaserve import kova
+from pathlib import Path
+
+@kova.run(project="proj_review_bot", model="meta-llama/Llama-3-70B-Instruct")
+def review_pr(pr_url: str):
+    @kova.checkpoint(trigger="before_file_write")
+    def write_review(content: str):
+        Path("review.md").write_text(content)
+
+    review = generate_review(pr_url)
+    write_review(review)
+```
+
+## Signature
+
+```python
+def checkpoint(
+    *,
+    trigger: str = "manual",                      # canonical trigger label or free-form string
+    mode: Literal["split-phase", "full"] = "split-phase",
+    capture_on_entry: bool = True,                # checkpoint *before* the body executes
+    capture_on_exit: bool = False,                # also checkpoint *after* the body returns
+    hooks: RunHooks | None = None,
+    client: KovaControlClient | None = None,
+) -> Callable[[F], F]: ...
+```
+
+`trigger` accepts the six canonical labels — `before_file_write`, `before_shell_command`, `after_stable_analysis`, `on_budget_warning`, `periodic`, `manual` — or any free-form string. The label surfaces on `Checkpoint.trigger`, on the `ks.checkpoint.created` event, and in the timeline UI.
+
+## The six canonical triggers
+
+| Trigger | When to use |
+|---|---|
+| `before_file_write` | Decorating a function that writes a file. The Checkpoint captures the state *before* the write so a failure mid-write is recoverable. |
+| `before_shell_command` | Decorating a function that runs a shell command. The Checkpoint captures the state *before* the command so a destructive command's effect is the only thing lost on resume. |
+| `after_stable_analysis` | Decorating a function that completes a long analysis phase. The Checkpoint captures the state *after* the analysis succeeds so subsequent retries skip the analysis. |
+| `on_budget_warning` | Decorating a function called from a `RunHooks.on_budget_warning` handler. The Checkpoint captures state at the warning boundary so a subsequent hard-stop doesn't lose progress. |
+| `periodic` | Decorating a function called on a timer. Used by long-running runs to capture rolling Checkpoints at fixed intervals. |
+| `manual` | Default. An explicit, operator-driven Checkpoint with no specific lifecycle role. |
+
+Any other string is accepted and surfaces on the wire — the canonical six are the recommended values, but the trigger label is open-ended.
+
+## Split-phase semantics
+
+`mode="split-phase"` (the default) is the load-bearing performance trick. The Checkpoint capture splits into two phases:
+
+| Phase | What happens | Synchronicity |
+|---|---|---|
+| **Phase 1 — logical context** | Manifest + segment refs + artifact refs + compaction lineage are committed to PostgreSQL. | **Synchronous.** Completes in milliseconds. The Checkpoint is valid the moment this lands. |
+| **Phase 2 — KV cache export** | A request goes to the active node to export reusable KV state to S3 / MinIO. The resulting `kv_prefix` StateHandle is attached to the Checkpoint when it completes. | **Asynchronous.** Runs in the background; takes seconds. |
+
+The function body **does not wait for Phase 2** — it executes the moment Phase 1 completes. This matches KovaServe's logical-context-first checkpoint model: a Checkpoint is *valid* with logical context alone. KV restore is the bonus warm-restart path. If the runtime crashes before Phase 2 completes, the Checkpoint still restores from logical context — just cold.
+
+`mode="full"` blocks the function body until both phases complete. Use it before node teardown or when the next operation depends on a warm restart being available immediately.
+
+## `capture_on_entry` vs `capture_on_exit`
+
+By default the Checkpoint captures **on entry** — *before* the body executes. This is the right setting for `before_file_write` and `before_shell_command` triggers: you want the recoverable state to be what existed *before* the risky operation, not after.
+
+For `after_stable_analysis`, flip to capture-on-exit:
+
+```python
+@kova.checkpoint(trigger="after_stable_analysis", capture_on_entry=False, capture_on_exit=True)
+def analyze_codebase(repo_path):
+    # long analysis...
+    return analysis_result
+# Checkpoint captures *after* the analysis succeeds, not before.
+```
+
+Both flags can be `True` simultaneously — two Checkpoints, bracketing the body. Use this when the body is both risky (you want a pre-state) and produces durable progress (you want a post-state).
+
+Both flags cannot be `False` — a `@kova.checkpoint` that captures nothing is meaningless; the decorator raises `ValueError` at decoration time.
+
+## On entry (capture_on_entry=True)
+
+1. Reads the active Run from the `@kova.run` ContextVar. Raises `NoActiveRunError` if there is none.
+2. Calls `client.checkpoints.create(run_id=<active>, trigger=trigger, mode=mode)`.
+3. Phase 1 (logical context) completes synchronously.
+4. (In `split-phase` mode) Phase 2 (KV export) starts in the background.
+5. The body executes.
+
+The Run transitions through `RUNNING → CHECKPOINTING → RUNNING` for the duration of Phase 1.
+
+## On normal return (capture_on_exit=True)
+
+A second Checkpoint is captured with the same `trigger` label. The Run transitions through `RUNNING → CHECKPOINTING → RUNNING` again.
+
+## On exception
+
+If `capture_on_entry=True`, the entry Checkpoint has already been captured — the failed body's state is *not* captured (which is correct; the entry state is what's recoverable). The exception is re-raised unchanged.
+
+If `capture_on_exit=True` was the only flag set, no Checkpoint is captured on exception — by design. Exit Checkpoints exist to capture *successful* completion; on failure, the recoverable state is whatever the prior Checkpoint already has.
+
+## Cost discipline
+
+Capturing a Checkpoint is not free. Phase 1 is cheap (milliseconds, PostgreSQL writes); Phase 2 is expensive (seconds, GPU memory copy + S3 upload). Use Checkpoints at meaningful boundaries — not on every step. The canonical triggers exist to make the boundary choice explicit.
+
+For a long-running Run with many tool calls, the right pattern is typically:
+
+- One Checkpoint at run start (after stable plan analysis).
+- One Checkpoint before each destructive action.
+- Optional periodic Checkpoints every N minutes for very long runs.
+
+Avoid:
+
+- A Checkpoint on every step. Phase 2 amortization breaks down.
+- A Checkpoint inside a tight loop. Phase 1 still costs, even if Phase 2 is asynchronous.
+
+## Reading captured Checkpoints
+
+The decorator does not return the Checkpoint object — the function returns whatever the body returns. Read captured Checkpoints via `client.checkpoints.list(run_id=...)` or via the [run timeline](/docs/sdk/control/runs):
+
+```python
+@kova.run(project="proj_review_bot", model="...")
+def review_pr(...):
+    @kova.checkpoint(trigger="before_file_write")
+    def write_review(content):
+        ...
+
+    write_review("...")
+
+    # After the call, the Checkpoint is queryable
+    checkpoints = list(kova.current_run_client().checkpoints.list(run_id=kova.current_run().id))
+    for cp in checkpoints:
+        print(cp.id, cp.trigger, cp.status)
+```
+
+## Async
+
+```python
+@kova.run(project="proj_review_bot", model="meta-llama/Llama-3-70B-Instruct")
+async def review_pr(pr_url: str):
+    @kova.checkpoint(trigger="before_shell_command")
+    async def deploy(env: str):
+        await shell.run(f"deploy.sh {env}")
+
+    await deploy("prod")
+```
+
+Async dispatch follows the same lifecycle. Phase 1 awaits the checkpoint creation; Phase 2 fires-and-forgets through the async client's background task pool.
+
+## Where to go next
+
+<Cards>
+  <Card title="`client.checkpoints`" href="/docs/sdk/control/checkpoints" description="The imperative alternative — `create` / `restore` / `list`." />
+  <Card title="`@kova.run`" href="/docs/sdk/decorators/run" description="The Run the Checkpoint belongs to." />
+  <Card title="Checkpoint concept" href="/docs/concepts/recovery/checkpoints" description="What a Checkpoint binds." />
+  <Card title="Hooks" href="/docs/sdk/hooks" description="React via `on_checkpoint_created` / `on_checkpoint_restored`." />
+</Cards>
+
+## See also
+
+- [Checkpoint state machine](/docs/concepts/recovery/checkpoint-state-machine) — `REQUESTED → CAPTURING → STORED → VALIDATED → ...`
+- [Resume flow](/docs/concepts/recovery/resume-flow) — `RECOVERING → RESUMING → RUNNING`
+- [Decorators overview](/docs/sdk/decorators) — the lifecycle contract

@@ -1,0 +1,8 @@
+{
+  "title": "Context",
+  "pages": [
+    "authoring-context-manifests",
+    "managing-artifacts",
+    "compaction-strategies"
+  ]
+}

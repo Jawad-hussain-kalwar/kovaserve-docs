@@ -1,0 +1,175 @@
+---
+title: "`@kova.budget`"
+description: The Budget decorator — attach a multi-dimensional Budget to the wrapping Run with admission applied on entry. Budget admission must happen before Run allocation; this is why `@kova.budget` is the outermost decorator.
+---
+
+`@kova.budget` attaches a [Budget](/docs/concepts/policy/budgets) to the wrapping [Run](/docs/concepts/run-hierarchy/runs). Admission is applied **on entry** — if the Budget is already at hard-stop on entry (because it was inherited from a parent context), the decorated function never executes. This is why `@kova.budget` is the **outermost** decorator: a hard-stop must not orphan a `RUNNING` Run downstream.
+
+```python
+from kovaserve import kova
+
+@kova.budget(cost_cents="500.0000", tokens=100_000, on_exceed="hard_stop")
+@kova.run(project="proj_review_bot", model="meta-llama/Llama-3-70B-Instruct")
+def review_pr(pr_url: str) -> str:
+    ...
+```
+
+## Signature
+
+```python
+def budget(
+    *,
+    cost_cents: str | Decimal | None = None,
+    tokens: int | None = None,
+    steps: int | None = None,
+    time_seconds: int | None = None,
+    tools: int | None = None,
+    warning_threshold: float = 0.70,             # range 0.0..1.0
+    on_exceed: Literal["hard_stop", "degrade"] = "hard_stop",
+    budget_id: str | None = None,                # bind to an existing Budget
+    hooks: RunHooks | None = None,
+    client: KovaControlClient | None = None,
+) -> Callable[[F], F]: ...
+```
+
+At least one dimensional limit (`cost_cents`, `tokens`, `steps`, `time_seconds`, `tools`) must be supplied. Multiple limits compose with strict-dimension semantics — the Budget transitions when the *first* dimension crosses its threshold.
+
+## Cost values are decimal strings (in cents)
+
+`cost_cents` accepts a string or `Decimal` denominated in **cents** with four fractional digits. `"500.0000"` is a 500-cent ($5.00) cap; `"5.0000"` is a 5-cent ($0.05) cap. Passing a `float` raises `ValueError` at decoration time:
+
+```python
+@kova.budget(cost_cents="500.0000")     # ✅ 500 cents = $5.00
+@kova.budget(cost_cents=Decimal("500")) # ✅ Decimal, normalized to "500.0000"
+@kova.budget(cost_cents=5.00)           # ❌ ValueError: float would lose precision
+```
+
+The wire format requires four fractional digits to keep the `gross - savings = net` identity exact. See [cost model](/docs/concepts/cost/cost-model).
+
+## On entry
+
+1. If `budget_id` is supplied, the decorator binds to the existing Budget and re-evaluates its state.
+2. Otherwise the decorator waits for the wrapping `@kova.run` to allocate the Run, then calls `client.budgets.create(run_id=run.id, ...)` with the supplied limits.
+3. The Budget state is evaluated. If it is `HARD_STOP` on entry — a Budget that was previously hard-stopped — the decorator raises `BudgetExceededError` *before* executing the function body. The function never runs.
+4. Otherwise the Budget is stored in a `contextvars.ContextVar` so admission applies on every chat completion issued from inside the body.
+
+## On entry under `degrade` mode
+
+`on_exceed="degrade"` lets the Run continue under degraded execution after the Budget hits a terminal threshold. Setting it on the decorator means the wrapped function continues running even when the Budget is in `DEGRADED_ALLOWED`:
+
+```python
+@kova.budget(cost_cents="500.0000", on_exceed="degrade")     # 500 cents = $5
+@kova.run(project="proj_review_bot", model="...")
+def review_pr(...):
+    # Under DEGRADED_ALLOWED, model calls inside this body apply:
+    #  - reduced max_tokens
+    #  - optional segments dropped from the manifest
+    #  - model downgrade if the project configures it
+    # The function still runs; outputs may differ from the un-degraded path.
+    ...
+```
+
+`on_exceed="hard_stop"` (the default) rejects further calls with `429 budget_exceeded` once the Budget exhausts.
+
+## On normal return
+
+The Budget transitions through `ACTIVE → CLOSED`. The Run's outcome (`COMPLETED`, `FAILED`, `CANCELED`) is independent — a Budget can be CLOSED on a COMPLETED Run, or on a FAILED Run.
+
+## On exception
+
+The Budget transitions to `CLOSED`. The exception is re-raised unchanged. If the exception was `BudgetExceededError` raised by admission during the body, the Run also transitions to `FAILED` with `details.exception_type = "BudgetExceededError"`.
+
+## Inline `budget_context` is the alternative
+
+For the imperative case — when the Budget should be created inline as part of the first inference call — use the `budget_context` field on the [extension envelope](/docs/sdk/inference/extension-envelope) instead of the decorator:
+
+```python
+response = inference.chat.completions.create(
+    model="meta-llama/Llama-3-70B-Instruct",
+    messages=[...],
+    extra_body={"kovaserve": {
+        "run_id": run.id,
+        "budget_context": {
+            "cost_limit_cents": "500.0000",     # 500 cents = $5
+            "token_limit": 100_000,
+            "on_exceed": "hard_stop",
+        },
+    }},
+)
+```
+
+The decorator and inline forms are equivalent on the server. Pick the decorator when the function *is* the Budget-bounded unit of work; pick the inline form when the function manages many independent calls each with their own Budget.
+
+## Stacking order is binding
+
+`@kova.budget` must be **outermost**. The reason is admission ordering:
+
+- Budget admission runs *before* Run allocation.
+- A Run that was created and then immediately hard-stopped at admission would orphan a `RUNNING` row.
+- By placing `@kova.budget` outermost, the entry-time admission check happens *before* `@kova.run` creates anything.
+
+The static type system enforces this — reversing the order is a `mypy` error via the decorators' `Concatenate` signatures. See [composition](/docs/sdk/decorators/composition) for the full rule.
+
+## `RunHooks` for Budget events
+
+Subclass `RunHooks` and pass via `hooks=` to react to Budget state transitions:
+
+```python
+from kovaserve import kova, RunHooks
+
+class BudgetAlerts(RunHooks):
+    def on_budget_warning(self, decision):
+        slack.send(f"Budget warning at {decision.budget_remaining_pct:.0%} on run {decision.run_id}")
+    def on_degrade(self, decision):
+        slack.send(f"Run {decision.run_id} entering DEGRADED_ALLOWED")
+
+@kova.budget(cost_cents="500.0000", on_exceed="degrade", hooks=BudgetAlerts())
+@kova.run(project="proj_review_bot", model="...")
+def review_pr(...):
+    ...
+```
+
+See [hooks](/docs/sdk/hooks) for the full hook surface.
+
+## Async
+
+```python
+@kova.budget(cost_cents="500.0000", tokens=100_000)
+@kova.run(project="proj_review_bot", model="meta-llama/Llama-3-70B-Instruct")
+async def review_pr(...):
+    ...
+```
+
+The async version follows the same lifecycle. Concurrent calls under `asyncio.gather` each see their own Budget (one per outer wrap), because each call enters the decorator independently.
+
+## Reading the active Budget
+
+Inside the body, the live Budget is available via `kova.current_budget()`:
+
+```python
+@kova.budget(cost_cents="500.0000", tokens=100_000)
+@kova.run(project="proj_review_bot", model="...")
+def review_pr(...):
+    budget = kova.current_budget()
+    if budget.tokens_used > 80_000:
+        # custom pre-emptive cleanup
+        ...
+```
+
+`kova.current_budget()` returns `None` outside any `@kova.budget`-decorated body.
+
+## Where to go next
+
+<Cards>
+  <Card title="`@kova.run`" href="/docs/sdk/decorators/run" description="The Run the Budget binds to." />
+  <Card title="`client.budgets`" href="/docs/sdk/control/budgets" description="The imperative alternative." />
+  <Card title="Composition" href="/docs/sdk/decorators/composition" description="Why Budget is outermost." />
+  <Card title="Context budgets" href="/docs/sdk/control/context-budgets" description="The distinct per-request admission control." />
+  <Card title="Hooks" href="/docs/sdk/hooks" description="React to `on_budget_warning`, `on_degrade`, `on_admission_rejected`." />
+</Cards>
+
+## See also
+
+- [Budget concept](/docs/concepts/policy/budgets) — what a Budget is
+- [Budget state machine](/docs/concepts/policy/budget-state-machine) — `ACTIVE → WARNING → DEGRADED_ALLOWED | HARD_STOP → CLOSED`
+- [Admission](/docs/concepts/policy/admission) — how Budgets compose with ContextBudget and PolicyScope

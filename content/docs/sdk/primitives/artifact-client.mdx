@@ -1,0 +1,189 @@
+---
+title: ArtifactClient
+description: The ergonomic wrapper around `client.context.artifacts` — `upload_path` auto-detects mime, `upload_content` accepts bytes directly, `download` and `download_to_path` resolve the body when needed.
+---
+
+`ArtifactClient` is the ergonomic primitive for working with [ContextArtifacts](/docs/sdk/control/context-artifacts) — the object-storage-backed entities that hold externalized context bytes. The raw `client.context.artifacts.upload(...)` method works for every case; `ArtifactClient` adds path-based upload, automatic mime detection, and download helpers on top.
+
+```python
+from kovaserve import KovaControlClient
+from kovaserve.context import ArtifactClient
+
+client = KovaControlClient()
+artifacts = ArtifactClient(client)
+
+ref = artifacts.upload_path("./diff.patch", artifact_type="file_diff")
+print(ref.id, ref.uri, ref.size_bytes)
+```
+
+## Construction
+
+```python
+artifacts = ArtifactClient(client)
+```
+
+The wrapper holds a reference to a `KovaControlClient`; it does not open its own connection pool. Both the sync `ArtifactClient` and the `AsyncArtifactClient` (paired with `AsyncKovaControlClient`) live in `kovaserve.context`.
+
+## Upload — three paths
+
+### `upload_path` — read from a file
+
+```python
+ref = artifacts.upload_path(
+    "./diff.patch",
+    artifact_type="file_diff",                     # required — open string label
+    run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1",            # optional, mutually exclusive with session_id required
+    session_id=None,                                # the other half
+    name=None,                                      # defaults to the file's basename
+    version=None,                                   # defaults to "v1"
+    mime_type=None,                                 # auto-detected via python-magic with mimetypes fallback
+    preview=None,                                   # auto-generated from first 2 KB of text-typed content
+    retention_policy=None,
+)
+```
+
+`upload_path` reads the file, detects the mime type, computes the content hash, and uploads. Mime detection uses `python-magic` (an optional dep) when available and falls back to `mimetypes.guess_type` otherwise. Override with `mime_type=` when you want to declare the type explicitly.
+
+### `upload_content` — bytes in memory
+
+```python
+ref = artifacts.upload_content(
+    b"...",                                         # bytes
+    name="run-output",                              # required
+    mime_type="text/plain",                         # required
+    artifact_type="tool_output",                    # required
+    run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1",            # at least one of run_id / session_id required
+)
+```
+
+`upload_content` accepts raw bytes — useful when the content is already in memory and you don't want a temp file round trip. `name` and `mime_type` are required because there's no source path to infer them from.
+
+### `upload` — pass-through to the underlying client
+
+```python
+ref = artifacts.upload(
+    name="run-output",
+    version="v2",
+    mime_type="text/plain",
+    artifact_type="tool_output",
+    content=b"...",
+    run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    preview="Tool ran successfully; 1247 records returned.",
+)
+```
+
+The bare `upload` accepts every field. Use it when you want full control over the wire shape — `upload_path` and `upload_content` are sugar on top.
+
+All three methods return a typed `ContextArtifactRef`:
+
+```python
+class ContextArtifactRef(BaseModel):
+    id: str
+    uri: str
+    name: str
+    version: str
+    mime_type: str
+    artifact_type: str
+    size_bytes: int
+    token_estimate: int
+    content_hash: str
+    preview: str | None
+    created_at: datetime
+```
+
+## Download — three paths
+
+### `download` — bytes in memory
+
+```python
+body = artifacts.download("01J8X9Y2Z3K4M5N6P7Q8R9AR03")     # → bytes
+```
+
+### `download_text` — decoded text
+
+```python
+text = artifacts.download_text("01J8X9Y2Z3K4M5N6P7Q8R9AR03")
+```
+
+`download_text` decodes the bytes per the artifact's `mime_type` charset. Falls back to UTF-8 when no charset is declared. Raises `UnicodeDecodeError` when the artifact is binary — use `download` for binary content.
+
+### `download_to_path` — stream to a file
+
+```python
+artifacts.download_to_path("01J8X9Y2Z3K4M5N6P7Q8R9AR03", "./local-copy.patch")
+```
+
+Streams the body chunk-by-chunk to disk. Use this for large artifacts where holding the body in memory is wasteful.
+
+## Referencing artifacts from segments
+
+The standard use is to upload an artifact, then reference it from a [ContextSegment](/docs/sdk/control/context-segments):
+
+```python
+from kovaserve.context import ContextBuilder
+
+ctx = ContextBuilder()
+ref = artifacts.upload_path("./big-tool-output.json", artifact_type="tool_output")
+ctx.add_tool_result(
+    content_preview="Tool returned 1247 records; full payload offloaded.",
+    artifact_ref=ref.id,
+)
+```
+
+The segment carries only the `preview` text; the artifact body is fetched on demand by the runtime, never inline in the prompt. The model sees the preview as if it were the tool result.
+
+## Streaming uploads for large bodies
+
+For large bodies that should not be held in memory:
+
+```python
+with open("./giant.bin", "rb") as f:
+    ref = artifacts.upload_stream(
+        f,
+        name="giant.bin",
+        mime_type="application/octet-stream",
+        artifact_type="raw_dump",
+        run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    )
+```
+
+`upload_stream` accepts any file-like object that supports `read(size)` and streams chunks to object storage with multipart upload. Used internally by `upload_path` for files larger than 10 MB.
+
+## Bucket selection by data boundary
+
+Uploads route to the bucket determined by the resolved PolicyScope `data_boundary`. The `ArtifactClient` does not change this behaviour — the wrapper passes the runtime context through to the underlying `client.context.artifacts.upload`, which resolves the bucket from the scope. See [bucket selection](/docs/sdk/control/context-artifacts#bucket-selection-by-data-boundary).
+
+## Async parallel
+
+`AsyncArtifactClient` mirrors `ArtifactClient` against `AsyncKovaControlClient`:
+
+```python
+import asyncio
+from kovaserve import AsyncKovaControlClient
+from kovaserve.context import AsyncArtifactClient
+
+async def main() -> None:
+    client = AsyncKovaControlClient()
+    artifacts = AsyncArtifactClient(client)
+
+    ref = await artifacts.upload_path("./diff.patch", artifact_type="file_diff")
+    body = await artifacts.download(ref.id)
+
+asyncio.run(main())
+```
+
+The async client uses `httpx.AsyncClient` for the multipart upload and supports `async with` on streaming downloads.
+
+## Where to go next
+
+<Cards>
+  <Card title="ContextBuilder" href="/docs/sdk/primitives/context-builder" description="The builder that references artifacts via `add_tool_result(artifact_ref=...)`." />
+  <Card title="`client.context.artifacts`" href="/docs/sdk/control/context-artifacts" description="The raw control-client surface." />
+  <Card title="Context segments" href="/docs/sdk/control/context-segments" description="How segments reference artifacts via `artifact_ref_id`." />
+  <Card title="Handles" href="/docs/sdk/control/handles" description="Bundle multiple artifacts as an `artifact_bundle` handle." />
+</Cards>
+
+## See also
+
+- [ContextArtifact concept](/docs/concepts/context/context-artifacts) — the ADK-shape entity
+- [API: Context artifacts](/docs/api/context/artifacts/upload) — the wire surface

@@ -1,0 +1,66 @@
+---
+title: "`kova keys revoke`"
+description: Invalidate a Bearer Key without issuing a replacement. Callers using the revoked Key receive `401 invalid_api_key` on the next request.
+---
+
+Invalidate a Bearer Key. Callers using the revoked Key receive `401 invalid_api_key` on the next request.
+
+## Synopsis
+
+```bash
+kova keys revoke <KEY_ID> [OPTIONS]
+```
+
+## Options
+
+| Option | Meaning |
+|---|---|
+| `--reason <text>` | Free-form reason stored on the Key row; surfaces in audit. |
+| `--json` | Emit the updated Key row as one JSON document. |
+
+## Examples
+
+```bash
+kova keys revoke 01J8X9Y2Z3K4M5N6P7Q8R9KY04
+
+kova keys revoke 01J... --reason "Suspected compromise; key seen in public log"
+
+kova keys revoke 01J... --json | jq '.state'    # → "REVOKED"
+```
+
+## Output
+
+```
+Key 01J8X9Y2Z3K4M5N6P7Q8R9KY04
+Name:         ci-runner
+State:        ACTIVE → REVOKED
+Reason:       Suspected compromise; key seen in public log
+Last used:    2026-05-15T11:42:01Z
+Revoked at:   2026-05-15T12:48:33Z
+```
+
+## When to revoke vs rotate
+
+| Scenario | Action |
+|---|---|
+| You want to permanently retire a Key (decommissioning a service, ending a partner relationship). | `revoke`. |
+| You want to replace a Key with a new one of equal scope. | [`rotate`](/docs/cli/keys/rotate) — atomic issue-and-revoke. |
+| You suspect a key is compromised and need immediate revocation while issuing a fresh one. | `rotate --grace-period-seconds 0`. |
+
+`revoke` is the right call when there's no replacement Key. The Key row stays for audit; the Key cannot authenticate any further requests.
+
+## Audit on revoked Keys
+
+```bash
+# When was this Key last used?
+kova keys get 01J... --json | jq '{last_used: .last_used_at, revoked_at: .revoked_at}'
+
+# All Keys revoked in the last 24h
+kova keys list --state REVOKED --revoked-after $(date -u -d "-1 day" +%Y-%m-%dT%H:%M:%SZ)
+```
+
+## See also
+
+- [`kova keys rotate`](/docs/cli/keys/rotate) — issue-and-revoke atomically
+- [`kova keys create`](/docs/cli/keys/create) — issue a fresh Key
+- [`client.tenancy.keys.revoke`](/docs/sdk/control/tenancy) — the SDK equivalent

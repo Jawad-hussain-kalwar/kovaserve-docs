@@ -1,0 +1,157 @@
+---
+title: CompactionClient
+description: The ergonomic wrapper around `client.context.compaction` — report a runtime-produced summary as a CompactionRecord, list records on a Run, and orchestrate the reduce-and-retry flow on `COMPACT_REQUIRED`.
+---
+
+`CompactionClient` is the ergonomic primitive for working with [CompactionRecords](/docs/sdk/control/compaction) — the lineage objects that describe how source segments became compacted segments. The wrapper adds typed helpers for the common compaction patterns: report a runtime-produced summary, orchestrate the reduce-and-retry flow when `COMPACT_REQUIRED` admission fires, and audit compaction lineage across a Run.
+
+```python
+from kovaserve import KovaControlClient
+from kovaserve.context import CompactionClient
+
+client = KovaControlClient()
+compaction = CompactionClient(client)
+
+# Report a summary the runtime produced
+record = compaction.report(
+    run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    source_segment_ids=[
+        "01J8X9Y2Z3K4M5N6P7Q8R9SSG10",
+        "01J8X9Y2Z3K4M5N6P7Q8R9SSG11",
+    ],
+    summary="User reviewed PR #41 and #42; key decisions: …",
+    model_id="meta-llama/Llama-3-70B-Instruct",
+)
+```
+
+## Construction
+
+```python
+compaction = CompactionClient(client)
+```
+
+The wrapper holds a reference to a `KovaControlClient`. Both the sync `CompactionClient` and the async `AsyncCompactionClient` live in `kovaserve.context`.
+
+## `report` — the common case
+
+```python
+record = compaction.report(
+    run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1",             # required
+    source_segment_ids=[...],                         # required — at least one
+    summary="...",                                    # required — the summary text
+    model_id="meta-llama/Llama-3-70B-Instruct",       # required when a model produced the summary
+    memory_class="durable",                           # retention intent for the output segment
+    checkpoint_relevant=True,                         # include in future Checkpoint snapshots
+    quality_flags={"coverage": 0.95, "fidelity": "high"},   # optional runtime annotations
+)
+```
+
+`report` is the ergonomic single-summary case. It wraps the underlying `compact` call with sensible defaults — the output segment is created with `context_type="summary"`, the method is `"runtime_reported"`, and the source segments are archived as an `artifact_bundle` for resume reconstruction.
+
+For multiple output segments (e.g., a summary plus a carryover state), drop down to `compact`:
+
+```python
+record = compaction.compact(
+    run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    source_segment_ids=[...],
+    output_segments=[
+        {"context_type": "summary", "content_inline": "...", "memory_class": "durable"},
+        {"context_type": "agent_state", "content_inline": "...", "memory_class": "session"},
+    ],
+    method="runtime_reported",
+    model_id="meta-llama/Llama-3-70B-Instruct",
+)
+```
+
+## `records` — list lineage on a Run
+
+```python
+records = list(compaction.records(run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1"))
+for r in records:
+    print(r.created_at, r.method, r.token_count_before, "→", r.token_count_after)
+```
+
+A convenience iterator over the underlying `client.context.compaction.records(...)`. Use it for audit and analytics:
+
+```python
+records = list(compaction.records(run_id=run.id))
+total_saved = sum(r.token_count_before - r.token_count_after for r in records)
+print(f"Compactions reduced active context by {total_saved} tokens across {len(records)} events.")
+```
+
+## `reduce_and_retry` — the orchestration helper
+
+When [admission](/docs/sdk/control/context-budgets) returns `COMPACT_REQUIRED`, the standard pattern is: compact, report, re-assemble, re-dispatch. The wrapper ships this as one helper:
+
+```python
+def my_compactor(source_segments):
+    """Runtime-supplied function that returns a summary string."""
+    return llm.summarize(s.content_inline for s in source_segments)
+
+response = compaction.reduce_and_retry(
+    run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    decision=admission_decision,         # the AdmissionDecision that returned COMPACT_REQUIRED
+    compactor=my_compactor,              # callable: source_segments → summary string
+    model_id="meta-llama/Llama-3-70B-Instruct",
+)
+```
+
+`reduce_and_retry`:
+
+1. Reads the source-segment IDs from `decision.transformations[0].target_segments`.
+2. Fetches the source segments.
+3. Calls `compactor(source_segments)` to produce the summary.
+4. Calls `report(...)` to commit the CompactionRecord.
+5. Returns the updated `AdmissionDecision` after the manifest is re-admitted.
+
+The helper does **not** re-issue the failed inference call — that's the runtime's responsibility. It produces the lineage; you re-build the prompt and re-dispatch.
+
+## Async parallel
+
+```python
+import asyncio
+from kovaserve import AsyncKovaControlClient
+from kovaserve.context import AsyncCompactionClient
+
+async def main() -> None:
+    client = AsyncKovaControlClient()
+    compaction = AsyncCompactionClient(client)
+
+    record = await compaction.report(
+        run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+        source_segment_ids=["01J...10", "01J...11"],
+        summary="...",
+        model_id="meta-llama/Llama-3-70B-Instruct",
+    )
+
+    async for r in compaction.records(run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1"):
+        ...
+
+asyncio.run(main())
+```
+
+## What the primitive does not own
+
+`CompactionClient` makes the lineage contract easy to use. It **does not**:
+
+- Decide *which* segments to compact. The runtime picks.
+- Decide *when* to compact. The admission decision or the runtime's own logic decides.
+- Choose the summarization model or prompt. The runtime supplies the summary text.
+- Score the quality of a summary. KovaServe records `quality_flags` the runtime sets; it does not evaluate them.
+
+**The wrapper produces lineage; the runtime produces quality.** Lineage is infrastructure (always KovaServe); summarization quality is application (always the runtime).
+
+## Where to go next
+
+<Cards>
+  <Card title="`client.context.compaction`" href="/docs/sdk/control/compaction" description="The raw control-client surface." />
+  <Card title="ContextBudgetClient" href="/docs/sdk/primitives/context-budget-client" description="The `admit` call that triggers `reduce_and_retry`." />
+  <Card title="ContextBuilder" href="/docs/sdk/primitives/context-builder" description="The builder you re-assemble the prompt with after compaction." />
+  <Card title="`@kova.compact`" href="/docs/sdk/decorators/step" description="The canonical COMPACT step alias for runtimes that wrap compaction in a function." />
+</Cards>
+
+## See also
+
+- [CompactionRecord concept](/docs/concepts/context/compaction-records) — what the lineage object records
+- [Compaction lineage](/docs/concepts/context/compaction-lineage) — source-to-output relationships
+- [Hooks](/docs/sdk/hooks) — `on_compact_required` reactive alternative

@@ -1,0 +1,147 @@
+---
+title: Errors
+description: The `KovaError` exception hierarchy. Status-code subclasses for catch-by-class; feature subclasses for catch-by-cause. OpenAI exceptions remain on `/v1/*`; KovaServe exceptions on `/v1/ks/*`.
+---
+
+The SDK uses a two-pronged exception model. Inference calls through the OpenAI re-export raise **`openai.*` exceptions** — the SDK never rewraps them, preserving the OpenAI-passthrough backward-compat guarantee. Control-plane calls through `KovaControlClient` raise **`kovaserve.Kova*` exceptions** — a status-code tree with feature subclasses where catch-granularity matters.
+
+```python
+from kovaserve import KovaControlClient
+from kovaserve.errors import (
+    KovaError,
+    KovaAPIError,
+    BudgetExceededError,
+    IdempotencyConflictError,
+)
+
+from kovaserve.errors import ConflictError
+
+try:
+    run = client.runs.create(project_id="proj_review_bot", model="...")
+except IdempotencyConflictError as e:
+    # specific feature subclass — retry with a fresh key
+    ...
+except ConflictError as e:
+    # broader status class — log and bail
+    ...
+except KovaAPIError as e:
+    # broadest — anything that reached the API and failed
+    ...
+```
+
+## The hierarchy
+
+```
+KovaError                              # the root (SDK-defined groupings carry the Kova* prefix)
+├── KovaConnectionError                # could not reach the server
+├── KovaTimeoutError                   # request exceeded `timeout`
+├── KovaStreamReconnectError           # SSE failed to reconnect after retries
+└── KovaAPIError                       # the server returned an error
+    ├── KovaAPIStatusError             # status-mirror classes drop the prefix (OpenAI/Stripe convention)
+    │   ├── BadRequestError (400)
+    │   ├── AuthenticationError (401)
+    │   ├── PermissionDeniedError (403)
+    │   ├── NotFoundError (404)
+    │   ├── ConflictError (409)
+    │   │   ├── IdempotencyConflictError
+    │   │   ├── IllegalStateTransitionError
+    │   │   └── BudgetAlreadyExistsError
+    │   ├── UnprocessableEntityError (422)
+    │   ├── RateLimitError (429)
+    │   │   └── BudgetExceededError
+    │   ├── PreconditionFailedError (410)
+    │   └── InternalServerError (5xx)
+    └── ContextBudgetExceededError (429, error_code=context_budget_exceeded)
+```
+
+The naming convention: `Kova*`-prefixed classes are SDK-defined groupings (the root, connection failures, the API-error base classes). Status-mirror classes drop the prefix, matching the OpenAI and Stripe SDK conventions. Import them from `kovaserve.errors` to avoid name collisions with the `openai` SDK's same-named classes — those only fire on the [OpenAI re-export](/docs/sdk/inference/openai-compat) call path, not on `KovaControlClient`.
+
+## Status class vs feature subclass
+
+The hierarchy has two layers. The **status-code class** is selected by HTTP status:
+
+| Status | Class |
+|---|---|
+| 400 | `BadRequestError` |
+| 401 | `AuthenticationError` |
+| 403 | `PermissionDeniedError` |
+| 404 | `NotFoundError` |
+| 409 | `ConflictError` |
+| 410 | `PreconditionFailedError` |
+| 422 | `UnprocessableEntityError` |
+| 429 | `RateLimitError` |
+| 5xx | `InternalServerError` |
+
+The **feature subclass** is selected by the `error_code` field on the wire envelope. Feature subclasses only exist where catch-by-cause is genuinely useful — `IdempotencyConflictError` because retry handlers need to distinguish "stale processing" from "permanent disagreement," `BudgetExceededError` and `ContextBudgetExceededError` because they're the only 429 cases that aren't transient rate limits.
+
+Catch the status class for "anything 409"; catch the feature subclass for the specific recoverable case.
+
+## Every exception carries
+
+```python
+class KovaAPIStatusError(KovaError):
+    status_code: int
+    error_code: str
+    message: str
+    details: dict
+    request_id: str                      # the X-Request-Id header value
+    response: httpx.Response             # the raw response, debug-only
+```
+
+`__str__` renders as:
+
+```
+[409 idempotency_conflict] An idempotent operation with the same key has different parameters (request_id=01J8X9...)
+```
+
+`request_id` is the value you give to support when reporting an issue — it joins to the gateway log and the trace.
+
+## Anonymous mode keeps OpenAI exceptions
+
+Inference calls without a `kovaserve` extension are anonymous and raise the OpenAI SDK's own exceptions:
+
+```python
+from kovaserve import OpenAI
+import openai
+
+client = OpenAI()
+try:
+    response = client.chat.completions.create(model="...", messages=[...])
+except openai.RateLimitError as e:        # still openai's class, not kovaserve's
+    ...
+except openai.AuthenticationError as e:
+    ...
+```
+
+This is the OpenAI-passthrough backward-compat guarantee. Existing OpenAI exception handling continues to work without changes when you migrate via `from kovaserve import OpenAI`. The KovaServe-specific exceptions only appear on `/v1/ks/*` calls — control-plane operations through `KovaControlClient`.
+
+## What is *not* retried
+
+| Status | Class | Retried? |
+|---|---|---|
+| 400 / 401 / 403 / 404 / 410 / 422 | client errors | Never — the request is permanently invalid. |
+| 409 + `idempotency_conflict` | `IdempotencyConflictError` | Yes — server-side stale processing; retryable. |
+| 409 + `illegal_state_transition` or `budget_already_exists` | other 409s | Never — permanent invalidity. |
+| 429 | `RateLimitError` | Yes — honors `Retry-After`. |
+| 5xx | `InternalServerError` | Yes — jittered backoff. |
+| Network errors (connection refused, DNS, timeout) | `KovaConnectionError` / `KovaTimeoutError` | Yes — transient by definition. |
+
+See [retries and idempotency](/docs/sdk/retries-and-idempotency) for the full retry contract.
+
+## Async parallels
+
+The exception classes are the same on `KovaControlClient` and `AsyncKovaControlClient`. An async client raises the same `KovaError` subclasses you catch in sync code.
+
+## Where to go next
+
+<Cards>
+  <Card title="Retries and idempotency" href="/docs/sdk/retries-and-idempotency" description="Which exceptions trigger retries." />
+  <Card title="Logging and tracing" href="/docs/sdk/logging-and-tracing" description="Where `request_id` joins logs to traces." />
+  <Card title="Errors reference" href="/docs/sdk/reference/errors" description="The full exception class table." />
+  <Card title="API errors" href="/docs/api/using-the-api/errors" description="The wire-side envelope these classes wrap." />
+</Cards>
+
+## See also
+
+- [Streaming](/docs/sdk/streaming) — `KovaStreamReconnectError`
+- [Type model](/docs/sdk/type-model) — Pydantic validation errors are subclassed under `BadRequestError`

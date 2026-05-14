@@ -1,0 +1,132 @@
+---
+title: "`kova auth`"
+description: Authenticate the CLI — `kova auth login` writes to `~/.config/kova/credentials`; `kova auth status` shows the active profile; `kova auth logout` revokes the stored key.
+---
+
+`kova auth` manages CLI credentials. The CLI reads from `~/.config/kova/credentials` (or `%APPDATA%\kova\credentials` on Windows) — a TOML file with one section per profile. The SDK does **not** read this file; only the CLI does.
+
+```bash
+kova auth login                     # interactive — prompts for an API key
+kova auth status                    # show the active profile
+kova auth logout                    # revoke the stored key for the active profile
+```
+
+## `kova auth login`
+
+```bash
+kova auth login
+# KovaServe API key: ********
+
+# Or — non-interactive
+kova auth login --api-key ks_live_...
+```
+
+The interactive form prompts for the API key with hidden input, then writes the credentials file. The non-interactive form accepts `--api-key <key>` directly — useful for CI / scripting.
+
+Specify a non-default profile:
+
+```bash
+kova auth login --profile staging --base-url https://staging.kovaserve.com/v1
+```
+
+This writes to a `[staging]` section in the credentials file. Switch to it on any subsequent command with `--profile staging` or `KOVA_PROFILE=staging`.
+
+## `kova auth status`
+
+```bash
+kova auth status
+# Active profile: default
+# Base URL:       https://api.kovaserve.com/v1
+# API key:        ks_live_...***       (last used 2026-05-15 12:04:22Z)
+# Tenant:         01J8X9Y2Z3K4M5N6P7Q8R9S0T2  (Acme Co)
+# Project:        proj_review_bot              (Review Bot)
+# Environment:    01J8X9Y2Z3K4M5N6P7Q8R9EN03   (prod)
+# Role:           write
+
+# JSON form for scripting
+kova auth status --json
+```
+
+`status` makes a `kova tenants get` call under the hood to verify the credentials are valid and to surface the bound tenant / project / environment. The bearer key itself is shown only as a prefix + last-used timestamp — the raw key is never printed.
+
+## `kova auth logout`
+
+```bash
+kova auth logout
+# Logged out of profile 'default'.
+# The bearer key has been revoked on the server.
+# Local credentials file: removed entry for 'default'.
+
+kova auth logout --profile staging
+```
+
+`logout` does three things:
+
+1. Calls `client.tenancy.keys.revoke(...)` to invalidate the bearer key on the server.
+2. Removes the profile section from `~/.config/kova/credentials`.
+3. Prints a confirmation.
+
+If the bearer key was a long-lived production key and you don't want it revoked, use `--local-only` to drop the local entry without revoking server-side:
+
+```bash
+kova auth logout --local-only
+```
+
+## Profile file format
+
+`~/.config/kova/credentials` is TOML with one section per profile:
+
+```toml
+[default]
+api_key = "ks_live_..."
+base_url = "https://api.kovaserve.com/v1"
+
+[staging]
+api_key = "ks_test_..."
+base_url = "https://staging.kovaserve.com/v1"
+```
+
+The CLI also accepts environment-only configuration with no file — set `KOVASERVE_API_KEY` and skip `kova auth login`:
+
+```bash
+export KOVASERVE_API_KEY=ks_live_...
+kova runs list                       # works without ever calling `kova auth login`
+```
+
+The file is for **interactive** developer convenience; CI and non-interactive deploys typically use env vars.
+
+## OAuth flow (when configured)
+
+For deployments that ship a web portal at `app.kovaserve.com` (or a self-hosted equivalent), the CLI supports browser-based OAuth:
+
+```bash
+kova auth login --browser
+```
+
+Opens a local HTTP server on a random port, opens the portal in your browser, and waits for the portal to redirect back with the key. The wandb-style pattern. The portal must be configured to redirect to the local server; check with your administrator.
+
+For deployments without a configured portal, the pasted-key flow is the canonical path.
+
+## File permissions
+
+The CLI sets the credentials file mode to `0600` on POSIX systems — readable only by the owner. On Windows, the file inherits the parent directory's ACL; placing it under `%APPDATA%` is the standard secure default.
+
+If the file's permissions are too permissive on a POSIX system, the CLI emits a warning at every subcommand invocation:
+
+```
+WARNING: ~/.config/kova/credentials has permission mode 0644; should be 0600.
+         Fix with: chmod 0600 ~/.config/kova/credentials
+```
+
+## Where to go next
+
+<Cards>
+  <Card title="Configuration" href="/docs/cli/configuration" description="Env vars, profiles, precedence." />
+  <Card title="Runs" href="/docs/cli/runs/list" description="The most-used commands once you're authenticated." />
+  <Card title="`kova keys`" href="/docs/cli/keys/create" description="Provision new keys for other users / services." />
+</Cards>
+
+## See also
+
+- [Tenancy](/docs/sdk/control/tenancy) — the SDK side of key management
+- [Authentication (API)](/docs/api/using-the-api/authentication) — the wire-level contract

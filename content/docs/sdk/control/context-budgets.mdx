@@ -1,0 +1,227 @@
+---
+title: Context budgets
+description: The `client.context.budgets` namespace — create, retrieve, update, and run preflight admission against ContextBudgets, the per-request admission control objects for context size.
+---
+
+The `client.context.budgets` namespace operates on [ContextBudgets](/docs/concepts/policy/context-budgets), the admission-control objects that evaluate every assembled [ContextManifest](/docs/sdk/control/context-manifests) before GPU dispatch. A ContextBudget is **not** the same as a [Budget](/docs/sdk/control/budgets): Budgets govern cost / tokens / steps / time / tools at the Run level; ContextBudgets govern context-window admission at the request level. They coexist, return distinct decisions, and use separate Python types to prevent accidental conflation.
+
+```python
+from kovaserve import KovaControlClient
+
+client = KovaControlClient()
+context_budget = client.context.budgets.create(
+    run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    active_token_limit=8000,
+    artifact_byte_limit=10 * 1024 * 1024,
+    offload_required_threshold=0.80,
+    compaction_required_threshold=0.90,
+)
+print(context_budget.id, context_budget.state)
+```
+
+## Methods
+
+| Method | Wire | What it does |
+|---|---|---|
+| [`create`](#create) | `POST /v1/ks/context/budgets` | Create a ContextBudget for a Run. |
+| [`get`](#get) | `GET /v1/ks/context/budgets/{id}` | Fetch the ContextBudget with real-time admission counters. |
+| [`update`](#update) | `PATCH /v1/ks/context/budgets/{id}` | Raise or lower limits and thresholds. |
+| [`admit`](#admit) | `POST /v1/ks/context/admit` | Run preflight admission against an assembled manifest without dispatching. |
+
+## Six dimensions, six decisions
+
+A ContextBudget evaluates the assembled manifest against six dimensional limits and returns one of six decisions. The dimensions are:
+
+| Dimension | Meaning |
+|---|---|
+| `active_token_limit` | Total tokens in the admitted manifest — the bound on what reaches the model. |
+| `stable_token_limit` | Tokens in the stable-prefix tiers (tools, system, history-prefix, summary). |
+| `volatile_token_limit` | Tokens in the volatile tail (agent_state, tool_result). |
+| `tool_result_token_limit` | Tokens in `tool_result` segments specifically. |
+| `artifact_byte_limit` | Total bytes referenced via offloaded artifacts. |
+| `compaction_required_threshold` | Fraction of `active_token_limit` above which compaction is required. |
+| `offload_required_threshold` | Fraction of `active_token_limit` above which artifact offload is required. |
+
+The decisions returned by admission are:
+
+| Decision | Meaning | Recorded action |
+|---|---|---|
+| `ALLOW` | Under all thresholds. | None. |
+| `WARN` | Crossed the warning threshold. Informational; never blocks. | None. |
+| `OFFLOAD_REQUIRED` | Crossed `offload_required_threshold`. | Eligible large segments transformed to artifact refs; manifest re-admitted. |
+| `COMPACT_REQUIRED` | Crossed `compaction_required_threshold`. | Runtime is asked to compact; manifest re-admitted after report. |
+| `DEGRADE` | Crossed terminal threshold but `on_exceed="degrade"`. | `max_tokens` reduced, optional segments dropped; manifest re-admitted. |
+| `HARD_STOP` | Crossed terminal threshold; `on_exceed="hard_stop"`. | Request rejected with `429 context_budget_exceeded` before GPU dispatch. |
+
+The five non-`ALLOW` non-terminal decisions are **transient advisories**: the runtime applies the indicated transformation, the manifest is re-admitted, and the budget returns to a steady state. Only `HARD_STOP` is terminal. `WARN` never blocks. The same identifiers double as the on-the-wire `ContextBudgetDecision` and the FSM state on the [context-budget state machine](/docs/concepts/policy/context-budget-state-machine).
+
+## Distinct from `RunBudgetDecision`
+
+This is the rule the type system enforces:
+
+```python
+from kovaserve.types import ContextBudgetDecision, RunBudgetDecision
+
+# ContextBudgetDecision has 6 values:
+#   ALLOW | WARN | OFFLOAD_REQUIRED | COMPACT_REQUIRED | DEGRADE | HARD_STOP
+
+# RunBudgetDecision has 4 values:
+#   ALLOW | WARN | DEGRADE | HARD_STOP
+
+# They are separate Python types.  mypy flags any attempt to use one where the other is required.
+```
+
+A caller never treats the two interchangeably. The reason the SDK keeps them on separate types — rather than collapsing both into one six-value enum — is that the two services apply different remediation: ContextBudget admission triggers offload and compaction; Run-Budget admission does not. Mixing them up would silently route runtime responses through the wrong branch.
+
+## The ContextBudget shape
+
+```python
+class ContextBudget(BaseModel):
+    id: str
+    run_id: str
+    tenant_id: str
+
+    # Dimensional limits
+    active_token_limit: int | None
+    stable_token_limit: int | None
+    volatile_token_limit: int | None
+    tool_result_token_limit: int | None
+    artifact_byte_limit: int | None
+
+    # Threshold fractions
+    compaction_required_threshold: float       # default 0.90
+    offload_required_threshold: float          # default 0.80
+    warning_threshold: float                   # default 0.70
+
+    on_exceed: str                             # "hard_stop" | "degrade"
+
+    state: ContextBudgetState                  # ACTIVE | WARN | OFFLOAD_REQUIRED |
+                                               # COMPACT_REQUIRED | DEGRADE | HARD_STOP | CLOSED
+    created_at: datetime
+    updated_at: datetime
+```
+
+## `create`
+
+```python
+context_budget = client.context.budgets.create(
+    run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1",        # required
+    active_token_limit=8000,
+    stable_token_limit=5000,
+    volatile_token_limit=3000,
+    tool_result_token_limit=2000,
+    artifact_byte_limit=10 * 1024 * 1024,
+    compaction_required_threshold=0.90,
+    offload_required_threshold=0.80,
+    warning_threshold=0.70,
+    on_exceed="hard_stop",                       # or "degrade"
+)
+```
+
+At least one dimensional limit must be set. Threshold fractions apply to whichever dimensional limit is being evaluated — if `active_token_limit=8000` and `offload_required_threshold=0.80`, the budget triggers `OFFLOAD_REQUIRED` when active tokens cross 6400.
+
+## `get`
+
+```python
+budget = client.context.budgets.get("01J8X9Y2Z3K4M5N6P7Q8R9CB04")
+print(budget.state)                              # current admission state
+```
+
+The state reflects the most recent admission decision against this budget. `ACTIVE` means the last admitted manifest was under all thresholds; `OFFLOAD_REQUIRED` means the last admission applied an offload transformation; and so on.
+
+## `update`
+
+```python
+budget = client.context.budgets.update(
+    "01J8X9Y2Z3K4M5N6P7Q8R9CB04",
+    active_token_limit=16000,                    # double the active context budget
+    on_exceed="degrade",                         # switch from hard_stop to degrade
+)
+```
+
+Limits and thresholds can be raised or lowered while the Run is active. Lowering a limit below the manifest's last-admitted shape transitions the budget to the corresponding non-`ACTIVE` state immediately — the next inference call sees the new decision.
+
+`on_exceed` can be flipped mid-Run. Switching from `hard_stop` to `degrade` lets a near-terminal Run complete under degradation; switching from `degrade` to `hard_stop` cuts off a Run that has been degrading too long.
+
+## `admit`
+
+```python
+decision = client.context.budgets.admit(
+    context_budget_id="01J8X9Y2Z3K4M5N6P7Q8R9CB04",
+    context_manifest_id="01J8X9Y2Z3K4M5N6P7Q8R9SCM07",
+)
+print(decision.decision)                         # ALLOW | WARN | OFFLOAD_REQUIRED | ...
+print(decision.transformations)                  # what would be applied if the call dispatched
+```
+
+`admit` runs the **preflight** admission check against an assembled manifest without dispatching to the model. It is the right call for runtimes that want to know what the budget would say *before* committing to an inference call:
+
+```python
+manifest = client.context.manifests.get("01J8X9Y2Z3K4M5N6P7Q8R9SCM07")
+decision = client.context.budgets.admit(
+    context_budget_id="01J8X9Y2Z3K4M5N6P7Q8R9CB04",
+    context_manifest_id=manifest.id,
+)
+
+if decision.decision == "COMPACT_REQUIRED":
+    # The runtime can choose to compact and re-assemble before the call lands.
+    summary = my_runtime.compact(manifest)
+    client.context.compaction.compact(
+        run_id=manifest.run_id,
+        source_segment_ids=summary.source_ids,
+        output_segments=[summary.output_segment],
+    )
+```
+
+The preflight check never changes state on the budget — it is purely informational. State transitions happen on real admission during inference.
+
+## Composing with the run-level Budget
+
+A Run typically carries both a Budget and a ContextBudget. Admission runs in this order on every model call:
+
+```
+1. GCM assembles the ContextManifest from messages + extension envelope.
+2. Context Admission Service evaluates against ContextBudget.
+   ├─ OFFLOAD_REQUIRED / COMPACT_REQUIRED → transformations applied, re-admit
+   ├─ DEGRADE → max_tokens reduced, optional segments dropped, re-admit
+   └─ HARD_STOP → request rejected before Step creation
+3. Run-level Budget pre-check runs against the admitted manifest's token counts.
+   ├─ HARD_STOP → request rejected before Step creation
+   └─ otherwise → continue
+4. Step is created and bound to the admitted manifest.
+5. Router consults KV Index and dispatches to a node.
+```
+
+Both rejections happen *before* a Step row is created, so a hard-stopped call leaves no Step trace on the Run row. Audit and metering live on the policy and budget event streams instead.
+
+## Async parallel
+
+```python
+import asyncio
+from kovaserve import AsyncKovaControlClient
+
+async def main() -> None:
+    client = AsyncKovaControlClient()
+    context_budget = await client.context.budgets.create(
+        run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+        active_token_limit=8000,
+    )
+
+asyncio.run(main())
+```
+
+## Where to go next
+
+<Cards>
+  <Card title="Budgets" href="/docs/sdk/control/budgets" description="Run-level Budgets — cost / tokens / steps / time / tools. Distinct from ContextBudgets." />
+  <Card title="ContextBudgetClient" href="/docs/sdk/primitives/context-budget-client" description="The ergonomic wrapper for preflight admission." />
+  <Card title="Compaction" href="/docs/sdk/control/compaction" description="What `COMPACT_REQUIRED` triggers." />
+  <Card title="Context artifacts" href="/docs/sdk/control/context-artifacts" description="What `OFFLOAD_REQUIRED` produces." />
+</Cards>
+
+## See also
+
+- [ContextBudget concept](/docs/concepts/policy/context-budgets) — what a ContextBudget is
+- [Context-budget state machine](/docs/concepts/policy/context-budget-state-machine) — `ACTIVE → ... → CLOSED`
+- [Admission](/docs/concepts/policy/admission) — the full admission decision flow
+- [API: Context budgets](/docs/api/policy/context-budgets/create) — the wire surface

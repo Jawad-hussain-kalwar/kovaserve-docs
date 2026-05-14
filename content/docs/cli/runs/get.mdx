@@ -1,0 +1,69 @@
+---
+title: "`kova runs get`"
+description: Fetch one Run by ID, with optional `--expand` paths to hydrate Steps, ModelCalls, and ContextManifests in one call.
+---
+
+Fetch one [Run](/docs/concepts/run-hierarchy/runs) by ID. Renders as a tree by default; use `--expand` to hydrate nested resources.
+
+## Synopsis
+
+```bash
+kova runs get <RUN_ID> [OPTIONS]
+```
+
+## Options
+
+| Option | Meaning |
+|---|---|
+| `--expand <path>` | Dotted path to hydrate. Repeat for multiple paths: `--expand steps --expand steps.model_calls`. |
+| `--flat` | Render Steps as a flat ordinal-ordered list instead of a tree. |
+| `--max-depth <n>` | Cap tree depth. Default 5. Pass 0 for unlimited. |
+| `--json` | Emit the full Run as one JSON document. |
+
+## Examples
+
+```bash
+# Basic — bare Run row
+kova runs get 01J8X9Y2Z3K4M5N6P7Q8R9S0T1
+
+# With Steps and ModelCalls
+kova runs get 01J8X9Y2Z3K4M5N6P7Q8R9S0T1 --expand steps.model_calls
+
+# With full graph hydration
+kova runs get 01J... --expand steps.model_calls.context_manifest
+
+# JSON for scripting
+kova runs get 01J... --expand steps --json | jq '.steps[].step_type'
+
+# Flat ordinal list
+kova runs get 01J... --expand steps --flat
+```
+
+## Output
+
+Tree-shaped by default:
+
+```
+Run 01J8X9Y2Z3K4M5N6P7Q8R9S0T1  RUNNING
+Project:  proj_review_bot
+Model:    meta-llama/Llama-3-70B-Instruct
+Session:  ses_a7f3c2b8d4e1f0925a1b6c3d
+Budget:   $0.0420 / $5.0000   ACTIVE
+Created:  2026-05-15T11:42:01Z
+─────────────────────────────────────────────────────────────────────
+Steps
+├─ 1  TOOL_PLAN     SUCCEEDED  100ms
+│  └─ 2  TOOL_EXECUTE  SUCCEEDED  240ms  (fetch_pr)
+│     └─ ModelCall  cached=940/1247  $0.0420
+└─ 3  TOOL_EXECUTE   STARTED    --  (run_tests)
+   ... 12 more steps (use --max-depth=N or --json)
+```
+
+`--json` returns the full Run object including any expanded nested resources.
+
+## See also
+
+- [`kova runs list`](/docs/cli/runs/list) — list all Runs
+- [`kova runs tail`](/docs/cli/runs/tail) — live-tail a Run's events
+- [`client.runs.get`](/docs/sdk/control/runs) — the SDK equivalent
+- [`expand=` parameter](/docs/sdk/expand-parameter) — the underlying mechanism

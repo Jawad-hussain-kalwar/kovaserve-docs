@@ -1,0 +1,84 @@
+---
+title: "`kova context artifacts`"
+description: Upload, list, fetch, and delete ContextArtifacts — the object-storage-backed entities that hold externalized context bytes.
+---
+
+Manage [ContextArtifacts](/docs/concepts/context/context-artifacts) — tool outputs, file diffs, retrieved documents, workspace snapshots.
+
+## Subcommands
+
+| Subcommand | What it does |
+|---|---|
+| `kova context artifacts upload <PATH>` | Upload a file. Mime auto-detected. |
+| `kova context artifacts list` | Cursor-paginated list scoped to a Run, Session, or Project. |
+| `kova context artifacts get <ID>` | Fetch metadata or download the body. |
+| `kova context artifacts delete <ID>` | Explicit revoke. |
+
+## `upload` examples
+
+```bash
+# Upload a file diff
+kova context artifacts upload ./diff.patch \
+    --artifact-type file_diff \
+    --run-id 01J8X9Y2Z3K4M5N6P7Q8R9S0T1
+
+# Override the name and mime type
+kova context artifacts upload ./giant.bin \
+    --name workspace-snapshot \
+    --mime-type application/octet-stream \
+    --artifact-type workspace_snapshot \
+    --run-id 01J...
+
+# JSON for scripting — pipe the returned id to downstream commands
+ARTIFACT_ID=$(kova context artifacts upload ./diff.patch --artifact-type file_diff --run-id 01J... --json | jq -r '.id')
+```
+
+| Option | Meaning |
+|---|---|
+| `--artifact-type <label>` | Required. Open string: `file_diff`, `tool_output`, `workspace_snapshot`, `retrieved_document`, `langgraph_state`, `transcript`, custom. |
+| `--run-id <id>` / `--session-id <id>` | At least one required. Pins the artifact's lifetime. |
+| `--name <text>` | Defaults to the file's basename. |
+| `--version <text>` | Defaults to `v1`. |
+| `--mime-type <type>` | Auto-detected via libmagic; override when needed. |
+| `--preview <text>` | Auto-generated from first 2 KB; override for binary content. |
+| `--ttl-hours <n>` | Retention TTL. |
+
+## `list` examples
+
+```bash
+# All artifacts for a Run
+kova context artifacts list --run-id 01J8X9Y2Z3K4M5N6P7Q8R9S0T1
+
+# Filter by type and time
+kova context artifacts list --run-id 01J... --artifact-type tool_output --created-after 2026-05-15
+```
+
+## `get` examples
+
+```bash
+# Metadata only
+kova context artifacts get 01J8X9Y2Z3K4M5N6P7Q8R9AR03
+
+# Download the body to a file
+kova context artifacts get 01J... --output ./local-copy.patch
+
+# Stream the body to stdout
+kova context artifacts get 01J... --output -
+
+# Time-limited signed download URL
+kova context artifacts get 01J... --signed --signed-ttl 3600 --json | jq -r '.uri'
+```
+
+## `delete` example
+
+```bash
+kova context artifacts delete 01J8X9Y2Z3K4M5N6P7Q8R9AR03
+```
+
+Delete marks the artifact row as revoked and schedules the object-storage body for purge per the deployment's retention policy. ContextSegments referencing the deleted artifact return only the `preview` on subsequent manifest reads.
+
+## See also
+
+- [`kova context segments get`](/docs/cli/context/segments) — segments referencing the artifact
+- [`client.context.artifacts`](/docs/sdk/control/context-artifacts) — the SDK equivalent
+- [`ArtifactClient`](/docs/sdk/primitives/artifact-client) — the SDK primitive

@@ -1,0 +1,116 @@
+---
+title: Migrating from OpenRouter
+description: OpenRouter routes between many providers; KovaServe gives you the same OpenAI-compatible surface plus durable runs, governance, and private-deployment portability.
+---
+
+OpenRouter routes between many model providers behind an OpenAI-compatible API. KovaServe sits at a different layer: it gives you the same OpenAI-compatible surface **plus** durable managed runs, recovery, governance, budget enforcement, and the option to run on private or sovereign infrastructure.
+
+This guide walks you from an OpenRouter integration to a KovaServe-backed deployment without losing the model-flexibility you already had.
+
+## The two lines
+
+OpenRouter and KovaServe both use the OpenAI shape. Migration is the same two-line change:
+
+```python
+# Before
+from openai import OpenAI
+client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key="sk-or-...")
+
+# After
+from kovaserve import OpenAI
+client = OpenAI()       # KOVASERVE_API_KEY + base_url defaulted from env
+```
+
+Set `KOVASERVE_API_KEY`. Existing OpenRouter code paths work unchanged on the wire.
+
+## Model-flexibility maps cleanly
+
+OpenRouter's `model="anthropic/claude-3.5-sonnet"` syntax — provider/model — maps to KovaServe's `model="anthropic/claude-3.5-sonnet"`. Models are selected per call; KovaServe routes them to the right substrate behind the scenes.
+
+```python
+response = client.chat.completions.create(
+    model="meta-llama/Llama-3-70B-Instruct",
+    messages=[...],
+)
+
+# Or
+response = client.chat.completions.create(
+    model="qwen3-coder-30b",
+    messages=[...],
+)
+```
+
+KovaServe's [Cache-Aware Router](/docs/concepts/routing/manifest-aware-routing) does what OpenRouter's load balancing does, plus warm-prefix preference, scope filtering, and budget-aware placement.
+
+## What you gain
+
+| Capability | OpenRouter | KovaServe |
+|---|---|---|
+| OpenAI-compatible API | ✅ | ✅ |
+| Model variety | ✅ | ✅ |
+| **Durable agent runs** | — | ✅ |
+| **Cost per completed run** | — | ✅ |
+| **Active budget enforcement** | — | ✅ |
+| **Checkpoint / resume** | — | ✅ |
+| **Private / sovereign deployment** | — | ✅ |
+| **Context manifests + audit trail** | — | ✅ |
+| **Tool / policy governance** | — | ✅ |
+
+## Common migration patterns
+
+### Run hierarchy for multi-call agents
+
+OpenRouter calls don't have run identity. KovaServe wraps them:
+
+```python
+from kovaserve import kova
+
+@kova.run(project="proj_review_bot", model="meta-llama/Llama-3-70B-Instruct")
+def review_pr(pr_url: str):
+    # multiple chat completions across the body — all bound to one Run
+    plan = client.chat.completions.create(...)
+    fetch = client.chat.completions.create(...)
+    review = client.chat.completions.create(...)
+    return review.choices[0].message.content
+```
+
+The run carries the cost, steps, and outcomes of every nested call. Query `kova runs get` for the full breakdown.
+
+### Budget the run, not the call
+
+OpenRouter exposes per-call rate limits; KovaServe adds **per-run admission**:
+
+```python
+@kova.budget(cost_cents="500.0000", tokens=100_000, on_exceed="hard_stop")   # 500 cents = $5
+@kova.run(project="...", model="...")
+def review_pr(...):
+    ...
+```
+
+When the strictest dimension hits 100%, subsequent calls reject with `429 budget_exceeded` and the run hard-stops cleanly.
+
+### Move to private deployment when ready
+
+OpenRouter is multi-tenant SaaS only. KovaServe ships as both managed cloud and private / sovereign deployment, with **identical semantics** in both. Switch by changing one env var:
+
+```bash
+export KOVASERVE_BASE_URL=https://kovaserve.internal/v1
+```
+
+See [managed vs private](/docs/quickstart/managed-vs-private) for the deployment-mode tradeoff.
+
+## What stays the same
+
+- Model-by-string selection.
+- OpenAI-compatible streaming, tool calls, structured outputs.
+- Existing OpenAI exception handling.
+- Any retry / idempotency logic at the application layer.
+
+## Where to go next
+
+<Cards>
+  <Card title="Your first managed run" href="/docs/quickstart/first-run" description="End-to-end in ten lines." />
+  <Card title="Sovereign deployment" href="/docs/guides/deployment/sovereign-deployment" description="When you need execution inside your perimeter." />
+  <Card title="Multi-step runs" href="/docs/guides/authoring-runs/multi-step-runs" description="The pattern OpenRouter didn't have." />
+  <Card title="Cost per completed run" href="/docs/concepts/cost/cost-per-completed-run" description="The economic metric that matters." />
+</Cards>

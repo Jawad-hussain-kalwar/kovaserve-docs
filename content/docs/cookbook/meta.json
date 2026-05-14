@@ -1,0 +1,11 @@
+{
+  "title": "Cookbook",
+  "pages": [
+    "coding-agent",
+    "document-review",
+    "ops-automation",
+    "tool-loops-with-budget-kill",
+    "branching-from-checkpoint",
+    "private-deployment"
+  ]
+}

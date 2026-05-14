@@ -1,0 +1,69 @@
+---
+title: "`kova runs tail`"
+description: Live-tail the event timeline of a Run. Yields events as they happen; reconnects transparently on transient failures.
+---
+
+Live-tail the event timeline of a [Run](/docs/concepts/run-hierarchy/runs). Yields one line per event as it lands; reconnects transparently on network failures via `Last-Event-ID`.
+
+## Synopsis
+
+```bash
+kova runs tail <RUN_ID> [OPTIONS]
+```
+
+## Options
+
+| Option | Meaning |
+|---|---|
+| `--streams <stream>` | One or more event streams to include. Default `execution`. Accept-multiple: `--streams execution --streams budget`. |
+| `--event-types <type>` | Filter to specific event types. Accept-multiple. Supports wildcards: `--event-types "ks.budget.*"`. |
+| `--from-beginning` | Start from the first event ever recorded for the Run, not from now. |
+| `--no-follow` | Print past events and exit, instead of staying open. Equivalent to `kova runs timeline ... --json`. |
+| `--json` | Emit one JSON object per line (JSON Lines). |
+
+## Examples
+
+```bash
+# Default — live tail of execution events
+kova runs tail 01J8X9Y2Z3K4M5N6P7Q8R9S0T1
+
+# Multiple streams
+kova runs tail 01J... --streams execution --streams budget --streams context_engineering
+
+# Filter to specific event types
+kova runs tail 01J... --event-types "ks.budget.*"
+
+# JSON Lines piped to jq
+kova runs tail 01J... --json | jq -r '.event_type'
+
+# Replay from the beginning (no live tail)
+kova runs tail 01J... --from-beginning --no-follow --json > timeline.jsonl
+```
+
+## Output
+
+One line per event in default mode:
+
+```
+2026-05-15T11:42:01.124Z  ks.step.created       step=01J... ordinal=1 type=TOOL_PLAN
+2026-05-15T11:42:01.140Z  ks.step.started       step=01J... ordinal=1
+2026-05-15T11:42:01.240Z  ks.model_call.started step=01J... model=meta-llama/Llama-3-70B-Instruct
+2026-05-15T11:42:01.480Z  ks.model_call.completed step=01J... cached=940/1247 cost=$0.0420
+2026-05-15T11:42:01.482Z  ks.step.completed     step=01J... status=SUCCEEDED
+```
+
+The tail stops automatically when the Run reaches a terminal state (`COMPLETED`, `FAILED`, `CANCELED`). `Ctrl+C` stops cleanly at any time.
+
+## Reconnection
+
+`kova runs tail` reconnects transparently on transient network failures, resuming from the last seen event via `Last-Event-ID`. After 10 consecutive failed reconnects, the command exits with a non-zero status and a `KovaStreamReconnectError`. See [streaming](/docs/sdk/streaming) for the full reconnection contract.
+
+## Polling fallback
+
+When the gateway's SSE endpoint is temporarily unavailable, `kova runs tail` falls back to polling the timeline endpoint every 2 seconds. This is transparent to the user — output continues to land, just with slightly higher latency.
+
+## See also
+
+- [`kova runs get`](/docs/cli/runs/get) — the static snapshot
+- [`kova events tail`](/docs/cli/events/tail) — tail across many Runs / event types
+- [`client.runs.stream`](/docs/sdk/control/runs) — the SDK equivalent

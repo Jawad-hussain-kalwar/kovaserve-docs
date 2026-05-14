@@ -1,0 +1,78 @@
+---
+title: "`kova keys rotate`"
+description: Atomically issue a new Bearer Key and revoke the old one. The new raw value is displayed exactly once.
+---
+
+Atomically issue a new Bearer Key with the same scope (project / environment / role / rate limits) as an existing Key, and revoke the old one. The new raw value is **displayed exactly once**.
+
+## Synopsis
+
+```bash
+kova keys rotate <KEY_ID> [OPTIONS]
+```
+
+## Options
+
+| Option | Meaning |
+|---|---|
+| `--grace-period-seconds <n>` | Delay before the old Key is revoked. Default 0 (immediate). Range 0–3600. |
+| `--json` | Emit the new Key as one JSON document (includes the raw value). |
+
+## Examples
+
+```bash
+# Immediate rotation
+kova keys rotate 01J8X9Y2Z3K4M5N6P7Q8R9KY04
+
+# Rotate with a 5-minute grace period — old key keeps working while you deploy the new one
+kova keys rotate 01J... --grace-period-seconds 300
+
+# JSON for automation
+RAW=$(kova keys rotate 01J... --json | jq -r '.raw')
+```
+
+## Output
+
+```
+Rotating Key 01J8X9Y2Z3K4M5N6P7Q8R9KY04
+  Name:        ci-runner
+  Project:     proj_review_bot
+  Environment: env_prod
+  Role:        write
+
+New Key 01J8X9Y2Z3K4M5N6P7Q8R9KY09  ACTIVE
+Old Key 01J8X9Y2Z3K4M5N6P7Q8R9KY04  REVOKED  (effective immediately)
+
+New raw key (displayed once — store it now):
+
+  ks_live_AKIAyyyyyyyyyyyyyyyyyy
+```
+
+## When to rotate
+
+| Reason | Action |
+|---|---|
+| Routine credential rotation (compliance, every 90 days). | Rotate with `--grace-period-seconds <enough-time-to-deploy>`. |
+| Suspected key compromise. | Rotate with `--grace-period-seconds 0` for immediate effect. Then audit `last_used_at` on the revoked key. |
+| Lost the raw value. | Rotate. The original key cannot be recovered. |
+
+## Grace period
+
+`--grace-period-seconds` delays the revocation of the old Key. Both Keys are valid for the duration; the old one is revoked when the period elapses. Use this when you need time to deploy the new Key across multiple environments without downtime:
+
+```bash
+# Get the new key
+kova keys rotate 01J... --grace-period-seconds 600 --json > new-key.json
+
+# Deploy the new key (...)
+
+# 10 minutes later the old key is automatically revoked
+```
+
+The grace period **cannot exceed 3600 seconds** (1 hour). For longer overlaps, leave the original key in place and issue a new key under a different name via `kova keys create`.
+
+## See also
+
+- [`kova keys create`](/docs/cli/keys/create) — issue a fresh Key
+- [`kova keys revoke`](/docs/cli/keys/revoke) — revoke a Key without rotating
+- [`client.tenancy.keys.rotate`](/docs/sdk/control/tenancy) — the SDK equivalent

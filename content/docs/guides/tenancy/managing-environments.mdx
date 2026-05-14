@@ -1,0 +1,95 @@
+---
+title: Managing environments
+description: Environments distinguish prod / staging / dev within a Project. Keys bind to a specific environment so staging keys can't accidentally execute against production resources.
+---
+
+An Environment is the third level of the tenancy hierarchy: Tenant → Project → **Environment** → Deployment. Environments distinguish prod / staging / dev (or any other axis) within one Project. They exist so a Bearer Key intended for one environment cannot accidentally hit another.
+
+## Create an environment
+
+```python
+env = client.tenancy.environments.create(
+    project_id="proj_review_bot",
+    name="prod",
+    description="Production traffic",
+    deployment_id="01J8X9Y2Z3K4M5N6P7Q8R9DP02",
+)
+```
+
+`deployment_id` is optional — set it when the cluster has multiple Deployments and you want this Environment pinned to one. Single-Deployment clusters can leave it unset.
+
+## Common environment layout
+
+```
+proj_review_bot
+├─ env_prod         deployment_id = <prod-fleet>
+├─ env_staging      deployment_id = <staging-fleet>
+└─ env_dev          deployment_id = <prod-fleet>     # shares hardware
+```
+
+Each environment gets its own set of Bearer Keys:
+
+```python
+prod_key = client.tenancy.keys.create(project_id="proj_review_bot", environment_id="env_prod", name="prod-app", role="inference")
+staging_key = client.tenancy.keys.create(project_id="proj_review_bot", environment_id="env_staging", name="staging-app", role="inference")
+```
+
+A key bound to `env_staging` cannot reach `env_prod` resources. The isolation is enforced at admission — every request resolves the Environment from the API key and refuses cross-environment access.
+
+## Environment-scoped configuration
+
+Several settings live on the Environment or on a PolicyScope bound to it:
+
+| Setting | Where |
+|---|---|
+| `data_boundary` | PolicyScope on the Environment. Controls artifact bucket selection. |
+| `context_share_scope` | PolicyScope on the Environment. Controls cache reuse. |
+| Default Budget | Set on the Project or refined on the Environment via PolicyScope. |
+| `deployment_id` | The Environment itself — pins the substrate placement. |
+
+To create an Environment-scoped policy:
+
+```python
+prod_scope = client.policy.scopes.create(
+    project_id="proj_review_bot",
+    environment_id="env_prod",
+    context_share_scope="project",
+    data_boundary="eu_only",
+)
+```
+
+Every Run created in this Environment inherits the scope.
+
+## Switching environments
+
+For Python applications, instantiate one client per Environment:
+
+```python
+prod = KovaControlClient(api_key=os.environ["PROD_KEY"])
+staging = KovaControlClient(api_key=os.environ["STAGING_KEY"])
+```
+
+For the CLI, use profiles:
+
+```bash
+kova auth login --profile prod
+kova auth login --profile staging
+kova --profile staging runs list
+```
+
+## Retiring an environment
+
+Environments don't have an archive verb — they have no independent lifecycle outside their bound keys. To retire an Environment:
+
+1. Revoke all keys bound to it.
+2. Optionally archive the parent Project if it's also retiring.
+
+Future calls with no matching key cannot reach the Environment.
+
+## Where to go next
+
+<Cards>
+  <Card title="Provisioning keys" href="/docs/guides/tenancy/provisioning-keys" description="How keys bind to environments." />
+  <Card title="Policy scopes" href="/docs/guides/policy/policy-scopes" description="Environment-scoped governance." />
+  <Card title="Tenancy concept" href="/docs/concepts/tenancy" description="The full hierarchy." />
+</Cards>

@@ -1,0 +1,200 @@
+---
+title: Extension envelope
+description: The `kovaserve` extension field — the typed envelope you attach via `extra_body={"kovaserve": {...}}` to opt a chat completion into Runs, Sessions, Budgets, ContextManifests, Checkpoints, and the rest of the control plane.
+---
+
+The KovaServe inference path uses the OpenAI SDK's `extra_body` kwarg to carry a single key — `"kovaserve"` — whose value is a typed envelope of execution-control metadata. The envelope is the entire mechanism by which a chat completion opts into the control plane.
+
+```python
+from kovaserve import OpenAI
+from kovaserve.types import KovaServeExtension
+
+client = OpenAI()
+
+extension: KovaServeExtension = {
+    "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+    "memory_class_hints": [
+        {"selector": "system", "memory_class": "durable"},
+        {"selector": "last_user", "memory_class": "volatile"},
+    ],
+}
+
+response = client.chat.completions.create(
+    model="meta-llama/Llama-3-70B-Instruct",
+    messages=[{"role": "user", "content": "Review PR #42"}],
+    extra_body={"kovaserve": extension},
+)
+```
+
+The envelope is the **single discriminator** the gateway uses to choose between two execution paths:
+
+- Body **without** a `kovaserve` key — even a missing key, not just an empty object — uses the stateless inference path. No execution rows, no ContextManifest, no headers, no admission gates.
+- Body **with** a `kovaserve` key — even an empty `{}` — opts into Run / Step / ModelCall recording, [ContextManifest](/docs/concepts/context/context-manifests) assembly, [Budget](/docs/concepts/policy/budgets) admission, [PolicyScope](/docs/concepts/policy/policy-scopes) resolution, and the rest of the control plane.
+
+The empty-object case is supported on purpose: it lets a runtime opt into auto-allocated Runs and Sessions without supplying any specific IDs. The control plane assigns IDs and returns them on the response.
+
+## Typed shape
+
+`KovaServeExtension` is a `TypedDict(total=False)` exported from `kovaserve.types`. Every field is `NotRequired[T]`, so the smallest possible value is `{}`.
+
+```python
+from typing import NotRequired, TypedDict
+
+class KovaServeExtension(TypedDict, total=False):
+    # Identity — durable references to canonical entities
+    run_id:             NotRequired[str]
+    external_run_id:    NotRequired[str]
+    session_id:         NotRequired[str]
+    step_id:            NotRequired[str]
+    checkpoint_id:      NotRequired[str]
+
+    # Policy and budget binding
+    policy_scope_ref:   NotRequired[str]
+    budget_context:     NotRequired[dict]
+    context_budget_ref: NotRequired[str]
+    context_scope_ref:  NotRequired[str]
+
+    # Context engineering
+    context_manifest_id: NotRequired[str]
+    artifact_refs:       NotRequired[list[str]]
+    context_blocks:      NotRequired[list[dict]]
+    memory_class_hints:  NotRequired[list[dict]]
+    compaction_policy:   NotRequired[dict]
+
+    # Recovery and routing
+    resume_marker:       NotRequired[str]
+    placement_hint:      NotRequired[dict]
+    activation_handle:   NotRequired[str]
+
+    # External runtime metadata
+    external_runtime:    NotRequired[str]
+
+    # Idempotency
+    idempotency_key:     NotRequired[str]
+```
+
+The `TypedDict` shape gives you autocomplete and `mypy` validation without forcing you to construct a Pydantic model — every field is optional, every value is a primitive or a small dict. The wire format on `POST /v1/chat/completions` matches this shape verbatim.
+
+## Field reference
+
+### Identity
+
+These fields bind the inference call to existing canonical entities. Omitting them auto-allocates new ones.
+
+| Field | Type | Behaviour |
+|---|---|---|
+| `run_id` | `str` | The ULID of an existing [Run](/docs/concepts/run-hierarchy/runs). The inference call becomes a Step inside this Run. Omit to auto-allocate a Run for this single call. |
+| `external_run_id` | `str` | An opaque identifier from an external runtime (LangGraph thread ID, Temporal workflow run ID, etc.). KovaServe stores it on the Run row but does not parse it. |
+| `session_id` | `str` | The Session ID (`ses_<24hex>`). The Run binds to this [Session](/docs/concepts/continuity/sessions) and accumulates turn history. |
+| `step_id` | `str` | An existing Step ID to bind this ModelCall to. Used by runtimes that allocate Steps explicitly before issuing model calls. |
+| `checkpoint_id` | `str` | The ULID of a [Checkpoint](/docs/concepts/recovery/checkpoints) to resume from. Triggers restore planning before the ModelCall executes. |
+
+### Policy and budget binding
+
+| Field | Type | Behaviour |
+|---|---|---|
+| `policy_scope_ref` | `str` | An existing [PolicyScope](/docs/concepts/policy/policy-scopes) reference. Defaults to the scope resolved from your API key's `(tenant, project, environment)` triple. |
+| `budget_context` | `dict` | Inline budget creation for this Run. Keys: `cost_limit_cents`, `token_limit`, `step_limit`, `time_limit_seconds`, `tool_limit`, `warning_threshold` (percent), `on_exceed` (`hard_stop` / `degrade`). |
+| `context_budget_ref` | `str` | An existing [ContextBudget](/docs/concepts/policy/context-budgets) reference. The admission service evaluates the assembled ContextManifest against this budget. |
+| `context_scope_ref` | `str` | A scope identifier that controls cache and ContextManifest reuse boundaries — `tenant`, `project`, or `private`. Tighter than `policy_scope_ref`. |
+
+### Context engineering
+
+| Field | Type | Behaviour |
+|---|---|---|
+| `context_manifest_id` | `str` | Pin this ModelCall to an existing [ContextManifest](/docs/concepts/context/context-manifests). Used during resume and replay; in normal calls the manifest is auto-assembled. |
+| `artifact_refs` | `list[str]` | References to [ContextArtifacts](/docs/concepts/context/context-artifacts) that should be available to the assembly. Used when offloaded payloads must be re-resolved. |
+| `context_blocks` | `list[dict]` | Pre-shaped context blocks the runtime is supplying directly. Each block has `{content_type, content, scope, memory_class, source}`. Most callers use [`ContextBuilder`](/docs/sdk/primitives/context-builder) to produce this list. |
+| `memory_class_hints` | `list[dict]` | Per-segment retention hints. Each hint is `{selector, memory_class, retention?, checkpoint_relevant?}` where `selector` matches segment role and `memory_class` is one of `ephemeral`, `volatile`, `session`, `durable`, `archival`. |
+| `compaction_policy` | `dict` | Runtime-supplied compaction strategy hint. Keys: `target_active_tokens`, `prefer`, `min_segments_to_compact`. The Compaction Lineage Service records the resulting `CompactionRecord` against this policy. |
+
+### Recovery and routing
+
+| Field | Type | Behaviour |
+|---|---|---|
+| `resume_marker` | `str` | An opaque marker the runtime uses to identify "where this Run left off" — typically a hash of the runtime's internal state. Stored on the Run and surfaced in event payloads. |
+| `placement_hint` | `dict` | An execution preference. Keys: `prefer_warm` (bool), `target_node_id` (str), `affinity_session_id` (str), `allow_promotion` (bool). The Cache-Aware Router treats it as advisory. See [PlacementHint](/docs/concepts/routing/placement-hints). |
+| `activation_handle` | `str` | A [StateHandle](/docs/concepts/recovery/state-handles) ID. Resolves the handle, validates scope, and biases routing toward the node that owns the underlying KV state, ContextManifest, or artifact bundle. |
+
+### External runtime metadata
+
+| Field | Type | Behaviour |
+|---|---|---|
+| `external_runtime` | `str` | A short label identifying the external runtime (`langgraph`, `temporal`, `openai-agents`, `pydantic-ai`, `custom`). Surfaces in run metadata and metering aggregates. |
+| `idempotency_key` | `str` | Mirrors the `Idempotency-Key` HTTP header. The SDK auto-generates one on POSTs; supply this field to control the value explicitly. See [retries and idempotency](/docs/sdk/retries-and-idempotency). |
+
+## Response surface
+
+When the request carries a `kovaserve` extension, the response includes execution metadata in two places:
+
+**Response headers:**
+
+| Header | Value |
+|---|---|
+| `X-KS-Run-Id` | The Run ULID for this call (auto-allocated if not supplied). |
+| `X-KS-Session-Id` | The Session ID, if any. |
+| `X-KS-Step-Id` | The Step ULID created for this call. |
+| `X-KS-Model-Call-Id` | The ModelCall ULID. |
+| `X-KS-Context-Manifest-Id` | The ContextManifest ULID assembled for this call. |
+| `X-KS-Cost-Cents` | Total cost of the call in cents, decimal string with four fractional digits. |
+| `X-KS-Cache-Savings-Cents` | Cache savings versus a no-cache baseline. |
+| `X-KS-Cost-Status` | One of `ok`, `degraded`, `warn`. |
+| `X-KS-Budget-State` | The current Run [Budget](/docs/concepts/policy/budgets) state. |
+| `X-KS-Budget-Remaining-Pct` | Percent remaining across the strictest dimension. |
+| `X-KS-Context-Budget-State` | The current [ContextBudget](/docs/concepts/policy/context-budgets) admission state. |
+
+**Response body:** unchanged from the OpenAI shape. The cost and execution headers are the canonical surface for non-streaming responses; streaming responses extend the OpenAI `usage` object in the final SSE chunk — see [cost and streaming](/docs/sdk/inference/cost-and-streaming).
+
+## Mutual exclusivity rules
+
+A few field combinations are enforced by the gateway:
+
+- `context_manifest_id` and `context_blocks` are mutually exclusive on the same call. Either you supply pre-shaped blocks (the manifest is assembled from them) or you pin to an existing manifest (the blocks are read from its segments).
+- `checkpoint_id` and `run_id` together pin the resume target. Supplying `checkpoint_id` without `run_id` auto-allocates a new Run that becomes the resumed lineage.
+- `budget_context` (inline) and `context_budget_ref` (reference) coexist — the inline budget governs cost / tokens / steps / time / tools at the Run level; the reference budget governs context size at the request level. They serve different dimensions.
+
+Violating a rule returns `400 invalid_request` with `details.field` identifying the conflict.
+
+## Programmatic construction
+
+The SDK exports a builder for the envelope so you can construct it incrementally:
+
+```python
+from kovaserve import KovaServeExtensionBuilder
+
+extension = (
+    KovaServeExtensionBuilder()
+    .run(run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1")
+    .session(session_id="ses_a7f3c2b8d4e1f0925a1b6c3d")
+    .budget(cost_limit_cents="500.0000", token_limit=100_000)
+    .memory_class("system", "durable")
+    .memory_class("last_user", "volatile")
+    .placement_hint(prefer_warm=True)
+    .build()
+)
+
+response = client.chat.completions.create(
+    model="meta-llama/Llama-3-70B-Instruct",
+    messages=[{"role": "user", "content": "Review PR #42"}],
+    extra_body={"kovaserve": extension},
+)
+```
+
+The builder validates field combinations, sets decimal-string precision on cost values automatically, and returns a `KovaServeExtension`-shaped `dict`. It is sugar over the typed dict — a hand-constructed `dict` works identically on the wire.
+
+## Where to go next
+
+<Cards>
+  <Card title="Cost and streaming" href="/docs/sdk/inference/cost-and-streaming" description="Cost headers; final SSE chunk; `accumulate_stream_cost` helper." />
+  <Card title="ContextBuilder" href="/docs/sdk/primitives/context-builder" description="The four-tier prompt model and the typed builder for `context_blocks`." />
+  <Card title="Decorators" href="/docs/sdk/decorators" description="`@kova.run`, `@kova.session`, `@kova.budget` — open contexts without managing the envelope by hand." />
+  <Card title="StateHandle" href="/docs/concepts/recovery/state-handles" description="The typed reference for `activation_handle`." />
+</Cards>
+
+## See also
+
+- [OpenAI compatibility](/docs/sdk/inference/openai-compat) — the re-export contract
+- [`POST /v1/chat/completions`](/docs/api/inference/chat-completions) — the underlying endpoint
+- [Extension envelope (API)](/docs/api/inference/extension-envelope) — the wire-side reference
+- [Concepts overview](/docs/concepts) — the canonical entities the fields refer to

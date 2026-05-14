@@ -1,0 +1,68 @@
+---
+title: "`kova budgets create`"
+description: Attach a Budget to a Run with cost / token / step / time / tool limits and a configurable on-exceed action.
+---
+
+Attach a [Budget](/docs/concepts/policy/budgets) to a Run. Admission applies on every subsequent model call.
+
+## Synopsis
+
+```bash
+kova budgets create --run-id <RUN_ID> [LIMITS] [OPTIONS]
+```
+
+## Options
+
+| Option | Meaning |
+|---|---|
+| `--run-id <id>` | Required. The Run to attach the Budget to. |
+| `--cost-cents <value>` | Cost ceiling. Decimal string with four fractional digits: `"5.0000"`. |
+| `--tokens <n>` | Token ceiling across all ModelCalls. |
+| `--steps <n>` | Step-count ceiling. |
+| `--time-seconds <n>` | Wall-clock ceiling in seconds. |
+| `--tools <n>` | Tool-invocation ceiling. |
+| `--warning-threshold <fraction>` | When to trigger `WARNING` state. Range 0.0–1.0. Default 0.70. |
+| `--on-exceed <action>` | `hard_stop` (default) or `degrade`. |
+| `--json` | Emit the created Budget as one JSON document. |
+
+At least one of `--cost-cents`, `--tokens`, `--steps`, `--time-seconds`, `--tools` must be set.
+
+## Examples
+
+```bash
+# Cost-only budget
+kova budgets create --run-id 01J8X9Y2Z3K4M5N6P7Q8R9S0T1 --cost-cents 5.0000
+
+# Multi-dimensional with degrade fallback
+kova budgets create \
+    --run-id 01J... \
+    --cost-cents 10.0000 \
+    --tokens 200000 \
+    --steps 100 \
+    --time-seconds 3600 \
+    --warning-threshold 0.80 \
+    --on-exceed degrade
+
+# JSON output
+kova budgets create --run-id 01J... --cost-cents 5.0000 --json | jq '.id'
+```
+
+## Output
+
+```
+Budget 01J8X9Y2Z3K4M5N6P7Q8R9BG04  ACTIVE
+Run:               01J8X9Y2Z3K4M5N6P7Q8R9S0T1
+Cost limit:        $0.0500
+Token limit:       —
+Step limit:        —
+Time limit:        —
+Tool limit:        —
+Warning threshold: 70%
+On exceed:         hard_stop
+```
+
+## See also
+
+- [`kova budgets get`](/docs/cli/budgets/get) — read budget state and consumption
+- [`client.budgets.create`](/docs/sdk/control/budgets) — the SDK equivalent
+- [Budget state machine](/docs/concepts/policy/budget-state-machine)

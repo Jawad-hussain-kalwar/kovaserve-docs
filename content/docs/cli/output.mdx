@@ -1,0 +1,199 @@
+---
+title: Output
+description: Table output by default, `--json` for machine consumption. Tree rendering caps depth at 5 with `--max-depth`. ANSI colour disabled via `--no-color` or `NO_COLOR`.
+---
+
+The CLI defaults to **table output** for list and get commands and **streaming-line output** for tail commands. Every command supports `--json` for machine consumption — the gh-CLI convention.
+
+## Table output (default)
+
+```bash
+kova runs list --status RUNNING
+```
+
+```
+ID                                STATUS    PROJECT          MODEL                          CREATED                  COST
+01J8X9Y2Z3K4M5N6P7Q8R9S0T1        RUNNING   proj_review_bot  meta-llama/Llama-3-70B-Instruct  2026-05-15T11:42:01Z     $0.0420
+01J8X9Y2Z3K4M5N6P7Q8R9S0T4        RUNNING   proj_review_bot  meta-llama/Llama-3-70B-Instruct  2026-05-15T11:44:18Z     $0.0180
+```
+
+Tables auto-fit to terminal width — long columns truncate with an ellipsis. Repeat the call with `--no-truncate` to preserve full values (and accept horizontal scrolling).
+
+## `--json`
+
+Every command supports `--json`. For commands that return a single resource:
+
+```bash
+kova runs get 01J8X9Y2Z3K4M5N6P7Q8R9S0T1 --json
+```
+
+```json
+{
+  "id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+  "status": "RUNNING",
+  "model": "meta-llama/Llama-3-70B-Instruct",
+  "...": "..."
+}
+```
+
+For commands that return a list, `--json` emits **one JSON document per call** (an array, not JSON Lines):
+
+```bash
+kova runs list --status RUNNING --json | jq '.[] | {id: .id, cost: .total_cost_cents}'
+```
+
+For tail-shaped commands (`kova runs tail`, `kova events tail`), `--json` emits **one JSON object per line** — JSON Lines, the streaming convention:
+
+```bash
+kova runs tail 01J8X9Y2Z3K4M5N6P7Q8R9S0T1 --json | jq -r '.event_type'
+ks.step.created
+ks.model_call.started
+ks.model_call.completed
+...
+```
+
+The distinction matters when piping to `jq`: `--json` on `list` produces a JSON array; `--json` on `tail` produces JSON Lines. Both work with `jq`'s default mode.
+
+## Tree rendering
+
+Some commands return tree-shaped data — `kova runs get` with embedded Steps, `kova checkpoints list` with branch lineage. The default depth cap is **5 levels**:
+
+```bash
+kova runs get 01J8X9Y2Z3K4M5N6P7Q8R9S0T1
+```
+
+```
+Run 01J8X9Y2Z3K4M5N6P7Q8R9S0T1  RUNNING
+├─ Step 1  TOOL_PLAN     SUCCEEDED  100ms
+│  └─ Step 2  TOOL_EXECUTE  SUCCEEDED  240ms  (fetch_pr)
+│     └─ ModelCall  meta-llama/Llama-3-70B  cached=940/1247  cost=$0.0420
+├─ Step 3  THINK          SUCCEEDED  80ms
+│  └─ ModelCall  meta-llama/Llama-3-70B  cached=820/1303  cost=$0.0510
+└─ Step 4  TOOL_EXECUTE   STARTED    --  (run_tests)
+   ... 12 more steps (use --max-depth=N or --json)
+```
+
+Override the cap:
+
+```bash
+kova runs get 01J... --max-depth 10
+kova runs get 01J... --max-depth 0     # unlimited
+```
+
+Or with the env var:
+
+```bash
+export KOVA_MAX_TREE_DEPTH=10
+kova runs get 01J...
+```
+
+For machine consumption, `--json` is always full-depth — no truncation.
+
+## `--flat` for tree commands
+
+Some users prefer flat ordinal-ordered output. Pass `--flat` to skip the tree rendering:
+
+```bash
+kova runs get 01J... --flat
+```
+
+```
+Run 01J8X9Y2Z3K4M5N6P7Q8R9S0T1  RUNNING
+
+ORDINAL  TYPE          STATUS    PARENT  DURATION
+1        TOOL_PLAN     SUCCEEDED  -       100ms
+2        TOOL_EXECUTE  SUCCEEDED  1       240ms
+3        THINK         SUCCEEDED  -       80ms
+4        TOOL_EXECUTE  STARTED    -       --
+...
+```
+
+`--flat` and `--json` are independent — `--flat --json` produces JSON Lines with no embedded nesting.
+
+## ANSI colour
+
+Table output uses ANSI colour by default. Disable with `--no-color`:
+
+```bash
+kova runs list --no-color
+```
+
+The CLI also honours the cross-tool `NO_COLOR` environment variable:
+
+```bash
+NO_COLOR=1 kova runs list
+```
+
+When stdout is not a TTY (pipe to `jq`, redirect to a file), colour is automatically disabled. You shouldn't normally need to pass `--no-color` explicitly.
+
+## Quiet and verbose
+
+`--quiet` (`-q`) suppresses non-essential output — useful in scripts where you only want the actual result:
+
+```bash
+kova runs get 01J... --quiet --json | jq '.status'
+```
+
+`--verbose` (`-v`) raises log verbosity. Repeat for more detail:
+
+| Flag | Logger level |
+|---|---|
+| (default) | warn |
+| `-v` | info |
+| `-vv` | debug |
+| `-vvv` | trace (HTTP wire-level) |
+
+Verbose output goes to stderr; the actual command result goes to stdout. Pipes are unaffected:
+
+```bash
+kova runs list -vv --json | jq '.[].id'    # verbose log on stderr; clean JSON on stdout
+```
+
+## Error output
+
+Errors render with red labels on stderr by default:
+
+```
+ERROR  [404 run_not_found] Run 01J8X9Y2Z3K4M5N6P7Q8R9S0T1 not found
+       request_id=01J8X9Y2Z3K4M5N6P7Q8R9XX01
+```
+
+With `--json`, errors render as JSON on stderr:
+
+```json
+{
+  "error": {
+    "type": "kova_not_found_error",
+    "code": "run_not_found",
+    "message": "Run 01J8X9Y2Z3K4M5N6P7Q8R9S0T1 not found",
+    "status_code": 404,
+    "request_id": "01J8X9Y2Z3K4M5N6P7Q8R9XX01"
+  }
+}
+```
+
+The CLI's exit code reflects the failure:
+
+| Exit code | Meaning |
+|---|---|
+| 0 | Success. |
+| 1 | Generic failure. |
+| 2 | Invalid arguments. |
+| 4 | Authentication or permission failure. |
+| 5 | Resource not found. |
+| 6 | Conflict (idempotency, illegal state). |
+| 7 | Budget exceeded. |
+| 8 | Server error. |
+
+## Where to go next
+
+<Cards>
+  <Card title="Configuration" href="/docs/cli/configuration" description="`KOVA_MAX_TREE_DEPTH` and other env vars." />
+  <Card title="Runs commands" href="/docs/cli/runs/list" description="The most-used resource — exercises every output mode." />
+  <Card title="`kova events tail`" href="/docs/cli/events/tail" description="JSON Lines streaming." />
+</Cards>
+
+## See also
+
+- [CLI overview](/docs/cli) — every subcommand at a glance
+- [Errors](/docs/sdk/errors) — the exception classes that map to exit codes

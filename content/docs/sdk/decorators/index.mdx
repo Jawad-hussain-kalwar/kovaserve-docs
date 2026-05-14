@@ -1,0 +1,169 @@
+---
+title: Decorators
+description: Five decorators — `@kova.run`, `@kova.session`, `@kova.budget`, `@kova.step`, `@kova.checkpoint` — open a canonical-entity context around a function body. Registration sugar, not orchestration.
+---
+
+The decorators are the SDK's **registration sugar**: thin context managers that open a [Run](/docs/concepts/run-hierarchy/runs), [Session](/docs/concepts/continuity/sessions), [Budget](/docs/concepts/policy/budgets), [Step](/docs/concepts/run-hierarchy/steps), or [Checkpoint](/docs/concepts/recovery/checkpoints) around a function body. They never invent execution semantics; they wrap a function call in the lifecycle of one canonical entity and let everything inside the body run normally.
+
+```python
+from kovaserve import kova
+
+@kova.run(project="proj_review_bot", model="meta-llama/Llama-3-70B-Instruct")
+def review_pr(pr_url: str) -> str:
+    @kova.step(type="TOOL_EXECUTE", name="fetch_pr")
+    def fetch():
+        return github.get_pr(pr_url)
+    pr = fetch()
+    return summarize(pr)
+```
+
+## Five decorators, one job each
+
+| Decorator | What it opens | Common alias |
+|---|---|---|
+| `@kova.run` | A [Run](/docs/sdk/control/runs) — the durable execution objective. | — |
+| `@kova.session` | A [Session](/docs/sdk/control/sessions) hosting multiple Runs. | — |
+| `@kova.budget` | A [Budget](/docs/sdk/control/budgets) attached to a Run, with admission applied on entry. | — |
+| `@kova.step` | A [Step](/docs/sdk/control/runs) inside the active Run. | `@kova.tool`, `@kova.observe`, `@kova.think`, `@kova.compact` |
+| `@kova.checkpoint` | A [Checkpoint](/docs/sdk/control/checkpoints) capture around a body. | — |
+
+Two operations are **deliberately not decorators**: `@kova.branch` and `@kova.resume`. Branching and resuming are one-shot operations on `client.runs.branch(...)` and `client.checkpoints.restore(...)`. Wrapping a function with `@kova.branch` would imply the body *is* the branched Run *and* whatever computation the user wrote — two semantics fighting. Use the control-client methods directly for those operations.
+
+## Lifecycle contract
+
+Every decorator follows the same lifecycle contract:
+
+**On entry** — the decorator opens the entity, stores it in a `contextvars.ContextVar`, and patches the surrounding HTTP layer so outgoing inference calls inherit the entity ID automatically.
+
+**On normal return** — the entity transitions to its successful terminal state (`Run.COMPLETED`, `Budget.CLOSED`, `Step.SUCCEEDED`, `Checkpoint.VALIDATED`). The ContextVar is released.
+
+**On exception** — the entity transitions to its failed terminal state (`Run.FAILED` with `details.exception_type`, `Step.FAILED`, etc.). The decorator **re-raises the original exception unchanged**. Decorators never swallow.
+
+**On generator return** — the entity stays in its running state until the generator is exhausted. Early consumer stop transitions the entity to `CANCELED` ("I stopped reading" means "cancel"). The ContextVar is released when the generator's `__del__` or explicit `close()` runs.
+
+**On streaming inference** — when the function body returns a stream, the entity stays in its running state until the stream is consumed to completion. The decorator's exit path is deferred until the stream ends or is closed.
+
+## What decorators do not do
+
+The contract is intentionally narrow:
+
+- **Decorators never silently issue HTTP calls outside the wrapped body.** Every HTTP call is at a documented entry or exit. This is the Modal-precedent rule — if you `pdb.set_trace()` inside the body, no surprise calls are inflight.
+- **Decorators do not invent semantics.** `@kova.run` opens a Run — it does not implement retry, scheduling, fanout, or any other orchestration concern. Those belong in your runtime (LangGraph, Temporal, custom).
+- **Decorators do not rewrap exceptions.** OpenAI's exceptions remain `openai.*` errors. KovaServe's exceptions remain `kovaserve.Kova*` errors. The original traceback is preserved.
+- **Decorators do not run on import — but a missing API key fails fast.** Decoration registers the wrapper; no resource is created until the function is *called*. A missing API key is detected at decoration time and raises `AuthenticationError` immediately, so a misconfigured environment surfaces at the import site rather than deep inside a long-running execution path.
+
+## Stacking order
+
+Decorators stack outer-to-inner. **The order is binding**:
+
+```python
+@kova.budget(cost_cents="500.0000", tokens=100_000)   # 1. outermost — admission applies first
+@kova.run(project="proj_review_bot", model="...")     # 2. Run binds inside the Budget
+@kova.session(model="...")                            # 3. innermost when stacked on the same function
+def review_pr(...):
+    ...
+```
+
+The order matters because:
+
+- **Budget admission must happen before Run allocation.** A hard-stop at admission must not orphan a `RUNNING` Run.
+- **`@kova.session` is innermost only when stacked on the same function.** Stacked together, each call opens a Session, then a Run, then runs the body. The canonical Session → many Runs relationship is expressed by applying `@kova.session` to an enclosing function whose body calls multiple `@kova.run`-decorated inner functions, or by passing `session=<id>` to `@kova.run` to bind to an existing Session.
+
+Reversed stacking is caught both at type-check time (`mypy` via `Concatenate`-typed signatures) and at decoration time (`DecoratorOrderError` raised when the module imports). See [composition](/docs/sdk/decorators/composition) for the full stacking rules.
+
+## Implicit metadata propagation
+
+A function decorated with `@kova.run` automatically injects `kovaserve.run_id` into every chat completion issued from inside the body — through the [OpenAI re-export](/docs/sdk/inference/openai-compat), through a [framework adapter](/docs/sdk/adapters), through any HTTP call that reaches the gateway. The mechanism is an `httpx.event_hooks` patch on the SDK's HTTP layer that reads the active Run from the ContextVar.
+
+```python
+@kova.run(project="proj_review_bot", model="meta-llama/Llama-3-70B-Instruct")
+def review_pr(pr_url: str) -> str:
+    # The chat completion below inherits run_id from the decorator —
+    # no explicit extra_body needed.
+    response = openai_client.chat.completions.create(
+        model="meta-llama/Llama-3-70B-Instruct",
+        messages=[{"role": "user", "content": f"Review {pr_url}"}],
+    )
+    return response.choices[0].message.content
+```
+
+This is the **only** implicit HTTP behaviour the SDK ships. Every other piece of metadata (Budget context, PolicyScope, ContextManifest pinning, activation handles) flows explicitly through the [extension envelope](/docs/sdk/inference/extension-envelope) or through `KovaControlClient` methods.
+
+You can opt out of the implicit propagation per-call:
+
+```python
+@kova.run(...)
+def review_pr(...):
+    response = openai_client.chat.completions.create(
+        model="...",
+        messages=[...],
+        extra_body={"kovaserve": {}},      # opt into control plane but no run binding
+    )
+```
+
+An empty `kovaserve` dict still routes the call through the control plane (Run / Step / ModelCall recorded for a *new* Run), but does not inherit the surrounding decorator's Run ID.
+
+## `RunHooks` integration
+
+Every decorator accepts a `hooks=` kwarg that composes with hooks registered on the client:
+
+```python
+from kovaserve import kova, RunHooks
+
+class AlertHooks(RunHooks):
+    def on_budget_warning(self, decision):
+        slack.send(f"Budget warning on {decision.run_id}: {decision.message}")
+
+@kova.run(project="proj_review_bot", hooks=AlertHooks())
+def review_pr(...):
+    ...
+```
+
+See [hooks](/docs/sdk/hooks) for the composition contract (client default → decorator → per-call) and the `inheritable` flag that controls propagation to nested operations.
+
+## When to use decorators vs the control client
+
+Both achieve the same outcome on the server side. Pick by ergonomic fit:
+
+| Pattern | Reach for decorators | Reach for the control client |
+|---|---|---|
+| A function *is* a Run end-to-end | ✅ `@kova.run` | — |
+| A function manages many Runs imperatively | — | `client.runs.create(...)` per Run |
+| A function nests Steps inside a single Run | ✅ `@kova.step` (alias `@kova.tool` / `@kova.observe`) | `client.runs.steps(...)` |
+| Setting up a Budget before the first inference call | ✅ `@kova.budget` | `client.budgets.create(...)` |
+| Reading or listing existing resources | — | `client.runs.list(...)` etc. |
+| Restoring from a Checkpoint | — | `client.checkpoints.restore(...)` |
+| Capturing a Checkpoint at a known boundary | ✅ `@kova.checkpoint(trigger=...)` | `client.checkpoints.create(...)` |
+
+Decorators and the control client coexist cleanly in the same function. Most production agents use both: decorators for the lifecycle boundaries; the control client for explicit reads and one-off operations.
+
+## Async parallel
+
+Every decorator works on `async def` functions:
+
+```python
+@kova.run(project="proj_review_bot", model="meta-llama/Llama-3-70B-Instruct")
+async def review_pr(pr_url: str) -> str:
+    pr = await github.get_pr(pr_url)
+    return await summarize(pr)
+```
+
+The decorator detects sync vs async at decoration time and dispatches to the matching implementation. Sync wrappers run on the calling thread; async wrappers run on the calling task. There is no hidden event loop.
+
+## Where to go next
+
+<Cards>
+  <Card title="`@kova.run`" href="/docs/sdk/decorators/run" description="Open a Run around a function body." />
+  <Card title="`@kova.session`" href="/docs/sdk/decorators/session" description="Open a Session hosting multiple Runs." />
+  <Card title="`@kova.budget`" href="/docs/sdk/decorators/budget" description="Attach a Budget with admission applied on entry." />
+  <Card title="`@kova.step`" href="/docs/sdk/decorators/step" description="Record a Step inside the active Run." />
+  <Card title="`@kova.checkpoint`" href="/docs/sdk/decorators/checkpoint" description="Capture a Checkpoint at a function boundary." />
+  <Card title="Composition" href="/docs/sdk/decorators/composition" description="Stacking order and the typed-out-of-order rule." />
+  <Card title="Hooks" href="/docs/sdk/hooks" description="The reactivity surface every decorator integrates with." />
+</Cards>
+
+## See also
+
+- [SDK overview](/docs/sdk) — the three surfaces of the package
+- [Extension envelope](/docs/sdk/inference/extension-envelope) — what gets injected into chat completions
+- [KovaControlClient](/docs/sdk/control) — the imperative alternative

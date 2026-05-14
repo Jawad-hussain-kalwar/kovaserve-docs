@@ -1,0 +1,133 @@
+---
+title: Managing artifacts
+description: Upload large tool outputs, file diffs, retrieved documents, and workspace snapshots as ContextArtifacts. Reference them from segments by preview; the model sees a bounded reference instead of the raw bytes.
+---
+
+ContextArtifacts are object-storage-backed entities holding externalized context bytes. When a tool output is 100 KB instead of 100 bytes, you upload it as an artifact, store a short preview text on the segment, and reference the artifact by ID. The model sees the preview, not the bytes. The Cache-Aware Router sees a bounded segment, not a cache-busting blob.
+
+## Upload-then-reference
+
+```python
+from kovaserve import KovaControlClient
+from kovaserve.context import ArtifactClient, ContextBuilder
+
+client = KovaControlClient()
+artifacts = ArtifactClient(client)
+
+# Upload a tool output
+ref = artifacts.upload_path(
+    "./big-tool-output.json",
+    artifact_type="tool_output",
+    run_id=run.id,
+)
+
+# Reference from a segment
+ctx = ContextBuilder()
+ctx.add_tool_result(
+    content_preview="Tool returned 1247 records; full payload offloaded.",
+    artifact_ref=ref.id,
+)
+```
+
+The segment renders only `content_preview` into the prompt; the artifact body is fetched on demand by the runtime if needed.
+
+## When to offload
+
+| Content | Offload? |
+|---|---|
+| Tool output > 4 KB | Yes. |
+| File diff > 1 KB | Yes — diffs are cache-hostile. |
+| Retrieved documents | Yes — RAG documents belong in artifacts. |
+| Workspace snapshots | Always. |
+| Short tool outputs (~200 bytes) | No — inline. |
+| Frequently-changing small content | No — inline. |
+
+The general rule: anything bigger than a few hundred bytes and not part of the stable prefix is a candidate for offload.
+
+## The four upload paths
+
+```python
+# 1. From a file path — auto-detects mime, computes hash, uploads
+ref = artifacts.upload_path("./diff.patch", artifact_type="file_diff", run_id=run.id)
+
+# 2. From bytes in memory — supply name and mime
+ref = artifacts.upload_content(b"...", name="snapshot", mime_type="application/json", artifact_type="workspace_snapshot", run_id=run.id)
+
+# 3. From a streaming source — handles large bodies without memory pressure
+with open("./giant.bin", "rb") as f:
+    ref = artifacts.upload_stream(f, name="giant.bin", mime_type="application/octet-stream", artifact_type="raw_dump", run_id=run.id)
+
+# 4. Through the raw control client — full field control
+ref = client.context.artifacts.upload(name="...", version="v2", mime_type="...", artifact_type="...", content=b"...", run_id=run.id, preview="...")
+```
+
+## Auto-mime detection
+
+`upload_path` uses `python-magic` (an optional dep) for content-based mime detection. Falls back to `mimetypes.guess_type` (extension-based) when `python-magic` isn't installed:
+
+```bash
+pip install python-magic     # better mime detection
+```
+
+Override explicitly when you don't trust auto-detection:
+
+```python
+ref = artifacts.upload_path("./output.txt", mime_type="text/plain", artifact_type="tool_output", run_id=run.id)
+```
+
+## Retention
+
+Default retention is the Project's default policy. Override per-artifact:
+
+```python
+ref = artifacts.upload_path(
+    "./diff.patch",
+    artifact_type="file_diff",
+    run_id=run.id,
+    retention_policy={"ttl_hours": 168},      # 1 week
+)
+```
+
+Artifacts expire automatically when their TTL elapses. Explicit revocation:
+
+```python
+client.context.artifacts.delete(ref.id)
+```
+
+After deletion, segments referencing the artifact return their `preview` only.
+
+## Data-residency boundaries
+
+Uploads route to a bucket determined by the active PolicyScope's `data_boundary` field:
+
+| `data_boundary` | Bucket |
+|---|---|
+| unset | `ks-context-artifacts` |
+| `eu_only` | `ks-context-artifacts-eu` |
+| `us_only` | `ks-context-artifacts-us` |
+
+The bucket must exist in the deployment. Private deployments that target a regional `data_boundary` must provision the corresponding bucket at deployment time.
+
+## Download when needed
+
+```python
+body = artifacts.download(ref.id)                    # bytes in memory
+text = artifacts.download_text(ref.id)               # decoded text
+artifacts.download_to_path(ref.id, "./local.patch")  # streaming to disk
+```
+
+For signed download URLs (handoff to a browser or a sidecar):
+
+```python
+art = client.context.artifacts.get(ref.id, signed=True, signed_ttl_seconds=3600)
+print(art.uri)        # → https:// signed URL valid for 1 hour
+```
+
+## Where to go next
+
+<Cards>
+  <Card title="Authoring context manifests" href="/docs/guides/context/authoring-context-manifests" description="The other half of the context shape." />
+  <Card title="Compaction strategies" href="/docs/guides/context/compaction-strategies" description="When segments should compact instead of offload." />
+  <Card title="ArtifactClient" href="/docs/sdk/primitives/artifact-client" description="Primitive reference." />
+  <Card title="`kova context artifacts`" href="/docs/cli/context/artifacts" description="The CLI equivalent." />
+</Cards>

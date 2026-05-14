@@ -1,0 +1,223 @@
+---
+title: Compaction
+description: The `client.context.compaction` namespace — report a runtime-produced summary to the Compaction Lineage Service, and list the CompactionRecords on a Run.
+---
+
+The `client.context.compaction` namespace operates on [CompactionRecords](/docs/concepts/context/compaction-records), the lineage objects that describe how a set of source [ContextSegments](/docs/sdk/control/context-segments) became one or more compacted segments. KovaServe's compaction model is a **lineage contract, not a service**: the runtime decides when to compact and produces the summary; KovaServe records the lineage, atomically swaps the segments on the manifest, and exposes the lineage for resume and audit. The same contract supports a future KovaServe-managed summarizer without changing the wire surface.
+
+```python
+from kovaserve import KovaControlClient
+
+client = KovaControlClient()
+
+# After the runtime produces a summary, report it to KovaServe
+record = client.context.compaction.compact(
+    run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    source_segment_ids=[
+        "01J8X9Y2Z3K4M5N6P7Q8R9SSG10",
+        "01J8X9Y2Z3K4M5N6P7Q8R9SSG11",
+        "01J8X9Y2Z3K4M5N6P7Q8R9SSG12",
+        "01J8X9Y2Z3K4M5N6P7Q8R9SSG13",
+        "01J8X9Y2Z3K4M5N6P7Q8R9SSG14",
+    ],
+    output_segments=[
+        {
+            "context_type": "summary",
+            "content_inline": "User reviewed PRs #41, #42, #43; key decisions: …",
+            "memory_class": "durable",
+        }
+    ],
+    method="runtime_reported",
+    model_id="meta-llama/Llama-3-70B-Instruct",
+)
+
+print(record.id)
+print(record.token_count_before, "→", record.token_count_after)
+```
+
+## Methods
+
+| Method | Wire | What it does |
+|---|---|---|
+| [`compact`](#compact) | `POST /v1/ks/context/compact` | Atomically record a CompactionRecord, create the output segment(s), and swap the manifest. |
+| [`records`](#records) | `GET /v1/ks/runs/{id}/compaction-records` | List the CompactionRecords accumulated on a Run. |
+
+## The lineage contract
+
+A compaction event takes a set of *source* segments and produces a set of *output* segments. The contract KovaServe records covers:
+
+- Which source segments were consumed
+- Which output segments replaced them
+- Which method produced the summary (`runtime_reported` or `kovaserve_managed`)
+- Which model produced the summary (when applicable)
+- Token counts before and after
+- A bundle of the source segments archived to object storage for resume reconstruction
+- Quality flags supplied by the runtime
+
+The lineage record is durable and immutable. Resuming a Run after a compaction event reconstructs the active context using the output (summary) segments — but the original source segments remain addressable through the archive bundle if a downstream tool needs to inspect what was compacted away.
+
+## The CompactionRecord shape
+
+```python
+class CompactionRecord(BaseModel):
+    id: str
+    tenant_id: str
+    project_id: str
+    run_id: str
+    session_id: str | None
+
+    source_manifest_id: str              # the manifest the source segments belonged to
+    source_segment_ids: list[str]
+    output_segment_ids: list[str]
+
+    method: CompactionMethod             # "runtime_reported" | "kovaserve_managed"
+    model_id: str | None                 # which model produced the summary (when applicable)
+
+    token_count_before: int              # sum across source segments
+    token_count_after: int               # sum across output segments
+    quality_flags: dict | None           # runtime-supplied: {coverage, fidelity, ...}
+
+    source_archive_artifact_id: str | None   # the artifact_bundle of source bytes for resume
+
+    created_at: datetime
+    metadata: dict
+```
+
+`method` is the wire-level discriminator:
+
+| `method` | Who produced the summary | When to use |
+|---|---|---|
+| `runtime_reported` | The runtime (LangGraph, Deep Agents, custom). | Default. The runtime owns "what to compact" and "how to summarize"; KovaServe records the lineage. |
+| `kovaserve_managed` | A KovaServe-managed compaction service. | Reserved for the optional managed summarizer path; surfaced through the same `compact` endpoint when configured. |
+
+## `compact`
+
+```python
+record = client.context.compaction.compact(
+    run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1",         # required
+    source_segment_ids=[...],                     # required — at least one source segment
+    output_segments=[                             # required — at least one output segment
+        {
+            "context_type": "summary",            # canonical context_type for the output
+            "content_inline": "...",              # the body of the summary (or omit + supply artifact_ref_id)
+            "memory_class": "durable",            # retention intent label
+            "checkpoint_relevant": True,          # included in future Checkpoint snapshots
+        }
+    ],
+    method="runtime_reported",                    # required
+    model_id="meta-llama/Llama-3-70B-Instruct",   # required when method=runtime_reported and a model was used
+    quality_flags={                               # optional runtime annotations
+        "coverage": 0.95,
+        "fidelity": "high",
+    },
+    archive_source=True,                          # default — archive the source bytes for resume
+)
+```
+
+The call is **atomic**: in a single transaction, KovaServe creates the CompactionRecord row, creates the output ContextSegment row(s), swaps the manifest to use the output segments in place of the sources, and (when `archive_source=True`) bundles the source segments into a [ContextArtifact](/docs/sdk/control/context-artifacts) referenced from `source_archive_artifact_id`.
+
+The runtime is responsible for two decisions KovaServe does **not** make:
+
+- **What to compact.** The runtime selects which source segments to collapse. KovaServe does not pick.
+- **How to summarize.** The runtime produces the summary text. KovaServe does not generate it.
+
+Compaction *lineage* is infrastructure (always KovaServe); compaction *quality* is application (always the runtime). The same contract supports a KovaServe-managed summarizer without changing this boundary.
+
+### Output segment shape
+
+The `output_segments` list accepts one or more segment specs. Each spec has the canonical [ContextSegment](/docs/sdk/control/context-segments) fields:
+
+| Field | Required | Meaning |
+|---|---|---|
+| `context_type` | yes | Canonical position — usually `summary`. |
+| `memory_class` | yes | Retention intent — usually `durable` or `session` for compaction outputs. |
+| `content_inline` | conditional | Required when `artifact_ref_id` is not supplied. |
+| `artifact_ref_id` | conditional | Required when `content_inline` is not supplied. |
+| `preview` | no | Up to 2048 characters. Auto-generated when omitted. |
+| `checkpoint_relevant` | no | Default `True` for `summary` type, `False` otherwise. |
+
+Most compactions produce exactly one `summary` segment from N source segments. Some workflows produce two output segments — a `summary` plus an `agent_state` carry-over — and the API accepts an arbitrary list.
+
+## `records`
+
+```python
+for record in client.context.compaction.records(run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1"):
+    print(record.created_at, record.method, record.token_count_before, "→", record.token_count_after)
+```
+
+Returns the chronological list of CompactionRecords accumulated on a Run. Use this to audit compaction lineage end-to-end:
+
+```python
+records = list(client.context.compaction.records(
+    run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+))
+
+total_tokens_saved = sum(
+    r.token_count_before - r.token_count_after
+    for r in records
+)
+print(f"Compactions reduced active context by {total_tokens_saved} tokens.")
+```
+
+`records` is also useful for resume: a Run that crashed mid-flight can be inspected to determine which compactions had landed and which had not, so the resume planner reconstructs context from the right manifest snapshot.
+
+## Trigger by ContextBudget
+
+The most common compaction trigger is a [ContextBudget](/docs/sdk/control/context-budgets) admission returning `COMPACT_REQUIRED`:
+
+```python
+# Runtime hook on admission decision
+def on_compact_required(decision):
+    manifest = client.context.manifests.get(decision.manifest_id, expand=["segments"])
+    # Pick source segments — typically older session_history
+    source_ids = [s.id for s in manifest.segments if s.context_type == "session_history"][:5]
+    # Produce a summary with the runtime's own LLM
+    summary = my_runtime.summarize(source_ids)
+    # Report to KovaServe
+    client.context.compaction.compact(
+        run_id=manifest.run_id,
+        source_segment_ids=source_ids,
+        output_segments=[{
+            "context_type": "summary",
+            "content_inline": summary.text,
+            "memory_class": "durable",
+        }],
+        method="runtime_reported",
+        model_id=summary.model_id,
+    )
+```
+
+After the compaction lands, the same chat completion can be retried — admission now sees the reduced manifest and returns `ALLOW`.
+
+## Async parallel
+
+```python
+import asyncio
+from kovaserve import AsyncKovaControlClient
+
+async def main() -> None:
+    client = AsyncKovaControlClient()
+    record = await client.context.compaction.compact(
+        run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+        source_segment_ids=["01J...10", "01J...11"],
+        output_segments=[{"context_type": "summary", "content_inline": "...", "memory_class": "durable"}],
+        method="runtime_reported",
+    )
+
+asyncio.run(main())
+```
+
+## Where to go next
+
+<Cards>
+  <Card title="Context budgets" href="/docs/sdk/control/context-budgets" description="The admission service that triggers `COMPACT_REQUIRED`." />
+  <Card title="Context manifests" href="/docs/sdk/control/context-manifests" description="What gets swapped when compaction lands." />
+  <Card title="CompactionClient" href="/docs/sdk/primitives/compaction-client" description="The ergonomic wrapper for the lineage report flow." />
+  <Card title="Checkpoints" href="/docs/sdk/control/checkpoints" description="How compaction lineage participates in resume." />
+</Cards>
+
+## See also
+
+- [CompactionRecord concept](/docs/concepts/context/compaction-records) — what the record is
+- [Compaction lineage](/docs/concepts/context/compaction-lineage) — source-to-output relationships
+- [API: Compaction records](/docs/api/context/compaction-records/get) — the wire surface

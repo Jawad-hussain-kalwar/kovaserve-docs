@@ -1,0 +1,76 @@
+---
+title: "`kova cluster cache-lookup`"
+description: Find which nodes hold a given prefix or context identity in the KV Index. Operator-scope.
+---
+
+Find which nodes hold a given prefix or context identity in the KV Index. Operator-scope; ordinary keys see `403 permission_denied`. The corresponding SDK operation is [`client.cluster.cache_lookup`](/docs/sdk/control/cluster).
+
+## Synopsis
+
+```bash
+kova cluster cache-lookup [OPTIONS]
+```
+
+## Options
+
+| Option | Meaning |
+|---|---|
+| `--prefix-id <hash>` | Look up by legacy `stable_prefix_id`. |
+| `--context-id <hash>` | Look up by compatibility-aware `stable_context_id`. |
+| `--json` | Emit results as one JSON document. |
+
+At least one of `--prefix-id` or `--context-id` is required. Pass both to require matches on both identities.
+
+## Examples
+
+```bash
+# Find every node that has this prefix cached
+kova cluster cache-lookup --prefix-id sha256:9a1c...
+
+# Compatibility-aware identity
+kova cluster cache-lookup --context-id sha256:7e44...
+
+# Both identities (exact-match across the four-tier prefix and the full manifest)
+kova cluster cache-lookup \
+    --prefix-id sha256:9a1c... \
+    --context-id sha256:7e44...
+
+# JSON for tooling
+kova cluster cache-lookup --prefix-id sha256:9a1c... --json | jq '.matches[] | {node: .node_id, tier: .tier}'
+```
+
+## Output
+
+```
+Lookup:
+  stable_prefix_id:  sha256:9a1c...
+
+Matches (ordered by warmness):
+  NODE      TIER       WARMNESS  MATCH    LAST ACCESSED            REHYDRATE  EXPECTED SAVINGS
+  node-3    hbm        hot       exact    2026-05-15T11:42:01Z     0 ms        1840 tokens
+  node-1    host_ram   warm      exact    2026-05-15T11:30:08Z     20 ms       1840 tokens
+  node-2    nvme       cool      partial  2026-05-15T08:18:42Z     150 ms      1200 tokens
+```
+
+`--json` returns the full lookup response including the query echo and the typed match list.
+
+## Match kinds and warmness
+
+| Field | Values |
+|---|---|
+| `match_kind` | `exact` — the prefix is fully resident. `partial` — only a prefix-of-the-prefix is resident; partial cache hit on assembly. |
+| `tier` | `hbm` (fastest), `host_ram`, `nvme`, `s3` (slowest). |
+| `warmness` | `hot` (HBM, recently accessed), `warm` (HBM or host_ram, less recent), `cool` (host_ram or NVMe, older), `cold` (NVMe or S3 only). |
+| `rehydrate_cost_ms` | Estimated milliseconds to bring the prefix into HBM. |
+| `expected_prefill_savings_tokens` | Estimated tokens that would be saved if this node served the next call. |
+
+## Scope filters
+
+The lookup respects the caller's PolicyScope `context_share_scope`. Cross-tenant cache entries are invisible regardless of operator privilege.
+
+## See also
+
+- [`kova cluster routing-plan`](/docs/cli/cluster/cache-lookup) — ask the Router for the placement plan
+- [`kova nodes list`](/docs/cli/cluster/nodes) — find healthy nodes
+- [`client.cluster.cache_lookup`](/docs/sdk/control/cluster) — the SDK equivalent
+- [KV cache](/docs/concepts/routing/kv-cache) — what `cache-lookup` reaches into

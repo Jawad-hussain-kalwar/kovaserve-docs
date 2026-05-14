@@ -1,0 +1,220 @@
+---
+title: Budgets
+description: The `client.budgets` namespace — create, retrieve, list, and update run-level Budgets that actively enforce cost, token, step, time, and tool limits.
+---
+
+The `client.budgets` namespace operates on [Budgets](/docs/concepts/policy/budgets), the active execution-control objects that bind to a [Run](/docs/concepts/run-hierarchy/runs) and enforce limits across five dimensions: cost, tokens, steps, time, and tool calls. A Budget is not a billing record — it is admission control. The Budget evaluator runs in the gateway hot path before every [ModelCall](/docs/concepts/run-hierarchy/model-calls); when the strictest dimension crosses the hard-stop threshold, the next request is rejected with `429 budget_exceeded`.
+
+```python
+from kovaserve import KovaControlClient
+
+client = KovaControlClient()
+budget = client.budgets.create(
+    run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    cost_limit_cents="500.0000",
+    token_limit=100_000,
+    warning_threshold=0.70,
+)
+print(budget.id, budget.state)        # 01J8X9...  ACTIVE
+```
+
+## Methods
+
+| Method | Wire | What it does |
+|---|---|---|
+| [`create`](#create) | `POST /v1/ks/budgets` | Attach a Budget to a Run with one or more dimensional limits. |
+| [`get`](#get) | `GET /v1/ks/budgets/{id}` | Fetch a Budget with real-time consumption. |
+| [`list`](#list) | `GET /v1/ks/budgets` | Cursor-paginated list scoped to a Project. |
+| [`update`](#update) | `PATCH /v1/ks/budgets/{id}` | Raise or lower limits on an active Budget. |
+
+## The Budget shape
+
+```python
+class Budget(BaseModel):
+    id: str
+    run_id: str
+    tenant_id: str
+    project_id: str
+
+    # Limits — every dimension is optional; at least one must be set
+    cost_limit_cents: str | None       # decimal string, four fractional digits
+    token_limit: int | None
+    step_limit: int | None
+    time_limit_seconds: int | None
+    tool_limit: int | None
+
+    # Consumption — real-time counters
+    cost_used_cents: str               # decimal string, four fractional digits
+    tokens_used: int
+    steps_used: int
+    time_used_seconds: int
+    tools_used: int
+
+    # Thresholds
+    warning_threshold: float           # 0.0..1.0, default 0.70
+    on_exceed: str                     # "hard_stop" | "degrade"
+
+    state: BudgetState                 # ACTIVE | WARNING | DEGRADED_ALLOWED | HARD_STOP | CLOSED
+    created_at: datetime
+    updated_at: datetime
+```
+
+`BudgetState` follows the [Budget state machine](/docs/concepts/policy/budget-state-machine): `ACTIVE → WARNING → DEGRADED_ALLOWED | HARD_STOP → CLOSED`.
+
+The state-machine identifiers are distinct from the per-request decision identifiers. The admission service returns one of `ALLOW | WARN | DEGRADE | HARD_STOP` on every model call; those are wire-level decisions, not Budget states. The state on the Budget row tracks the *Run's* overall position relative to the limits; the decision returned to the runtime is what to do *this call*.
+
+## `create`
+
+```python
+budget = client.budgets.create(
+    run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1",       # required
+    cost_limit_cents="500.0000",                  # at least one limit required
+    token_limit=100_000,
+    step_limit=50,
+    time_limit_seconds=600,
+    tool_limit=20,
+    warning_threshold=0.70,                     # default 0.70, range 0.0..1.0
+    on_exceed="hard_stop",                      # default "hard_stop"; "degrade" allows DEGRADED_ALLOWED state
+)
+```
+
+At least one limit must be set. Multiple limits compose with strict-dimension semantics: the Budget transitions to `WARNING` when the *first* dimension crosses `warning_threshold`, and to `HARD_STOP` when the *first* dimension hits 100%. When multiple dimensions trip simultaneously, priority order is `cost > tokens > steps > time > tools` — the dimension with the highest cardinal cost gets reported first.
+
+Cost values are decimal strings with four fractional digits — `"5.0000"`, not `5.00`. The SDK accepts a `Decimal` or string and normalizes to four-fractional-digit string on the wire. Using a `float` raises `ValueError` at validation time to prevent silent precision loss.
+
+```python
+from decimal import Decimal
+
+budget = client.budgets.create(
+    run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    cost_limit_cents=Decimal("5"),              # accepted, normalized to "5.0000"
+)
+```
+
+`on_exceed="degrade"` is the opt-in to graceful degradation: when the Budget hits 100% on at least one dimension, the Run transitions to `DEGRADED_ALLOWED` and subsequent ModelCalls apply at least one active degradation (smaller `max_tokens`, dropped optional segments, model downgrade). `on_exceed="hard_stop"` (the default) rejects further calls with `429 budget_exceeded`.
+
+## `get`
+
+```python
+budget = client.budgets.get("01J8X9Y2Z3K4M5N6P7Q8R9S0T4")
+print(f"{budget.cost_used_cents} / {budget.cost_limit_cents}  ({budget.state})")
+print(f"  {budget.tokens_used} / {budget.token_limit} tokens")
+print(f"  {budget.steps_used} / {budget.step_limit} steps")
+```
+
+Returns the Budget row with consumption counters as they stand at the moment of the read. Counters are eventually consistent against in-progress ModelCalls — a call that has dispatched but not yet recorded its real token counts is not reflected. For the latest pre-admission state, fetch the Budget after the relevant ModelCall completes.
+
+## `list`
+
+```python
+for budget in client.budgets.list(project_id="proj_review_bot"):
+    print(budget.run_id, budget.state, budget.cost_used_cents)
+```
+
+Filter and order:
+
+```python
+budgets = client.budgets.list(
+    project_id="proj_review_bot",
+    state="WARNING",                            # or a list: ["WARNING", "DEGRADED_ALLOWED"]
+    run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1",        # narrow to a single Run
+    created_after="2026-05-01T00:00:00Z",
+    limit=20,
+)
+```
+
+See [pagination](/docs/sdk/pagination) for manual page control.
+
+## `update`
+
+```python
+budget = client.budgets.update(
+    "01J8X9Y2Z3K4M5N6P7Q8R9S0T4",
+    cost_limit_cents="10.0000",                 # raise the cost ceiling
+    warning_threshold=0.80,                     # raise the warning threshold
+)
+```
+
+Limits can be raised or lowered while the Run is active. Lowering a limit below the current `*_used` value transitions the Budget to `WARNING` or `HARD_STOP` immediately depending on the new threshold. Raising a limit clears `WARNING` if the Budget falls back under the threshold; `HARD_STOP` is sticky — once a Budget has hard-stopped a Run, only an explicit `update` with a higher limit returns it to `ACTIVE`.
+
+You cannot remove a dimension by setting it to `None` on update — the request is rejected with `400 invalid_request`. To remove a dimension, leave it at its current value and rely on the Run reaching a terminal state.
+
+## Composing with the inference path
+
+When the Run already has a Budget attached, every chat completion against that Run carries the Budget headers on the response:
+
+```python
+from kovaserve import OpenAI
+inference = OpenAI()
+
+response = inference.chat.completions.with_raw_response.create(
+    model="meta-llama/Llama-3-70B-Instruct",
+    messages=[{"role": "user", "content": "Review PR #42"}],
+    extra_body={"kovaserve": {"run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1"}},
+)
+
+print(response.headers["X-KS-Budget-State"])              # ACTIVE | WARNING | DEGRADED_ALLOWED
+print(response.headers["X-KS-Budget-Remaining-Pct"])      # e.g. "0.4200" (the most-strict dimension)
+```
+
+The headers are populated on every non-streaming v2 response. Streaming responses carry the same data on the final SSE chunk inside the `usage` object — see [cost and streaming](/docs/sdk/inference/cost-and-streaming).
+
+## Inline budgeting through the extension envelope
+
+You can create a Budget at the same time as opting a chat completion into the control plane, by setting `budget_context` on the `kovaserve` extension:
+
+```python
+response = inference.chat.completions.create(
+    model="meta-llama/Llama-3-70B-Instruct",
+    messages=[{"role": "user", "content": "Review PR #42"}],
+    extra_body={"kovaserve": {
+        "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+        "budget_context": {
+            "cost_limit_cents": "500.0000",
+            "token_limit": 100_000,
+            "warning_threshold": 0.70,
+            "on_exceed": "hard_stop",
+        },
+    }},
+)
+```
+
+The inline form creates the Budget on the first call if one does not already exist; subsequent calls with the same `run_id` reuse it. Explicit `client.budgets.create(...)` is the right path when the Budget must exist before any inference call lands — for example, when handing the `run_id` to another process that is about to issue calls.
+
+## Async parallel
+
+Every method is mirrored on `AsyncKovaControlClient.budgets`:
+
+```python
+import asyncio
+from kovaserve import AsyncKovaControlClient
+
+async def main() -> None:
+    client = AsyncKovaControlClient()
+    budget = await client.budgets.create(
+        run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+        cost_limit_cents="500.0000",
+        token_limit=100_000,
+    )
+    async for b in client.budgets.list(state="WARNING"):
+        print(b.run_id, b.cost_used_cents)
+
+asyncio.run(main())
+```
+
+## Where to go next
+
+<Cards>
+  <Card title="Context budgets" href="/docs/sdk/control/context-budgets" description="Per-request admission control over context size — distinct from run-level Budgets." />
+  <Card title="`@kova.budget` decorator" href="/docs/sdk/decorators/budget" description="Open a Budget context around a function body." />
+  <Card title="Cost and streaming" href="/docs/sdk/inference/cost-and-streaming" description="Where Budget state surfaces on inference responses." />
+  <Card title="Metering" href="/docs/sdk/control/metering" description="Per-Run / Project / Tenant cost aggregates after the fact." />
+</Cards>
+
+## See also
+
+- [Budget concept](/docs/concepts/policy/budgets) — what a Budget is
+- [Budget state machine](/docs/concepts/policy/budget-state-machine) — the five-state lifecycle
+- [Admission](/docs/concepts/policy/admission) — how Budgets compose with ContextBudgets and PolicyScope
+- [API: Budgets](/docs/api/policy/budgets/create) — the wire surface
+- [Cost model](/docs/concepts/cost/cost-model) — gross / net / cache savings

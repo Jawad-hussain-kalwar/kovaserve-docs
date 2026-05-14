@@ -1,0 +1,82 @@
+---
+title: Status
+description: Live operational status for KovaServe managed cloud — gateway health, regional availability, recent incidents. Private deployments have their own status surface inside the cluster.
+---
+
+KovaServe publishes operational status at **[status.kovaserve.com](https://status.kovaserve.com)**. The page tracks uptime, regional availability, and active incidents for managed cloud.
+
+## Live signals from the API
+
+For programmatic checks, the gateway exposes two endpoints:
+
+```bash
+# Liveness
+curl https://api.kovaserve.com/health
+# {"status": "ok"}
+
+# Detailed component health
+curl https://api.kovaserve.com/health/components
+# {"gateway": "ok", "postgres": "ok", "nats": "ok", "object_storage": "ok", "inference_fleet": "ok"}
+```
+
+These endpoints are unauthenticated and lightweight — safe to poll from monitoring tooling. See [`/health`](/docs/api/health/health) and [`/metrics`](/docs/api/health/metrics) for the full surface.
+
+## Subscribing to updates
+
+Public incident notifications:
+
+- **status.kovaserve.com** RSS feed.
+- **status.kovaserve.com** webhook subscriptions (configure on the status page).
+- Email subscription via the status page footer.
+
+## What's reported
+
+| Signal | Reported as |
+|---|---|
+| Gateway availability | Uptime % over rolling 30 / 90 days. |
+| Per-region latency | p50 / p99 TTFT (time to first token). |
+| Inference fleet health | Aggregate node count and queue depth. |
+| Active incidents | Open status with timeline; resolved incidents archived for 30 days. |
+| Maintenance windows | Advance notice ≥ 7 days for non-urgent, ≥ 1 day for urgent. |
+
+## Private deployment status
+
+Private and sovereign deployments have their own status surface. The bundled Grafana dashboards include:
+
+- Gateway availability and latency.
+- Inference fleet health.
+- KV cache occupancy and pressure.
+- Run completion rate and failure rate.
+- Budget warning / hard-stop frequency.
+
+```bash
+kubectl -n kovaserve port-forward svc/kovaserve-grafana 3000:80
+```
+
+Add your own alerting via Prometheus / Alertmanager — the dashboards expose every metric the managed-cloud status page surfaces.
+
+## Severity definitions
+
+| Severity | Meaning |
+|---|---|
+| **Operational** | Everything is functioning normally. |
+| **Degraded performance** | Increased error rate or latency on a subset of traffic; service remains available. |
+| **Partial outage** | A documented capability is unavailable for a subset of users (e.g., one region, one model). |
+| **Major outage** | Service is unavailable or unreliable for most users. |
+| **Maintenance** | Scheduled work. Advance notice given. |
+
+## Incident response
+
+For production incidents:
+
+- **Operational impact:** monitor the status page and SDK error rates.
+- **Customer-affecting incident:** the support channel for managed cloud or your internal on-call rotation for private deployments.
+- **Persistent operational issues:** include the `request_id` from any error you see — every KovaServe error envelope carries it, and the gateway log joins to traces via `traceparent`.
+
+## Where to go next
+
+<Cards>
+  <Card title="Health & metrics (API)" href="/docs/api/health/health" description="The wire endpoints." />
+  <Card title="Logging and tracing" href="/docs/sdk/logging-and-tracing" description="`request_id` joins logs and traces." />
+  <Card title="Changelog" href="/docs/changelog" description="Dated API changes." />
+</Cards>

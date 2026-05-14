@@ -1,0 +1,77 @@
+---
+title: "`kova checkpoints restore`"
+description: Restore a Run from a Checkpoint. Logical-context-first by default; `--mode warm-kv` requires an attached KV state handle.
+---
+
+Restore a [Run](/docs/concepts/run-hierarchy/runs) from a [Checkpoint](/docs/concepts/recovery/checkpoints). Logical-context-first; KV restore is layered on when available.
+
+## Synopsis
+
+```bash
+kova checkpoints restore <CHECKPOINT_ID> [OPTIONS]
+```
+
+## Options
+
+| Option | Meaning |
+|---|---|
+| `--mode <mode>` | One of `cold`, `warm-logical` (default), `warm-kv`. See modes table below. |
+| `--target-node-id <id>` | Advisory placement hint for the resumed Run. |
+| `--json` | Emit the restored Run as one JSON document. |
+
+## Modes
+
+| Mode | What restores | When to use |
+|---|---|---|
+| `cold` | Logical context only — no KV restore even if available. | Forcing a cold restart; debugging restore correctness. |
+| `warm-logical` (default) | Logical context + KV restore if the `kv_prefix` StateHandle is resident; falls back to logical-only if KV restore fails. | The general-purpose path. |
+| `warm-kv` | Logical context + KV restore — fails the restore if the `kv_prefix` StateHandle is unavailable. | Hard requirement on a warm restart; next operation only makes sense against a warm cache. |
+
+## Examples
+
+```bash
+# Default — warm-logical restore
+kova checkpoints restore 01J8X9Y2Z3K4M5N6P7Q8R9S0T7
+
+# Force a cold restart for debugging
+kova checkpoints restore 01J... --mode cold
+
+# Require a warm restart (fails if KV unavailable)
+kova checkpoints restore 01J... --mode warm-kv
+
+# JSON for scripting
+kova checkpoints restore 01J... --json | jq '.status'
+```
+
+## Output
+
+```
+Restoring Checkpoint 01J8X9Y2Z3K4M5N6P7Q8R9S0T7  →  Run 01J8X9Y2Z3K4M5N6P7Q8R9S0T1
+Mode:           warm-logical
+Restore plan:
+  1. Load manifest from s3://ks-checkpoints/...   ✓
+  2. Validate ContextArtifacts                     ✓  (4 artifacts, all resident)
+  3. Validate model / tokenizer compatibility      ✓
+  4. Plan KV restore                                ✓  (kv_prefix StateHandle resident on node-3)
+  5. Layer 1 import                                 ✓  (warm restore complete in 480ms)
+  6. Run transitions                                RECOVERING → RESUMING → RUNNING
+
+Run 01J8X9Y2Z3K4M5N6P7Q8R9S0T1  RUNNING  (resumed)
+```
+
+`--json` returns the restored Run row.
+
+## Failure modes
+
+| Error | Cause | Suggested fix |
+|---|---|---|
+| `400 model_incompatible` | The Checkpoint's `model_family` / `tokenizer_fingerprint` / `renderer_version` doesn't match any registered model. | Roll back the model swap or restore to a compatible cluster. |
+| `400 kv_incompatible` | KV restore plan fails on `quantization` / `tensor_parallel` mismatch. | Use `--mode warm-logical` to skip KV restore. |
+| `410 kv_state_unavailable` | `--mode warm-kv` requested but the `kv_prefix` StateHandle is evicted. | Re-issue with `--mode warm-logical`. |
+| `404 artifact_not_found` | A referenced ContextArtifact has been deleted or evicted. | Check artifact retention policy; the Checkpoint may be unrestorable. |
+
+## See also
+
+- [`kova checkpoints get`](/docs/cli/checkpoints/get) — inspect a Checkpoint before restoring
+- [`kova runs branch`](/docs/cli/runs/branch) — create a *new* Run from the Checkpoint instead
+- [`client.checkpoints.restore`](/docs/sdk/control/checkpoints) — the SDK equivalent

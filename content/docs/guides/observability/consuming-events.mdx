@@ -1,0 +1,163 @@
+---
+title: Consuming events
+description: The eight event streams are how KovaServe surfaces every state transition. Tail them via SDK, CLI, or NATS for analytics, alerting, and downstream automation.
+---
+
+KovaServe emits every state transition as a typed event in one of eight streams. The streams are durable, replayable, and joinable to OpenTelemetry traces via `trace_id`. This guide walks through the common patterns for pulling them into your analytics, alerting, and automation stack.
+
+## The eight streams
+
+| Stream | Subject prefix | What it carries |
+|---|---|---|
+| `execution` | `ks.run.*` / `ks.step.*` / `ks.model_call.*` | Run / Step / ModelCall lifecycle. |
+| `state` | `kv.state.*` | KV cache lifecycle. |
+| `routing` | `ks.route.*` | Cache-Aware Router decisions. |
+| `policy` | `ks.policy.*` | PolicyScope evaluation outcomes. |
+| `budget` | `ks.budget.*` | Run-level Budget warnings, hard stops. |
+| `checkpoint` | `ks.checkpoint.*` | Checkpoint creation, validation, restore. |
+| `runtime` | `ks.tool.*` / `ks.process.*` / `ks.file.*` / `ks.branch.*` | Runtime events. |
+| `context_engineering` | `ks.context.*` | ContextManifest, segment, artifact, compaction, ContextBudget events. |
+
+## Live tail
+
+```python
+with client.events.tail(streams=["budget", "context_engineering"]) as stream:
+    for event in stream:
+        if event.event_type == "ks.budget.warning":
+            slack.send(f"Budget warning on {event.run_id}")
+```
+
+CLI:
+
+```bash
+kova events tail --streams budget --streams context_engineering --json | your-handler.py
+```
+
+The tail reconnects transparently on transient failures via `Last-Event-ID`. Bounded retries — after 10 consecutive failed reconnects, the iterator raises so the caller knows to investigate rather than spinning silently.
+
+## Historical query
+
+```python
+events = list(client.events.list(
+    streams=["execution", "budget"],
+    run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    start="2026-05-15T11:00:00Z",
+    end="2026-05-15T13:00:00Z",
+    limit=200,
+))
+```
+
+CLI:
+
+```bash
+kova events list --run-id 01J... --start 2026-05-15T11:00:00Z --end 2026-05-15T13:00:00Z --json
+```
+
+Cursor pagination — the iterator pages lazily.
+
+## The event envelope
+
+Every event carries a minimum envelope regardless of stream:
+
+```python
+{
+    "event_id": "01J8X9Y2Z3K4M5N6P7Q8R9EV01",
+    "event_type": "ks.model_call.completed",
+    "timestamp": "2026-05-15T11:42:01.480Z",
+    "stream": "execution",
+    "tenant_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+    "project_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T0",
+    "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    "step_id": "01J8X9Y2Z3K4M5N6P7Q8R9SX01",
+    "model_call_id": "01J8X9Y2Z3K4M5N6P7Q8R9MC02",
+    "context_manifest_id": "01J8X9Y2Z3K4M5N6P7Q8R9SCM07",
+    "trace_id": "0123456789abcdef0123456789abcdef",
+    "payload": { ... }                    // stream-specific
+}
+```
+
+`trace_id` is the W3C `traceparent` value — joins to your OpenTelemetry tracing.
+
+## Common consumers
+
+### Slack alerting
+
+```python
+class SlackAlerter:
+    def handle(self, event):
+        if event.event_type == "ks.budget.warning":
+            slack.send(f"Budget warning on {event.run_id}")
+        elif event.event_type == "ks.budget.hard_stop":
+            slack.send(f"Budget HARD STOP on {event.run_id} — manual review needed")
+
+alerter = SlackAlerter()
+with client.events.tail(streams=["budget"]) as stream:
+    for event in stream:
+        alerter.handle(event)
+```
+
+### Analytics pipeline
+
+```python
+# Stream every model_call.completed into your analytics store
+with client.events.tail(
+    streams=["execution"],
+    event_types=["ks.model_call.completed"],
+) as stream:
+    for event in stream:
+        analytics_store.insert({
+            "run_id": event.run_id,
+            "model_id": event.payload["model_id"],
+            "cost_cents": event.payload["cost_cents"],
+            "cached_tokens": event.payload["cached_tokens"],
+            "timestamp": event.timestamp,
+        })
+```
+
+### Per-Run replay
+
+```python
+events = list(client.events.list(
+    run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    streams=[
+        "execution", "context_engineering",
+        "budget", "checkpoint",
+        "policy", "runtime",
+    ],
+))
+
+# Reconstruct the full execution offline
+for e in sorted(events, key=lambda x: x.timestamp):
+    handle_event(e)
+```
+
+### Compaction analytics
+
+```python
+with client.events.tail(
+    streams=["context_engineering"],
+    event_types=["ks.context.compaction.completed"],
+) as stream:
+    for event in stream:
+        tokens_saved = event.payload["token_count_before"] - event.payload["token_count_after"]
+        metrics_store.inc("compaction.tokens_saved", tokens_saved)
+```
+
+## Async parallel
+
+```python
+async with async_client.events.tail(streams=["budget"]) as stream:
+    async for event in stream:
+        ...
+```
+
+The async iterator and `async with` work identically to the sync forms.
+
+## Where to go next
+
+<Cards>
+  <Card title="Reading run timelines" href="/docs/guides/observability/reading-run-timelines" description="The per-Run view." />
+  <Card title="OpenTelemetry export" href="/docs/guides/observability/opentelemetry-export" description="Trace integration." />
+  <Card title="Events SDK reference" href="/docs/sdk/control/events" description="Full API surface." />
+  <Card title="Event taxonomy" href="/docs/concepts/events" description="Every event type." />
+</Cards>

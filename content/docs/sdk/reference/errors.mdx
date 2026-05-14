@@ -1,0 +1,127 @@
+---
+title: Errors reference
+description: The complete `KovaError` exception class table — status-code subclasses, feature subclasses, when each one fires, what fields it carries, and whether the SDK retries.
+---
+
+Every exception the SDK raises in one table. For the conceptual model (catch-by-status vs catch-by-feature, OpenAI vs KovaServe exceptions, anonymous mode) see [errors](/docs/sdk/errors). For retry semantics see [retries and idempotency](/docs/sdk/retries-and-idempotency).
+
+## Root and transport classes
+
+| Class | When | Retried? |
+|---|---|---|
+| `KovaError` | The root. Catch this when you don't care which subclass. | n/a |
+| `KovaConnectionError` | Could not reach the server (DNS, connection refused, EOF). | Yes |
+| `KovaTimeoutError` | Request exceeded the configured timeout. | Yes |
+| `KovaStreamReconnectError` | An SSE stream failed to reconnect after `max_retries` attempts. | n/a (raised after retries exhaust) |
+
+All three carry:
+
+```python
+class KovaError(Exception):
+    message: str
+    request_id: str | None
+    cause: Exception | None        # the underlying httpx exception, if any
+```
+
+## API status errors
+
+Every API status error subclasses `KovaAPIStatusError` and carries the full envelope.
+
+```python
+class KovaAPIStatusError(KovaAPIError):
+    status_code: int
+    error_code: str            # the wire-level error_code from the response envelope
+    message: str
+    details: dict              # error-specific structured data
+    request_id: str            # the X-Request-Id value
+    response: httpx.Response   # the raw response, debug-only
+```
+
+Naming convention: `Kova*`-prefixed classes are SDK-defined groupings (root, transport, the API-error base). Status-mirror classes drop the prefix, matching the OpenAI and Stripe SDK conventions.
+
+| Class | HTTP status | Common `error_code` values | Retried? |
+|---|---|---|---|
+| `BadRequestError` | 400 | `invalid_request`, `invalid_field`, `invalid_preview` | No |
+| `AuthenticationError` | 401 | `invalid_api_key`, `expired_api_key` | No |
+| `PermissionDeniedError` | 403 | `permission_denied`, `scope_violation`, `tenant_mismatch` | No |
+| `NotFoundError` | 404 | `run_not_found`, `session_not_found`, `checkpoint_not_found`, … | No |
+| `ConflictError` | 409 | `idempotency_conflict`, `illegal_state_transition`, `budget_already_exists`, … | only for `idempotency_conflict` |
+| `PreconditionFailedError` | 410 | `handle_expired`, `kv_state_unavailable` | No |
+| `UnprocessableEntityError` | 422 | `validation_error`, `unprocessable_manifest` | No |
+| `RateLimitError` | 429 | `rate_limit_exceeded`, `budget_exceeded`, `context_budget_exceeded` | Yes (honours `Retry-After`) |
+| `InternalServerError` | 5xx | varies | Yes |
+
+## Feature subclasses
+
+Feature subclasses fire when both the status code and the wire-level `error_code` match. They subclass the status-code class so `except ConflictError:` still catches them.
+
+| Class | Parent | Wire `error_code` | When |
+|---|---|---|---|
+| `IdempotencyConflictError` | `ConflictError` | `idempotency_conflict` | Same idempotency key with different parameters, or server-side stale processing. |
+| `IllegalStateTransitionError` | `ConflictError` | `illegal_state_transition` | Tried to transition an entity through an invalid state edge. |
+| `BudgetAlreadyExistsError` | `ConflictError` | `budget_already_exists` | Tried to attach a second Budget to a Run that already has one. |
+| `BudgetExceededError` | `RateLimitError` | `budget_exceeded` | Run-level Budget hit its `HARD_STOP` threshold. |
+| `ContextBudgetExceededError` | `RateLimitError` | `context_budget_exceeded` | ContextBudget admission returned `HARD_STOP`. |
+
+`ContextBudgetExceededError` carries extra `details`:
+
+```python
+class ContextBudgetExceededError(RateLimitError):
+    details: dict          # {
+                           #   "active_tokens": int,
+                           #   "active_token_limit": int,
+                           #   "stable_tokens": int,
+                           #   "volatile_tokens": int,
+                           #   "artifact_bytes": int,
+                           #   "crossed_thresholds": list[str],
+                           # }
+```
+
+`BudgetExceededError` carries:
+
+```python
+class BudgetExceededError(RateLimitError):
+    details: dict          # {
+                           #   "dimension": str,         # "cost" | "tokens" | "steps" | "time" | "tools"
+                           #   "current": int | str,
+                           #   "limit": int | str,
+                           # }
+```
+
+## Validation errors
+
+`UnprocessableEntityError` (422) covers server-side validation failures with structured detail:
+
+```python
+try:
+    client.runs.create(project_id="...", model="invalid-model-id")
+except UnprocessableEntityError as e:
+    for field_error in e.details.get("field_errors", []):
+        print(field_error["field"], "→", field_error["message"])
+```
+
+`field_errors` is a list of `{field: str, message: str, code: str}`.
+
+## Helper methods
+
+Every exception exposes:
+
+```python
+str(err)                      # → "[409 idempotency_conflict] message (request_id=...)"
+err.is_retryable()            # → bool — whether the SDK considers this retryable
+err.with_message(new)         # → return a copy with a new message
+```
+
+## What is *not* in the hierarchy
+
+| Exception type | Source |
+|---|---|
+| `openai.AuthenticationError`, `openai.RateLimitError`, … | The OpenAI re-export raises OpenAI's own exceptions on `/v1/*` calls. The SDK does not rewrap them. |
+| `pydantic.ValidationError` | Raised by Pydantic on response validation failure — surfaces when the server returns a shape the SDK doesn't know how to parse. Treated as a programming error. |
+| `httpx.*` errors | The SDK catches `httpx` errors and rewraps them as `KovaConnectionError` / `KovaTimeoutError`. Raw `httpx` errors never escape. |
+
+## See also
+
+- [Errors](/docs/sdk/errors) — the conceptual overview
+- [Retries and idempotency](/docs/sdk/retries-and-idempotency) — the retry contract
+- [API errors](/docs/api/using-the-api/errors) — the wire-side envelope

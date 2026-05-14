@@ -1,0 +1,135 @@
+---
+title: Install
+description: Install the `kovaserve` Python SDK and CLI, opt into framework adapter extras, and verify the install.
+---
+
+The SDK ships as a single PyPI package, **`kovaserve`**. The same package also installs the `kova` CLI — there is no separate binary. Framework adapters install as optional extras.
+
+## Core install
+
+```bash
+pip install kovaserve
+```
+
+This installs:
+
+- The `kovaserve` Python package (OpenAI re-export, `KovaControlClient`, decorators, hooks, context primitives, type model).
+- The `kova` console script.
+- The minimum runtime dependencies: `openai`, `httpx`, `pydantic`, `typer`, `rich`.
+
+The wheel ships `py.typed` (PEP 561), so static type checkers pick up the SDK's types without `.pyi` stubs.
+
+## Python version
+
+`kovaserve` requires **Python 3.11 or newer**. The SDK uses `typing.NotRequired`, the `Concatenate` typing operator for decorator stacking, and `contextvars` semantics that depend on 3.11+ behaviour.
+
+```bash
+python --version    # → Python 3.11.x or newer
+```
+
+## Framework adapter extras
+
+Each framework adapter is an optional extra that pulls in the corresponding framework as a dependency. Install only the adapters you use; adapters do not import from each other.
+
+| Extra | Installs | When to use |
+|---|---|---|
+| `kovaserve[langgraph]` | `langgraph`, `langchain-core` | Wrap a LangGraph application with `KovaCheckpointer`, `KovaStore`, and `KovaMiddleware`. |
+| `kovaserve[pydantic-ai]` | `pydantic-ai` | Inject KovaServe through `RunContext[KovaDeps]` typed dependencies. |
+| `kovaserve[openai-agents]` | `openai-agents` | Plug `KovaSession`, `KovaRunHooks`, and `KovaTracingExporter` into the OpenAI Agents SDK. |
+| `kovaserve[temporal]` | `temporalio` | Record ModelCalls inside Temporal Activities via `@kova_activity` and `KovaInterceptor`. |
+
+Combine extras with comma-separated syntax:
+
+```bash
+pip install "kovaserve[langgraph,temporal]"
+```
+
+Install every adapter at once with the convenience extra:
+
+```bash
+pip install "kovaserve[all]"
+```
+
+## Optional dependencies
+
+A few features have optional runtime deps the core install does not pull in:
+
+| Dependency | Feature it enables | Fallback if missing |
+|---|---|---|
+| `python-magic` | `ArtifactClient.upload_path(...)` mime detection from file contents. | Falls back to `mimetypes.guess_type` (extension-based). |
+| `opentelemetry-instrumentation-httpx` | End-to-end distributed tracing across `KovaControlClient` and the OpenAI re-export. | Tracing still works through explicit spans; auto-instrumentation is silent. |
+
+Install them as you need them:
+
+```bash
+pip install python-magic opentelemetry-instrumentation-httpx
+```
+
+## Compatibility note — `nest_asyncio`
+
+The SDK does **not** use `nest_asyncio` and fails fast at import if it detects an active monkey-patched event loop. The intent is to avoid the silent correctness hazards that nested event loops introduce. Use the sync client (`KovaControlClient`) inside notebook cells, top-level `await` (Python 3.14+), or a clean `asyncio.run(...)` boundary instead.
+
+## CLI
+
+The `kova` console script is installed by the core package. Verify it after install:
+
+```bash
+kova --version
+kova --help
+```
+
+The CLI mirrors the SDK's resource namespaces 1:1 — `kova runs list` calls `client.runs.list()` under the hood. There is no separate auth flow, no separate retries, no separate types. See the [CLI reference](/docs/cli) for the full subcommand surface.
+
+## Verify the install
+
+A two-line smoke test confirms the package, the entry points, and the wire connection:
+
+```python
+from kovaserve import KovaControlClient
+
+client = KovaControlClient()    # reads KOVASERVE_API_KEY
+print(client.tenants.get().id)
+```
+
+If `KOVASERVE_API_KEY` is set and the base URL is reachable, this prints your tenant ID. If not, the client raises a `KovaError` subclass at call time. See [errors](/docs/sdk/errors) for the exception hierarchy.
+
+The CLI equivalent:
+
+```bash
+kova auth status
+```
+
+## Editable installs
+
+For local development against the SDK source:
+
+```bash
+git clone https://github.com/kovaserve/kovaserve-sdk-python.git
+cd kovaserve-sdk-python
+pip install -e ".[langgraph,temporal,dev]"
+```
+
+The `dev` extra installs `ruff`, `mypy`, `pytest`, and the schema-drift CI harness that keeps `kovaserve.types` aligned with the canonical wire shapes.
+
+## Uninstall
+
+```bash
+pip uninstall kovaserve
+```
+
+Uninstalling the package removes the `kova` console script and the framework adapter modules. It does not touch `~/.config/kova/credentials` — remove that file yourself if you want to clear stored CLI credentials.
+
+## Where to go next
+
+<Cards>
+  <Card title="Configuration" href="/docs/sdk/configuration" description="`KOVASERVE_API_KEY`, base URL, log level, client kwargs." />
+  <Card title="Sync vs async" href="/docs/sdk/sync-vs-async" description="Pick `KovaControlClient` or `AsyncKovaControlClient`." />
+  <Card title="OpenAI compatibility" href="/docs/sdk/inference/openai-compat" description="The drop-in re-export contract." />
+  <Card title="CLI install" href="/docs/cli/install" description="`kova auth login` and credential storage." />
+</Cards>
+
+## See also
+
+- [SDK overview](/docs/sdk) — the three surfaces in one place
+- [Framework adapters](/docs/sdk/adapters) — what each extra ships
+- [Type model](/docs/sdk/type-model) — Pydantic v2 + `TypedDict` + `py.typed`

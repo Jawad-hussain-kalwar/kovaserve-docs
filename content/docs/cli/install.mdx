@@ -1,0 +1,88 @@
+---
+title: Install
+description: `pip install kovaserve` installs the SDK and the `kova` CLI together. Python 3.11+. Framework extras available for adapter installs.
+---
+
+The CLI ships in the **same PyPI package** as the SDK. There is no separate binary, no platform-specific installer, no second download. One `pip install kovaserve` installs both.
+
+```bash
+pip install kovaserve
+kova --version
+```
+
+## Requirements
+
+- **Python 3.11 or newer.** The CLI uses Typer + modern typing features that require 3.11+.
+- **A writable `~/.config/kova/` directory** for the credentials file (the CLI creates it on first login).
+
+## What gets installed
+
+| Component | Path |
+|---|---|
+| `kova` console script | `<pip prefix>/bin/kova` (or `<Scripts>\kova.exe` on Windows). |
+| The `kovaserve` Python package | The SDK — also available for import: `from kovaserve import KovaControlClient`. |
+| `rich` | Used for table output and ANSI colour. |
+| `typer` | The CLI framework. |
+| `httpx`, `openai`, `pydantic` | Pulled by the SDK. |
+
+The CLI does not vendor a Go or Rust binary. The `firectl` trap — separate-language CLI binary with separate authentication, separate retries, separate types — is forbidden by the SDK's [sovereign and self-sustainable](/docs/sdk) constraint.
+
+## Framework adapter extras
+
+If your SDK use needs adapters, install the matching extra:
+
+```bash
+pip install "kovaserve[langgraph]"        # LangGraph adapter
+pip install "kovaserve[pydantic-ai]"      # Pydantic AI adapter
+pip install "kovaserve[openai-agents]"    # OpenAI Agents SDK adapter
+pip install "kovaserve[temporal]"         # Temporal adapter
+pip install "kovaserve[all]"              # all adapters
+```
+
+Adapters are SDK-only — they don't change the CLI surface. The CLI's resource namespaces (`runs`, `sessions`, `budgets`, …) work identically regardless of which adapters you have installed.
+
+## Verifying the install
+
+```bash
+kova --version
+# kova 1.2.3
+
+kova --help
+# Usage: kova [OPTIONS] COMMAND [ARGS]...
+# ...
+```
+
+Once installed, log in with [`kova auth login`](/docs/cli/auth) before running other subcommands.
+
+## Editable / development installs
+
+For local development against the SDK source:
+
+```bash
+git clone https://github.com/kovaserve/kovaserve-sdk-python.git
+cd kovaserve-sdk-python
+pip install -e ".[langgraph,temporal,dev]"
+```
+
+The `dev` extra pulls in linting and test tooling.
+
+## Uninstall
+
+```bash
+pip uninstall kovaserve
+```
+
+Removing the package removes the `kova` script. It does **not** touch `~/.config/kova/credentials` — remove that file yourself if you want to clear stored credentials.
+
+## Where to go next
+
+<Cards>
+  <Card title="`kova auth login`" href="/docs/cli/auth" description="Authenticate the CLI." />
+  <Card title="Configuration" href="/docs/cli/configuration" description="Profiles, env vars, global flags." />
+  <Card title="SDK install" href="/docs/sdk/install" description="Same package, SDK side." />
+</Cards>
+
+## See also
+
+- [CLI overview](/docs/cli) — every subcommand at a glance
+- [Output](/docs/cli/output) — `--json` and table rendering

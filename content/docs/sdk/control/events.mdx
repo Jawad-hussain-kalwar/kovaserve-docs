@@ -1,0 +1,198 @@
+---
+title: Events
+description: The `client.events` namespace — list historical events across the eight streams, or live-tail an SSE feed filtered by stream and entity.
+---
+
+The `client.events` namespace operates on the eight event streams KovaServe emits through NATS JetStream and persists for replay. Every state transition in the control plane — Run created, Step completed, Budget warning, ContextBudget admission, Checkpoint validated, KV state stored — produces a typed event with a standard envelope and a stream-specific payload. The SDK surfaces two operations: paginated `list` for historical queries and `tail` for live consumption.
+
+```python
+from kovaserve import KovaControlClient
+
+client = KovaControlClient()
+
+# Historical: every event for a specific Run
+for event in client.events.list(run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1"):
+    print(event.event_type, event.timestamp)
+
+# Live tail: every budget event in real time
+with client.events.tail(streams=["budget"]) as stream:
+    for event in stream:
+        if event.event_type == "ks.budget.warning":
+            alert_operator(event.payload)
+```
+
+## Methods
+
+| Method | Wire | What it does |
+|---|---|---|
+| [`list`](#list) | `GET /v1/ks/events` | Cursor-paginated historical query, filterable by stream and entity. |
+| [`tail`](#tail) | `GET /v1/ks/events?stream=1` (SSE) | Live-tail events with WHATWG-compliant reconnection. |
+
+## The eight streams
+
+Every event belongs to exactly one stream. The stream filter is the primary way to scope consumption — you almost always want one or two streams, not all eight.
+
+| Stream | Subject prefix | What it carries |
+|---|---|---|
+| `execution` | `ks.run.* ks.step.* ks.model_call.*` | Run / Step / ModelCall lifecycle. |
+| `state` | `kv.state.*` | Layer 1 KV cache lifecycle (stored, accessed, demoted, restored, evicted). |
+| `routing` | `ks.route.*` | Cache-Aware Router decisions and fallbacks. |
+| `policy` | `ks.policy.*` | PolicyScope evaluation outcomes (allow, deny, degraded mode). |
+| `budget` | `ks.budget.*` | Run-level Budget warnings, forecasts, hard stops. |
+| `checkpoint` | `ks.checkpoint.*` | Checkpoint creation, validation, restore. |
+| `runtime` | `ks.tool.* ks.process.* ks.file.* ks.branch.*` | Layer 3 runtime events. |
+| `context_engineering` | `ks.context.*` | ContextManifest, segment, artifact, compaction, ContextBudget events. |
+
+`state` is a separate NATS stream (`kv_events`) for high-throughput Layer 1 events; the other seven streams share the `execution_events` stream with a broad subject filter, so new event families can be added without stream-config migration.
+
+## The event envelope
+
+Every event — regardless of stream — carries the same minimum envelope. The payload varies by `event_type`.
+
+```python
+class ExecutionEvent(BaseModel):
+    event_id: str
+    event_type: str                      # e.g. "ks.run.created", "ks.context.budget.warning"
+    timestamp: datetime
+    stream: str                          # one of the eight stream names
+
+    # Tenant binding (always populated)
+    tenant_id: str
+    project_id: str
+    environment_id: str | None
+
+    # Entity references (populated when applicable)
+    run_id: str | None
+    session_id: str | None
+    step_id: str | None
+    model_call_id: str | None
+    context_manifest_id: str | None
+    checkpoint_id: str | None
+    state_handle_id: str | None
+    node_id: str | None
+    model_id: str | None
+
+    trace_id: str
+    payload: dict                        # stream-specific shape — typed via discriminated unions
+```
+
+`trace_id` is the W3C `traceparent` value propagated end-to-end from the originating request, so events join cleanly to OpenTelemetry spans and external traces.
+
+## `list`
+
+```python
+for event in client.events.list(run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1"):
+    print(event.event_type, event.timestamp, event.payload)
+```
+
+Filter and order:
+
+```python
+events = client.events.list(
+    streams=["execution", "budget"],             # one or more streams
+    event_types=["ks.budget.warning", "ks.budget.hard_stop"],   # specific event types
+    run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1",         # entity filter
+    session_id="ses_a7f3c2b8d4e1f0925a1b6c3d",
+    project_id="proj_review_bot",
+    start="2026-05-01T00:00:00Z",
+    end="2026-05-15T00:00:00Z",
+    limit=200,                                    # per page
+    order="asc",                                  # "asc" | "desc"
+)
+```
+
+The list iterator pages through cursor results lazily — pull as many events as you need; the SDK fetches more pages on demand. Cursors come from the response body (`next_cursor` / `previous_cursor`); manual page control is available via `page.has_next_page()` / `page.get_next_page()`.
+
+`event_types` accepts exact matches and prefix wildcards: `event_types=["ks.budget.*"]` matches every budget event type. Mixing exact and wildcard values in one query is supported.
+
+## `tail`
+
+```python
+with client.events.tail(streams=["budget", "policy"]) as stream:
+    for event in stream:
+        print(event.event_type, event.payload)
+```
+
+`tail` opens an SSE connection and yields events as they arrive. The connection stays open until you exit the context manager or the iterator is consumed to completion. The stream is **infinite by default** — events keep arriving as the cluster generates them.
+
+Filter the live stream:
+
+```python
+with client.events.tail(
+    streams=["execution", "context_engineering"],
+    event_types=["ks.model_call.completed", "ks.context.compaction.completed"],
+    run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1",          # narrow to one Run
+    project_id="proj_review_bot",
+) as stream:
+    for event in stream:
+        ...
+```
+
+### Reconnection
+
+`tail` follows the WHATWG SSE reconnection contract:
+
+- On every event with an `id:` field, the SDK remembers the last ID.
+- On disconnect (network failure, idle timeout, 5xx), the SDK reconnects with `Last-Event-ID: <last seen id>` and resumes from that point.
+- The server's `retry:` field is honoured when present; otherwise the SDK uses jittered exponential backoff capped at 60 seconds.
+- After 10 consecutive failed reconnects, the iterator raises `KovaStreamReconnectError` so the caller knows to investigate rather than spinning silently.
+
+This means you don't need to wrap `tail` in your own retry loop for the common case — the SDK handles transient network failures transparently. Wrap it in your own loop only when you want application-level reconnection on top of the SDK's transport-level retries.
+
+### Multi-mode tailing
+
+Some streams support multiple emission modes. The `runtime` and `execution` streams accept a `stream_mode` argument:
+
+```python
+with client.events.tail(
+    streams=["execution"],
+    stream_mode=["values", "updates", "events"],   # langgraph-sdk shape
+) as stream:
+    for kind, event in stream:
+        if kind == "events":
+            print(event.event_type)
+```
+
+`stream_mode` exposes lower-level views into the same stream:
+
+| Mode | What it yields |
+|---|---|
+| `values` | Full materialized state on each event (default for streaming clients building UIs). |
+| `updates` | Just the delta from the previous event (efficient for high-frequency consumers). |
+| `events` | The full event envelope as in `list` (default; matches the typed iterator shape). |
+
+When `stream_mode` is omitted, the iterator yields events in the `events` shape — a flat sequence matching `list`. When `stream_mode` is supplied, the iterator yields `(kind, value)` tuples so the caller can route by mode.
+
+## Single-event consumption
+
+For one-off lookups (an event ID known from a log line or trace), the SDK exposes `client.events.get(event_id)`. Most usage goes through `list` and `tail`; the bare get is occasionally useful for debugging.
+
+## Async parallel
+
+```python
+import asyncio
+from kovaserve import AsyncKovaControlClient
+
+async def main() -> None:
+    client = AsyncKovaControlClient()
+    async with client.events.tail(streams=["budget"]) as stream:
+        async for event in stream:
+            print(event.event_type)
+
+asyncio.run(main())
+```
+
+## Where to go next
+
+<Cards>
+  <Card title="Run timeline" href="/docs/sdk/control/runs" description="`client.runs.timeline(id)` — the same events filtered to one Run." />
+  <Card title="OpenTelemetry" href="/docs/sdk/logging-and-tracing" description="Joining events to W3C traces." />
+  <Card title="Streaming" href="/docs/sdk/streaming" description="The SSE protocol behind `tail`." />
+  <Card title="Event taxonomy" href="/docs/concepts/events" description="Every event type and what it means." />
+</Cards>
+
+## See also
+
+- [Event envelope](/docs/concepts/events/event-envelope) — the minimum-envelope contract
+- [Execution events](/docs/concepts/events/execution) · [Budget events](/docs/concepts/events/budget) · [Context engineering events](/docs/concepts/events/context-engineering)
+- [API: Events](/docs/api/events/execution) — the wire surface

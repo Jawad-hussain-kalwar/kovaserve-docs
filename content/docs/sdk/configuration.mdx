@@ -1,0 +1,135 @@
+---
+title: Configuration
+description: Configure the `kovaserve` SDK through environment variables and per-client kwargs — API key, base URL, timeouts, retries, connection pool, logging, previews, and tracing.
+---
+
+The SDK reads configuration from environment variables first and per-client kwargs second. Kwargs always win; nothing is silently merged from disk. The CLI reads `~/.config/kova/credentials`; the Python SDK does **not** — that separation keeps tests reproducible.
+
+## Environment variables
+
+| Variable | Default | What it controls |
+|---|---|---|
+| `KOVASERVE_API_KEY` | — | The bearer token for every request. Required for `KovaControlClient`; the OpenAI re-export falls back to `OPENAI_API_KEY` if this is unset. |
+| `KOVASERVE_BASE_URL` | `https://api.kovaserve.com/v1` | The control-plane endpoint. Override for self-hosted deployments and staging environments. |
+| `KOVASERVE_LOG` | `off` | Logging level for the `kovaserve` logger tree. One of `debug`, `info`, `warn`, `off`. |
+| `KOVASERVE_TIMEOUT` | `60` | Request timeout in seconds for non-streaming calls. Streaming responses use a separate read timeout. |
+| `KOVASERVE_MAX_RETRIES` | `2` | Number of retries on retriable failures (see [retries and idempotency](/docs/sdk/retries-and-idempotency)). |
+| `KOVASERVE_HTTP2` | `false` | Set to `1` / `true` to negotiate HTTP/2 with the gateway. HTTP/1.1 keep-alive is the default. |
+| `KOVASERVE_PROXY` | — | An HTTP / HTTPS proxy URL passed through to `httpx`. |
+| `KOVASERVE_POOL_MAX_CONNECTIONS` | `200` | Maximum total connections in the `httpx` pool. Sized for high-RPM agent workloads. |
+| `KOVASERVE_POOL_MAX_KEEPALIVE` | `50` | Maximum idle keep-alive connections in the pool. |
+| `KOVASERVE_PREVIEWS` | — | Comma-separated preview identifiers, sent as the `X-Kova-Previews` header. See [previews](/docs/sdk/previews). |
+| `KOVASERVE_OTEL_GENAI` | `0` | Set to `1` to emit OpenTelemetry GenAI semantic-convention spans. See [logging and tracing](/docs/sdk/logging-and-tracing). |
+| `KOVA_MAX_TREE_DEPTH` | `5` | Default depth cap when the CLI renders nested Step trees. Override per-call with `--max-depth=N`. |
+| `KOVA_PROFILE` | `default` | The CLI credential profile selected from `~/.config/kova/credentials`. |
+
+`KOVASERVE_API_KEY` falls back to `OPENAI_API_KEY` **only on the OpenAI re-export** — `from kovaserve import OpenAI`. `KovaControlClient` requires `KOVASERVE_API_KEY` explicitly and raises `AuthenticationError` at construction time if neither the env var nor the `api_key=` kwarg is set.
+
+## Per-client kwargs
+
+Every environment variable has an equivalent constructor kwarg. Kwargs are the right answer when one process needs to talk to multiple deployments or hold multiple credentials at once.
+
+```python
+from kovaserve import KovaControlClient
+import httpx
+
+client = KovaControlClient(
+    api_key="ks_live_...",
+    base_url="https://api.kovaserve.com/v1",
+    timeout=httpx.Timeout(60.0, connect=5.0),
+    max_retries=2,
+    default_headers={"X-Application": "review-bot"},
+    default_query={},
+    http_client=None,   # supply a pre-configured httpx.Client to override transport
+)
+```
+
+| Kwarg | Type | Default | Behaviour |
+|---|---|---|---|
+| `api_key` | `str` | env | Overrides `KOVASERVE_API_KEY`. |
+| `base_url` | `str` | env | Overrides `KOVASERVE_BASE_URL`. |
+| `timeout` | `float` or `httpx.Timeout` | env | Passed through to `httpx`. Use `httpx.Timeout(...)` to set separate connect / read / write / pool timeouts. |
+| `max_retries` | `int` | env | Number of retries on retriable failures. `0` disables retries. |
+| `default_headers` | `dict[str, str]` | `{}` | Headers added to every request. Override per-call with `extra_headers=...`. |
+| `default_query` | `dict[str, str]` | `{}` | Query params added to every request. Override per-call with `extra_query=...`. |
+| `http_client` | `httpx.Client` or `httpx.AsyncClient` | SDK default | Custom transport. Use `kovaserve.DefaultHttpxClient` / `DefaultAsyncHttpxClient` to keep SDK defaults (pool size, HTTP/2, retries) while customizing other attributes. |
+
+## Custom `httpx` clients
+
+The SDK's default `httpx` clients are sized for 2026 high-RPM agent workloads (200 max connections, 50 keep-alive). To preserve the defaults while customizing one or two attributes, extend `DefaultHttpxClient` rather than constructing a raw `httpx.Client`:
+
+```python
+from kovaserve import KovaControlClient, DefaultHttpxClient
+
+custom_http = DefaultHttpxClient(
+    proxies="http://proxy.internal:8080",
+    transport=httpx.HTTPTransport(local_address="10.0.0.42"),
+)
+client = KovaControlClient(http_client=custom_http)
+```
+
+Constructing a bare `httpx.Client` is supported but loses the SDK's pool sizing. Pick this path when you have specific transport requirements (mTLS, a vendor's interception proxy, a custom retry transport) and accept full responsibility for the pool configuration.
+
+## A note on globals
+
+The SDK does **not** expose module-level mutable state. There is no `kovaserve.api_key = "..."` or `kovaserve.base_url = "..."` — every configuration value is read from env at client construction or passed as a kwarg. This is deliberate: multi-tenant code holding multiple keys is a first-class use case, and module globals turn that into a footgun.
+
+Construct one client per credential / deployment pairing and pass it through your code:
+
+```python
+prod = KovaControlClient(api_key=os.environ["PROD_KEY"])
+staging = KovaControlClient(api_key=os.environ["STAGING_KEY"], base_url="https://staging.kovaserve.com/v1")
+
+run = prod.runs.create(project_id="proj_prod", model="meta-llama/Llama-3-70B-Instruct")
+mirror = staging.runs.create(project_id="proj_staging", model="meta-llama/Llama-3-70B-Instruct")
+```
+
+## CLI configuration
+
+The CLI reads `~/.config/kova/credentials` (or `%APPDATA%\kova\credentials` on Windows). It is TOML with `[default]`, `[staging]`, and any other profile names you create. Select a profile with `--profile <name>` on any subcommand or by setting `KOVA_PROFILE`:
+
+```toml
+[default]
+api_key = "ks_live_..."
+base_url = "https://api.kovaserve.com/v1"
+
+[staging]
+api_key = "ks_test_..."
+base_url = "https://staging.kovaserve.com/v1"
+```
+
+`kova auth login` writes this file; `kova auth status` prints the active profile. The Python SDK never reads this file — only the CLI does. If you want the Python SDK to use the same credentials in a script, read the file yourself and pass the value to `KovaControlClient(api_key=...)`.
+
+## Configuration precedence
+
+The SDK resolves each setting through this chain. The first non-`None` value wins:
+
+```
+1. Explicit kwarg on the client constructor
+2. Environment variable
+3. SDK default
+```
+
+The CLI inserts profile credentials between steps 2 and 3:
+
+```
+1. --api-key / --base-url CLI flag
+2. KOVASERVE_API_KEY / KOVASERVE_BASE_URL env var
+3. Active profile in ~/.config/kova/credentials
+4. SDK default
+```
+
+## Where to go next
+
+<Cards>
+  <Card title="Sync vs async" href="/docs/sdk/sync-vs-async" description="Parallel `KovaControlClient` / `AsyncKovaControlClient` clients." />
+  <Card title="Retries and idempotency" href="/docs/sdk/retries-and-idempotency" description="When the SDK retries and how to control it." />
+  <Card title="Logging and tracing" href="/docs/sdk/logging-and-tracing" description="The `kovaserve` logger tree and OpenTelemetry export." />
+  <Card title="Previews" href="/docs/sdk/previews" description="`previews=[...]` per-request opt-in." />
+</Cards>
+
+## See also
+
+- [Install](/docs/sdk/install) — `pip install kovaserve` and the framework extras
+- [Escape hatches](/docs/sdk/escape-hatches) — `with_raw_response`, `extra_body`, `extra_headers`, `extra_query`
+- [Errors](/docs/sdk/errors) — the `KovaError` hierarchy

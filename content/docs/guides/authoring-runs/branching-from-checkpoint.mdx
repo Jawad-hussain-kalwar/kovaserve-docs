@@ -1,0 +1,94 @@
+---
+title: Branching from a checkpoint
+description: Create a new run from a captured checkpoint. The new run inherits the checkpoint's logical context; the original run is untouched.
+---
+
+A branch is a new Run that **starts from a previous checkpoint** rather than from scratch. The new run inherits the checkpoint's frozen logical context (manifest, segments, artifacts, compaction lineage), so the model has the same view of the world it had at checkpoint time. The original run is unaffected.
+
+Branches are the right pattern for:
+
+- **Exploring alternatives.** Try a different prompt or tool from the same state.
+- **What-if analysis.** Replay a run with a different budget or policy.
+- **Fanout.** Branch one decision point into many candidate paths.
+
+## The recipe
+
+```python
+from kovaserve import KovaControlClient
+
+ks = KovaControlClient()
+
+# Branch from a specific checkpoint on the parent run
+new_run = ks.runs.branch(
+    "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",                      # parent run
+    from_checkpoint_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T7",    # the checkpoint to restore from
+    project_id="proj_review_bot",
+    task_override="Continue review but focus on test coverage",
+)
+
+print(new_run.id, new_run.branch_from)
+# 01J8X9Y2Z3K4M5N6P7Q8R9NEW1
+# {'run_id': '01J8X9...', 'checkpoint_id': '01J8X9...', 'branch_step_id': '01J8X9...'}
+```
+
+## Or from the CLI
+
+```bash
+kova runs branch 01J8X9Y2Z3K4M5N6P7Q8R9S0T1 \
+    --from-checkpoint 01J8X9Y2Z3K4M5N6P7Q8R9S0T7 \
+    --task-override "Continue review but focus on test coverage" \
+    --budget-from-parent
+```
+
+## What the new run inherits
+
+| From the checkpoint | What's inherited |
+|---|---|
+| ContextManifest | Frozen at checkpoint time — the new run starts with the same segments, the same scope, the same identity. |
+| ContextArtifacts | Referenced from the inherited manifest; readable by the new run. |
+| CompactionRecords | The compaction lineage at checkpoint time. The new run sees the same summarized history. |
+| State handles | `kv_prefix` if available (warm restart); `context_manifest`, `artifact_bundle` always. |
+| Compatibility vector | The model, tokenizer, renderer, and quantization checkpointed against. |
+
+What the new run does **not** inherit:
+
+- Steps and ModelCalls from the parent run (they belong to the parent's lineage).
+- The parent's Budget — a fresh budget is allocated (use `--budget-from-parent` to inherit a bounded copy).
+- The parent's bound Session — by default the new run binds to no Session (override with `session_id=`).
+
+## When to use `task_override`
+
+The `task_override` field is a free-form string the runtime can use to change the goal of the branch. It surfaces on `Run.metadata.task_override` and on the `ks.branch.created` event:
+
+```python
+new_run = ks.runs.branch(
+    "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    from_checkpoint_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T7",
+    task_override="Re-run with a stricter style guide",
+)
+```
+
+The runtime is responsible for reading `task_override` and acting on it — KovaServe records the override, not the intent. A common pattern is to read `kova.current_run().metadata.task_override` at the top of a branched run's body and adjust the prompt accordingly.
+
+## Branch lineage is queryable
+
+The `branch_from` field on a Run carries the lineage. Query all direct branches of a parent:
+
+```bash
+kova runs list --branch-from 01J8X9Y2Z3K4M5N6P7Q8R9S0T1
+```
+
+Walk the lineage tree with repeated branch queries — the tree is finite and bounded by your checkpoint discipline.
+
+## Cost of branching
+
+Branching is cheap. Phase 1 of the new run's setup — manifest + segment + artifact references — is purely PostgreSQL writes. Phase 2 (KV restore if `restore_mode="warm-kv"` and available) takes seconds and is asynchronous. Branching N times produces N new runs without affecting the parent's storage footprint.
+
+## Where to go next
+
+<Cards>
+  <Card title="Resuming after failure" href="/docs/guides/authoring-runs/resuming-after-failure" description="Restore the parent run instead of branching." />
+  <Card title="Multi-step runs" href="/docs/guides/authoring-runs/multi-step-runs" description="The Run model that gets branched." />
+  <Card title="Checkpoints" href="/docs/sdk/control/checkpoints" description="What gets captured." />
+  <Card title="`kova runs branch` (CLI)" href="/docs/cli/runs/branch" description="Branch from the terminal." />
+</Cards>

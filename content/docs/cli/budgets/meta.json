@@ -1,0 +1,7 @@
+{
+  "title": "budgets",
+  "pages": [
+    "create",
+    "get"
+  ]
+}

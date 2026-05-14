@@ -1,0 +1,240 @@
+---
+title: Context artifacts
+description: The `client.context.artifacts` namespace — upload, retrieve, list, and delete object-storage-backed ContextArtifacts (tool outputs, file diffs, retrieved documents, workspace snapshots, large transcripts).
+---
+
+The `client.context.artifacts` namespace operates on [ContextArtifacts](/docs/concepts/context/context-artifacts), the object-storage-backed entities that hold externalized context bytes. When a [ContextSegment](/docs/sdk/control/context-segments) carries large or low-value content — a 100 KB tool output, a file diff, a retrieved document, a workspace snapshot — KovaServe stores the payload in object storage as an artifact and references it from the segment via `artifact_ref_id`. The segment renders only the artifact's `preview` text into the manifest; the model never sees the full bytes inline.
+
+```python
+from kovaserve import KovaControlClient
+from kovaserve.context import ArtifactClient
+
+client = KovaControlClient()
+artifacts = ArtifactClient(client)
+
+# Upload a tool output
+ref = artifacts.upload_path("./diff.patch", artifact_type="file_diff")
+print(ref.id, ref.uri, ref.size_bytes)
+```
+
+## Methods
+
+| Method | Wire | What it does |
+|---|---|---|
+| [`upload`](#upload) | `POST /v1/ks/context/artifacts` | Upload an artifact body. Returns the artifact row with a signed URI. |
+| [`get`](#get) | `GET /v1/ks/context/artifacts/{id}` | Fetch metadata or a signed download URI. |
+| [`list`](#list) | `GET /v1/ks/context/artifacts` | Cursor-paginated list scoped to a Run, Session, or Project. |
+| [`delete`](#delete) | `DELETE /v1/ks/context/artifacts/{id}` | Explicit revoke. |
+
+## The ContextArtifact shape
+
+```python
+class ContextArtifact(BaseModel):
+    id: str
+    tenant_id: str
+    project_id: str
+    run_id: str | None
+    session_id: str | None
+
+    # ADK-shape identity — name + version + mime_type + bytes
+    name: str                            # human-readable identifier the runtime chose
+    version: str                         # the runtime's version string (defaults to "v1")
+    mime_type: str                       # detected or declared
+    artifact_type: str                   # e.g. file_diff, tool_output, workspace_snapshot, retrieved_document
+    uri: str                             # S3 / MinIO URI; signed if requested
+
+    # Accounting
+    size_bytes: int
+    token_estimate: int                  # tokenizer-aware estimate of full-payload token cost
+    content_hash: str                    # sha256 of the body
+
+    # Manifest-side presentation
+    preview: str | None                  # short text rendered into the manifest in lieu of bytes
+
+    # Retention
+    compression: str | None              # zstd | gzip | none
+    encryption_key_ref: str | None       # KMS / customer key reference
+    retention_policy: dict | None        # {ttl_hours, on_eviction}
+
+    created_at: datetime
+    metadata: dict
+```
+
+Artifacts follow the cross-vendor **ADK shape**: `name + version + mime_type + bytes`. The four-field identity makes artifacts portable across runtimes and self-hostable deployments without semantic drift.
+
+## `upload`
+
+The raw `upload` accepts a multipart body or a JSON body with a content reference:
+
+```python
+# Inline bytes upload
+artifact = client.context.artifacts.upload(
+    name="diff.patch",
+    version="v1",
+    mime_type="text/x-diff",
+    artifact_type="file_diff",
+    content=open("./diff.patch", "rb").read(),
+    run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    preview="diff --git a/src/foo.py b/src/foo.py\n...",
+)
+```
+
+The dedicated `ArtifactClient` wrapper provides two ergonomic affordances on top of the raw upload:
+
+```python
+from kovaserve.context import ArtifactClient
+
+artifacts = ArtifactClient(client)
+
+# upload_path — reads the file, detects mime via python-magic (with mimetypes fallback)
+ref = artifacts.upload_path(
+    "./diff.patch",
+    artifact_type="file_diff",
+    run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+)
+
+# upload_content — pass bytes directly, set name and mime_type explicitly
+ref = artifacts.upload_content(
+    b"...",
+    name="run-output",
+    mime_type="text/plain",
+    artifact_type="tool_output",
+    run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+)
+```
+
+The returned `ContextArtifactRef` carries the artifact's `id` and `uri`. Pass `ref.id` to `ContextBuilder.add_tool_result(content_preview=..., artifact_ref=ref.id)` or to `extra_body["kovaserve"]["artifact_refs"]` to reference the artifact from a chat completion.
+
+### Required arguments
+
+| Argument | Required | Meaning |
+|---|---|---|
+| `content` *or* `path` | yes | The body. Exactly one must be supplied. |
+| `name` | yes (or inferred from path) | Human-readable identifier. |
+| `mime_type` | yes (or inferred from content / path) | Standard MIME type. |
+| `artifact_type` | yes | Open string — common values: `file_diff`, `tool_output`, `workspace_snapshot`, `retrieved_document`, `langgraph_state`, `transcript`. |
+| `run_id` | conditional | Required when `session_id` is not supplied. Either or both pin the artifact's lifetime to a Run / Session. |
+| `session_id` | conditional | Required when `run_id` is not supplied. |
+| `version` | no | Defaults to `"v1"`. Increment when uploading a new version of a logically-same artifact. |
+| `preview` | no | Up to 2048 characters of summary text. When unset, the SDK auto-generates one from the first 2 KB of text-typed content. |
+| `retention_policy` | no | `{ttl_hours, on_eviction}`. Defaults to the Project's artifact retention policy. |
+
+### Bucket selection by data boundary
+
+Artifact uploads route to a bucket determined by the resolved [PolicyScope](/docs/concepts/policy/policy-scopes) `data_boundary` field:
+
+| `data_boundary` | Bucket |
+|---|---|
+| unset / `default` | `ks-context-artifacts` |
+| `eu_only` | `ks-context-artifacts-eu` |
+| `us_only` | `ks-context-artifacts-us` |
+| custom | `ks-context-artifacts-<suffix>` |
+
+The bucket must exist in the deployment. Self-hosted clusters that target a regional `data_boundary` must provision the corresponding bucket at deployment time; missing buckets fail fast at upload.
+
+## `get`
+
+```python
+artifact = client.context.artifacts.get("01J8X9Y2Z3K4M5N6P7Q8R9AR03")
+print(artifact.uri, artifact.mime_type, artifact.size_bytes)
+```
+
+By default `uri` is the canonical S3 / MinIO path. To get a time-limited signed download URL:
+
+```python
+artifact = client.context.artifacts.get(
+    "01J8X9Y2Z3K4M5N6P7Q8R9AR03",
+    signed=True,
+    signed_ttl_seconds=3600,
+)
+# artifact.uri is now an https:// signed URL the SDK can hand off to a browser, a sidecar, or curl
+```
+
+For programmatic body download, the `ArtifactClient` exposes a content helper:
+
+```python
+body = artifacts.download(ref.id)                 # → bytes
+text = artifacts.download_text(ref.id)            # → str (decoded per mime_type charset)
+artifacts.download_to_path(ref.id, "./diff.patch")
+```
+
+## `list`
+
+```python
+for artifact in client.context.artifacts.list(run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1"):
+    print(artifact.artifact_type, artifact.size_bytes, artifact.name)
+```
+
+Filter and order:
+
+```python
+artifacts = client.context.artifacts.list(
+    run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    session_id="ses_a7f3c2b8d4e1f0925a1b6c3d",
+    artifact_type=["file_diff", "tool_output"],
+    name_prefix="diff",                           # exact-prefix match on the runtime-supplied name
+    created_after="2026-05-01T00:00:00Z",
+    limit=20,
+)
+```
+
+## `delete`
+
+```python
+client.context.artifacts.delete("01J8X9Y2Z3K4M5N6P7Q8R9AR03")
+```
+
+Explicit revoke. The artifact row is marked deleted; the object-storage body is scheduled for purge per the deployment's retention policy. Any [ContextSegment](/docs/sdk/control/context-segments) that references the deleted artifact returns its `preview` only on subsequent manifest reads; new manifests cannot use the deleted artifact as `artifact_ref_id`.
+
+Deletion is the right path for explicit revocation — a tool output containing sensitive data, an artifact uploaded for a since-cancelled Run, a partner relationship ending. Routine cleanup happens automatically via `retention_policy` TTL.
+
+## Composing with segments
+
+Once an artifact exists, segments reference it via `artifact_ref_id`:
+
+```python
+from kovaserve.context import ContextBuilder
+
+builder = ContextBuilder()
+ref = artifacts.upload_path("./big-tool-output.json", artifact_type="tool_output")
+builder.add_tool_result(
+    content_preview="Tool returned 1247 records; full payload offloaded.",
+    artifact_ref=ref.id,
+)
+
+# When the manifest is assembled, the segment carries only the preview;
+# the artifact body is fetched on demand by the runtime, never inline in the prompt.
+```
+
+When a chat completion's `kovaserve` extension carries `artifact_refs: ["01J8X9..."]`, the Global Context Manager validates that the artifacts exist, fits the scope, and are accessible to the caller. Missing or scope-mismatched artifacts return `400 invalid_request` with `details.artifact_id` identifying the violation.
+
+## Async parallel
+
+```python
+import asyncio
+from kovaserve import AsyncKovaControlClient
+from kovaserve.context import AsyncArtifactClient
+
+async def main() -> None:
+    client = AsyncKovaControlClient()
+    artifacts = AsyncArtifactClient(client)
+    ref = await artifacts.upload_path("./big-output.json", artifact_type="tool_output")
+    body = await artifacts.download(ref.id)
+
+asyncio.run(main())
+```
+
+## Where to go next
+
+<Cards>
+  <Card title="Context segments" href="/docs/sdk/control/context-segments" description="How segments reference artifacts via `artifact_ref_id`." />
+  <Card title="Context manifests" href="/docs/sdk/control/context-manifests" description="The manifest these artifacts surface in (as previews)." />
+  <Card title="ArtifactClient" href="/docs/sdk/primitives/artifact-client" description="The ergonomic wrapper for upload / download." />
+  <Card title="Handles" href="/docs/sdk/control/handles" description="Bundle multiple artifacts as an `artifact_bundle` handle." />
+</Cards>
+
+## See also
+
+- [ContextArtifact concept](/docs/concepts/context/context-artifacts) — the ADK-shape entity
+- [PolicyScope: data boundary](/docs/concepts/policy/policy-scopes) — the field that selects the artifact bucket
+- [API: Context artifacts](/docs/api/context/artifacts/upload) — the wire surface

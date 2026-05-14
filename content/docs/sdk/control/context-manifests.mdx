@@ -1,0 +1,181 @@
+---
+title: Context manifests
+description: The `client.context.manifests` namespace — retrieve and list durable ContextManifests, the per-call audit anchor for budgets, routing, checkpoints, and resume.
+---
+
+The `client.context.manifests` namespace operates on [ContextManifests](/docs/concepts/context/context-manifests), the durable per-call record of the exact context that was dispatched to the model. Every successful [ModelCall](/docs/concepts/run-hierarchy/model-calls) binds to exactly one ContextManifest via `context_manifest_id` — the manifest is the audit anchor that every other context-engineering primitive references.
+
+ContextManifests are **read-only from the SDK** in the common path. They are produced automatically by the Global Context Manager during the gateway's hot path, persisted by the Context Manifest Registry, and surfaced here for inspection, audit, and post-hoc analysis. The runtime supplies *content* (messages, context blocks, segment refs); KovaServe produces the *manifest*.
+
+```python
+from kovaserve import KovaControlClient
+
+client = KovaControlClient()
+manifest = client.context.manifests.get("01J8X9Y2Z3K4M5N6P7Q8R9SCM07")
+
+print(manifest.stable_context_id)
+print(manifest.token_counts.active_tokens)
+print(manifest.admission.decision)              # ALLOW | WARN | OFFLOAD_REQUIRED | ...
+```
+
+## Methods
+
+| Method | Wire | What it does |
+|---|---|---|
+| [`get`](#get) | `GET /v1/ks/context/manifests/{id}` | Fetch a manifest, optionally hydrating segments. |
+| [`list`](#list) | `GET /v1/ks/context/manifests` | Cursor-paginated list scoped to a Run, Session, or Project. |
+
+A manifest is created automatically when the gateway processes a chat completion with the `kovaserve` extension. There is no `create` method on the SDK — explicit creation is reserved for advanced replay scenarios via the [REST API](/docs/api/context/manifests/get) only.
+
+## The ContextManifest shape
+
+```python
+class ContextManifest(BaseModel):
+    id: str
+    tenant_id: str
+    project_id: str
+
+    # Bindings — what this manifest was assembled for
+    run_id: str
+    session_id: str | None
+    step_id: str | None              # null on HARD_STOP and on Checkpoint-only snapshots
+    model_call_id: str | None        # populated after admission succeeds
+    checkpoint_id: str | None        # populated when the manifest is a Checkpoint snapshot
+
+    # Identity
+    stable_prefix_id: str            # legacy prefix-tier identity for KV cache lookups
+    stable_context_id: str           # compatibility-aware: digest cascade + renderer + model + tokenizer + scope
+    renderer_version: str
+    model_id: str
+    model_family: str
+    tokenizer_fingerprint: str
+
+    # Scope
+    scope: ContextScope              # {tenant_id, project_id, context_share_scope}
+
+    # Accounting
+    token_counts: TokenCounts        # {stable, volatile, active, offloaded}
+    byte_counts: ByteCounts          # {artifact_bytes}
+
+    # Lineage
+    compaction_records: list[CompactionRef]  # populated when compaction produced any segment
+
+    # Admission outcome
+    admission: AdmissionDecision     # {decision, transformations, timestamp}
+
+    created_at: datetime
+
+    # Hydrated only when expand=["segments"] is requested
+    segments: list[ContextSegment] | None
+```
+
+The manifest is **written once and immutable**. Re-admission after `OFFLOAD_REQUIRED` or `COMPACT_REQUIRED` produces a *new* manifest with its own ID — the prior manifest stays addressable so timelines, checkpoints, and audit trails always resolve to the exact shape that was admitted.
+
+## `get`
+
+```python
+manifest = client.context.manifests.get("01J8X9Y2Z3K4M5N6P7Q8R9SCM07")
+```
+
+Without `expand`, `manifest.segments` is `None` — the bare manifest row is returned. The token counts, identity fields, and admission decision are populated unconditionally; segment bodies are not.
+
+To hydrate the segment list in one round trip:
+
+```python
+manifest = client.context.manifests.get(
+    "01J8X9Y2Z3K4M5N6P7Q8R9SCM07",
+    expand=["segments"],
+)
+
+for segment in manifest.segments:
+    print(segment.ordinal, segment.context_type, segment.memory_class, segment.token_count)
+```
+
+For artifact-backed segments, the `content_inline` field on the segment is `None` and `artifact_ref_id` points at a [ContextArtifact](/docs/sdk/control/context-artifacts). Resolving the artifact requires a separate `client.context.artifacts.get(...)` call — the manifest carries only the segment's `preview` text, not the full payload.
+
+## `list`
+
+```python
+for manifest in client.context.manifests.list(run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1"):
+    print(manifest.id, manifest.stable_context_id, manifest.admission.decision)
+```
+
+Filter and order:
+
+```python
+manifests = client.context.manifests.list(
+    run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1",         # the common filter
+    session_id="ses_a7f3c2b8d4e1f0925a1b6c3d",   # alternatively, by Session
+    project_id="proj_review_bot",                 # broader Project scope
+    stable_context_id="sha256:7e44...",          # find all calls with a specific context identity
+    admission_decision=["DEGRADE", "HARD_STOP"],  # find admission troubles
+    created_after="2026-05-01T00:00:00Z",
+    limit=20,
+)
+```
+
+Sorting is by `created_at` ascending by default. Use `order="desc"` for newest-first.
+
+`stable_context_id` filtering is particularly useful for cache-hit-rate analysis: every ModelCall that produced the same `stable_context_id` shared the same admitted context shape and therefore the same warm-prefix potential. Joining manifest queries against [usage records](/docs/sdk/control/metering) reveals which manifest identities are driving real cache savings.
+
+## Identity-of-record
+
+The manifest carries the data every other system needs to reason about the call:
+
+| Consumer | What it reads from the manifest |
+|---|---|
+| [ModelCall](/docs/sdk/control/runs) | `context_manifest_id` FK; full manifest accessible by `expand=["steps.model_calls.context_manifest"]`. |
+| Cache-Aware Router | `stable_prefix_id`, `stable_context_id`, segment ordering, scope. |
+| [Checkpoint](/docs/sdk/control/checkpoints) | The frozen snapshot is the audit anchor for restore. |
+| [Sessions](/docs/sdk/control/sessions) | `current_manifest_id` and bounded manifest history. |
+| Context Admission Service | Token counts and admission decision are produced here. |
+| [Budgets](/docs/sdk/control/budgets) | Cost estimate against `active_tokens` + tokenizer fingerprint. |
+| [CompactionRecord](/docs/sdk/control/compaction) | Source manifest reference; output segment list. |
+
+## Admission decisions on the manifest
+
+Every manifest carries the admission outcome from the [ContextBudget](/docs/sdk/control/context-budgets) admission service:
+
+| Decision | Meaning | Recorded transformations |
+|---|---|---|
+| `ALLOW` | Proceeded directly. | None. |
+| `WARN` | Proceeded with a warning. | None. |
+| `OFFLOAD_REQUIRED` | Re-admitted after artifact offload. | List of segments moved to artifact references. |
+| `COMPACT_REQUIRED` | Re-admitted after compaction. | Reference to the CompactionRecord that reduced the manifest. |
+| `DEGRADE` | Re-admitted under degraded shape. | Reduced `max_tokens`, dropped optional segments. |
+| `HARD_STOP` | Rejected. The manifest is recorded but no ModelCall references it. |
+
+`HARD_STOP` manifests are useful for audit — they show *why* a call was rejected and *what shape* it would have had. They never bind to a [Step](/docs/sdk/control/runs) because Step creation is deferred until admission succeeds.
+
+## Async parallel
+
+Every method is mirrored on `AsyncKovaControlClient.context.manifests`:
+
+```python
+import asyncio
+from kovaserve import AsyncKovaControlClient
+
+async def main() -> None:
+    client = AsyncKovaControlClient()
+    async for manifest in client.context.manifests.list(run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1"):
+        print(manifest.id, manifest.token_counts.active_tokens)
+
+asyncio.run(main())
+```
+
+## Where to go next
+
+<Cards>
+  <Card title="Context segments" href="/docs/sdk/control/context-segments" description="The typed fragments composing a manifest." />
+  <Card title="Context artifacts" href="/docs/sdk/control/context-artifacts" description="The object-storage offload backing large segments." />
+  <Card title="Context budgets" href="/docs/sdk/control/context-budgets" description="The admission service that produces the manifest's `decision`." />
+  <Card title="Compaction" href="/docs/sdk/control/compaction" description="The lineage records that explain reduced manifests." />
+  <Card title="ContextBuilder" href="/docs/sdk/primitives/context-builder" description="The SDK-side builder for the segments a manifest is assembled from." />
+</Cards>
+
+## See also
+
+- [ContextManifest concept](/docs/concepts/context/context-manifests) — what a manifest is
+- [Stable identities](/docs/concepts/context/context-manifests#stable-identities) — `stable_prefix_id` vs `stable_context_id`
+- [Admission](/docs/concepts/policy/admission) — how admission decisions are produced
+- [API: Context manifests](/docs/api/context/manifests/get) — the wire surface

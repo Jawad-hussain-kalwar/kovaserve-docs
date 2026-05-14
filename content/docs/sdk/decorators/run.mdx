@@ -1,0 +1,174 @@
+---
+title: "`@kova.run`"
+description: The Run decorator — open a durable Run around a function body, with automatic ID propagation into every inference call inside the body.
+---
+
+`@kova.run` opens a [Run](/docs/concepts/run-hierarchy/runs) for the duration of the decorated function call. Every inference call issued from inside the body inherits the Run ID automatically; the Run transitions to `COMPLETED` on normal return, `FAILED` on exception, or `CANCELED` on consumer abandonment of a stream.
+
+```python
+from kovaserve import kova, OpenAI
+
+inference = OpenAI()
+
+@kova.run(project="proj_review_bot", model="meta-llama/Llama-3-70B-Instruct")
+def review_pr(pr_url: str) -> str:
+    response = inference.chat.completions.create(
+        model="meta-llama/Llama-3-70B-Instruct",
+        messages=[{"role": "user", "content": f"Review {pr_url}"}],
+    )
+    return response.choices[0].message.content
+```
+
+## Signature
+
+```python
+def run(
+    *,
+    project: str,                                # required — Project ID
+    model: str | None = None,                    # default model for the Run
+    session: str | None = None,                  # bind to an existing Session
+    external_run_id: str | None = None,          # opaque correlation ID
+    external_runtime: str | None = None,         # label: "langgraph" | "temporal" | "custom"
+    policy_scope_ref: str | None = None,
+    hooks: RunHooks | None = None,
+    client: KovaControlClient | None = None,     # override the default client
+) -> Callable[[F], F]: ...
+```
+
+`project` is the only required argument. All others have sensible defaults. `client` defaults to the module-level client constructed from `KOVASERVE_API_KEY`; pass an explicit `KovaControlClient` when you need to scope a Run to a non-default credential.
+
+## On entry
+
+1. Calls `client.runs.create(project_id=project, model=model, session_id=session, external_run_id=external_run_id, external_runtime=external_runtime, policy_scope_ref=policy_scope_ref)`.
+2. Stores the new Run in a `contextvars.ContextVar` so nested decorators and inference calls can read it.
+3. Patches the HTTP layer to inject `kovaserve.run_id` into every chat completion issued from inside the body.
+4. Returns control to the function body.
+
+The Run starts in `CREATED`. The state transitions to `RUNNING` automatically when the first Step is created inside the body (either explicitly via `@kova.step` or implicitly via an inference call).
+
+## On normal return
+
+The Run transitions through `RUNNING → COMPLETED`. The decorator does **not** wait for in-flight ModelCalls to finish — if your function returns while a stream is still being consumed by the caller, the Run stays in `RUNNING` until the stream completes (see [streaming](#streaming) below).
+
+The ContextVar is released; nested calls outside the decorator's lexical scope cannot inherit the Run.
+
+## On exception
+
+The Run transitions through `RUNNING → FAILED` with `details.exception_type = type(exc).__name__`. The original exception is re-raised unchanged — `@kova.run` never swallows, never wraps.
+
+```python
+@kova.run(project="proj_review_bot", model="...")
+def review_pr(...):
+    raise ValueError("bad input")    # Run transitions to FAILED;
+                                      # ValueError propagates to the caller with original traceback.
+```
+
+Catch internally if you want a non-FAILED outcome:
+
+```python
+@kova.run(project="proj_review_bot", model="...")
+def review_pr(...):
+    try:
+        do_risky_work()
+    except RecoverableError:
+        return fallback_result()      # Run transitions to COMPLETED — the exception didn't escape.
+```
+
+## On streaming
+
+When the function body returns a streaming response (a generator, an `openai.Stream`, an `httpx.Response` in stream mode), the Run stays in `RUNNING` until the stream is consumed to completion:
+
+```python
+@kova.run(project="proj_review_bot", model="meta-llama/Llama-3-70B-Instruct")
+def review_pr_streaming(pr_url: str):
+    stream = inference.chat.completions.create(
+        model="meta-llama/Llama-3-70B-Instruct",
+        messages=[{"role": "user", "content": f"Review {pr_url}"}],
+        stream=True,
+    )
+    return stream                     # Run stays RUNNING until the caller exhausts the stream
+```
+
+If the caller exhausts the stream, the Run transitions to `COMPLETED`. If the caller stops consuming early (`break` out of the `for` loop, or `stream.close()`), the Run transitions to `CANCELED` — early consumer stop is treated as "I no longer need this Run."
+
+For the common case of "stream tokens to the user, then mark complete," use the [`accumulate_stream_cost`](/docs/sdk/inference/cost-and-streaming) helper which consumes the stream to completion automatically.
+
+## Async
+
+```python
+@kova.run(project="proj_review_bot", model="meta-llama/Llama-3-70B-Instruct")
+async def review_pr(pr_url: str) -> str:
+    pr = await github.get_pr(pr_url)
+    response = await async_inference.chat.completions.create(
+        model="meta-llama/Llama-3-70B-Instruct",
+        messages=[{"role": "user", "content": f"Review {pr}"}],
+    )
+    return response.choices[0].message.content
+```
+
+The decorator detects `async def` at decoration time and dispatches to the async implementation. The sync version uses `contextvars` on the thread; the async version uses `contextvars` on the task. There is no implicit `asyncio.run` and no thread bridging.
+
+## Composing with `@kova.session`
+
+A Session hosts many Runs — that relationship is expressed by scoping the Session **outside** the Runs it contains. Apply `@kova.session` to an **enclosing** function whose body calls multiple `@kova.run`-decorated inner functions:
+
+```python
+@kova.session(model="meta-llama/Llama-3-70B-Instruct")
+def conversation(user_inputs: list[str]) -> list[str]:
+    return [chat_turn(u) for u in user_inputs]    # multiple Runs, one Session
+
+@kova.run(project="proj_review_bot", model="meta-llama/Llama-3-70B-Instruct")
+def chat_turn(user_input: str) -> str:
+    ...
+```
+
+When `@kova.session` and `@kova.run` stack on the *same* function, each call opens a fresh Session and a fresh Run — both bounded by that single call. For the common single-turn agent, skip `@kova.session` entirely; `@kova.run` carries its own continuity. To bind a Run to a Session that was created elsewhere, pass `session=<session_id>` to `@kova.run`.
+
+## Reading the active Run
+
+Inside the body, the active Run is available via `kova.current_run()`:
+
+```python
+@kova.run(project="proj_review_bot", model="...")
+def review_pr(...):
+    run = kova.current_run()
+    print(run.id, run.status)         # the live Run row
+```
+
+`kova.current_run()` returns `None` outside any `@kova.run`-decorated body. Use it to attach Run-aware behaviour (logging, metrics, custom side effects) without threading the Run ID through every function signature.
+
+## Reusing an existing Run
+
+For the rare case where you want a decorator that *binds to* an existing Run rather than creating a new one — useful when an external orchestrator allocates the Run and the wrapped function is just one of several body sections — pass `run_id=` instead of `project=`:
+
+```python
+@kova.run(run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1")     # bind, do not create
+def review_pr_section(...):
+    ...
+```
+
+The decorator skips the `create` call and reads the existing Run. Lifecycle transitions still apply — normal return moves the Run to `COMPLETED`, exception moves it to `FAILED`. If you want the Run to *outlive* the decorated function (e.g., other sections will append more Steps), use `complete=False`:
+
+```python
+@kova.run(run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1", complete=False)
+def review_pr_section(...):
+    ...
+# Run stays RUNNING after the function returns; the orchestrator closes it elsewhere.
+```
+
+## Where to go next
+
+<Cards>
+  <Card title="`@kova.session`" href="/docs/sdk/decorators/session" description="Wrap multiple sequential Runs in a Session." />
+  <Card title="`@kova.budget`" href="/docs/sdk/decorators/budget" description="Attach a Budget — admission applies on entry." />
+  <Card title="`@kova.step`" href="/docs/sdk/decorators/step" description="Record explicit Steps inside the Run body." />
+  <Card title="Composition" href="/docs/sdk/decorators/composition" description="Stacking order — `budget → run → session`." />
+  <Card title="Hooks" href="/docs/sdk/hooks" description="Subclass `RunHooks` and pass via `hooks=`." />
+  <Card title="`client.runs`" href="/docs/sdk/control/runs" description="The imperative alternative." />
+</Cards>
+
+## See also
+
+- [Run concept](/docs/concepts/run-hierarchy/runs) — what a Run is
+- [Run state machine](/docs/concepts/run-hierarchy/run-state-machine) — the 12-state lifecycle
+- [Decorators overview](/docs/sdk/decorators) — the lifecycle contract every decorator follows

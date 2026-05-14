@@ -1,0 +1,21 @@
+{
+  "title": "Control plane client",
+  "pages": [
+    "index",
+    "runs",
+    "sessions",
+    "budgets",
+    "checkpoints",
+    "handles",
+    "context-manifests",
+    "context-segments",
+    "context-artifacts",
+    "context-budgets",
+    "compaction",
+    "cache",
+    "metering",
+    "events",
+    "cluster",
+    "tenancy"
+  ]
+}

@@ -1,0 +1,216 @@
+---
+title: Handles
+description: The `client.handles` namespace — create, retrieve, list, delete, and share typed StateHandles that reference reusable execution state across Sessions, Runs, and Projects.
+---
+
+The `client.handles` namespace operates on [StateHandles](/docs/concepts/recovery/state-handles), the typed references that point at reusable execution state. A handle is the durable, scope-checked, expiry-aware way to say *"this cached prefix / context manifest / artifact bundle / checkpoint / runtime-state object can be reused over here"*. Handles generalize the older "activation handle" concept so cross-Session reuse extends beyond raw KV prefixes.
+
+```python
+from kovaserve import KovaControlClient
+
+client = KovaControlClient()
+
+# Create a kv_prefix handle from the current Session's warm prefix
+handle = client.handles.create(
+    handle_type="kv_prefix",
+    session_id="ses_a7f3c2b8d4e1f0925a1b6c3d",
+    retention_policy={"ttl_hours": 24},
+)
+print(handle.id, handle.handle_type, handle.expires_at)
+```
+
+## Methods
+
+| Method | Wire | What it does |
+|---|---|---|
+| [`create`](#create) | `POST /v1/ks/handles` | Create a handle pointing at reusable state. |
+| [`get`](#get) | `GET /v1/ks/handles/{id}` | Resolve a handle to its underlying location(s). |
+| [`list`](#list) | `GET /v1/ks/handles` | Cursor-paginated list scoped to a Project. |
+| [`delete`](#delete) | `DELETE /v1/ks/handles/{id}` | Revoke a handle explicitly. |
+| [`share`](#share) | `POST /v1/ks/handles/{id}/share` | Promote a private handle to a shareable scope. |
+
+## The five handle types
+
+The `handle_type` discriminator is a closed five-value enum. Every handle references exactly one type of underlying state:
+
+| `handle_type` | What it references | Created from |
+|---|---|---|
+| `kv_prefix` | A KV cache prefix resident on one or more nodes. The cheapest restoration path. | A Session with a warm prefix, or a Checkpoint with an attached KV export. |
+| `context_manifest` | A frozen [ContextManifest](/docs/concepts/context/context-manifests) snapshot. Restores logical context without requiring KV. | A ModelCall, a Checkpoint, or an explicit pin. |
+| `checkpoint` | A full [Checkpoint](/docs/concepts/recovery/checkpoints) — manifest + artifacts + compaction + optional KV. | A Checkpoint that has reached `VALIDATED`. |
+| `artifact_bundle` | One or more [ContextArtifacts](/docs/concepts/context/context-artifacts) packaged for reuse. | A set of related artifacts (e.g., a workspace snapshot bundle). |
+| `runtime_state` | Layer 3 runtime-local state (workspace, sandbox refs, planner scratchpad). | A managed-runtime Run that has executed at least one Step. |
+
+The handle type determines what the Cache-Aware Router can do when the handle is consumed. A `kv_prefix` handle biases routing toward the node holding the cache. A `context_manifest` handle restores logical context but does not pin placement. A `checkpoint` handle drives a full resume flow.
+
+## The Handle shape
+
+```python
+class StateHandle(BaseModel):
+    id: str
+    tenant_id: str
+    project_id: str
+    handle_type: HandleType              # kv_prefix | context_manifest | checkpoint |
+                                         # artifact_bundle | runtime_state
+
+    session_id: str | None               # the originating Session, if any
+    run_id: str | None                   # the originating Run, if any
+    target_id: str                       # the underlying entity ID — varies by handle_type
+
+    physical_refs: list[PhysicalRef]     # node IDs, S3 URIs, manifest IDs the handle points at
+    share_scope: ShareScope              # "private" | "shareable_within_project" | "shareable_within_tenant"
+    retention_policy: dict               # {ttl_hours, on_eviction}
+    created_at: datetime
+    expires_at: datetime | None
+    metadata: dict
+```
+
+`target_id` interpretation:
+
+- `kv_prefix` → a stable prefix identity (the same identity the KV Index keys on)
+- `context_manifest` → a `context_manifest_id`
+- `checkpoint` → a `checkpoint_id`
+- `artifact_bundle` → an internal bundle ID; `physical_refs` carries the constituent artifact IDs
+- `runtime_state` → a runtime-state row ID maintained by the Layer 3 Runtime State Store
+
+## `create`
+
+```python
+handle = client.handles.create(
+    handle_type="kv_prefix",                    # required
+    session_id="ses_a7f3c2b8d4e1f0925a1b6c3d",  # required for kv_prefix / runtime_state types
+    run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1",        # required for runtime_state, optional otherwise
+    target_id="sha256:9a1c...",                 # required when not auto-inferable from session/run
+    share_scope="private",                       # default — see Sharing below
+    retention_policy={
+        "ttl_hours": 24,
+        "on_eviction": "expire",                 # "expire" | "preserve_logical"
+    },
+)
+```
+
+The minimum required arguments depend on `handle_type`:
+
+| `handle_type` | Required | Optional |
+|---|---|---|
+| `kv_prefix` | `session_id` *or* `target_id` (the prefix identity) | `run_id`, `target_node_id` (pin to a node) |
+| `context_manifest` | `target_id` (the `context_manifest_id`) | `session_id`, `run_id` |
+| `checkpoint` | `target_id` (the `checkpoint_id`) | — |
+| `artifact_bundle` | `target_id` (a constituent `artifact_id`) or explicit `artifact_ids: [...]` | — |
+| `runtime_state` | `run_id` | `session_id` |
+
+`on_eviction` controls what happens when the underlying state is evicted before the handle's TTL expires:
+
+- `expire` — the handle becomes invalid; resolution returns `410 handle_expired`.
+- `preserve_logical` — only valid for `kv_prefix` handles. The handle downgrades to a logical-context restore (manifest + artifacts) when the KV is evicted, preserving the resume path at the cost of a colder restart.
+
+## `get`
+
+```python
+handle = client.handles.get("01J8X9Y2Z3K4M5N6P7Q8R9S0T8")
+
+print(handle.handle_type, handle.target_id, handle.expires_at)
+for ref in handle.physical_refs:
+    print(ref.kind, ref.location)        # ("node", "node-3") | ("s3", "s3://.../manifest.json") | ...
+```
+
+Resolution applies scope and expiry checks:
+
+- **Scope** — a `private` handle returns `404 handle_not_found` when the caller is in a different Session. A `shareable_within_project` handle returns `404` across Projects. A `shareable_within_tenant` handle returns `404` across Tenants. The 404 is deliberate — KovaServe never confirms the existence of resources outside the caller's tenant.
+- **Expiry** — an expired handle returns `410 handle_expired`. Expiry is checked at resolve time, not on a sweep — the handle row stays addressable for audit even after expiry but cannot be consumed.
+- **Underlying state eviction** — if the underlying KV / manifest / artifact has been evicted and `on_eviction="expire"`, the handle returns `410 handle_expired`.
+
+## `list`
+
+```python
+for handle in client.handles.list(handle_type="kv_prefix"):
+    print(handle.id, handle.session_id, handle.expires_at)
+```
+
+Filter and order:
+
+```python
+handles = client.handles.list(
+    handle_type="checkpoint",                   # single value or list
+    session_id="ses_a7f3c2b8d4e1f0925a1b6c3d",  # narrow to a Session
+    run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1",        # narrow to a Run
+    share_scope="shareable_within_tenant",      # find shared handles
+    include_expired=False,                       # default — exclude expired rows
+)
+```
+
+## `delete`
+
+```python
+client.handles.delete("01J8X9Y2Z3K4M5N6P7Q8R9S0T8")
+```
+
+Explicit revocation. The handle row is marked expired immediately; subsequent resolution returns `410 handle_expired`. The underlying state is unaffected — `delete` revokes the *reference*, not the state. Deleting a handle is the right path when you want to invalidate a shared handle before its TTL elapses (a CI test handle leaks into production, a partner relationship ends).
+
+## `share`
+
+```python
+handle = client.handles.share(
+    "01J8X9Y2Z3K4M5N6P7Q8R9S0T8",
+    share_scope="shareable_within_project",     # or "shareable_within_tenant"
+)
+```
+
+Promotes a private handle to a shared scope. Demotion (e.g., `shareable_within_tenant → shareable_within_project → private`) is not supported on existing handles — create a new handle with the narrower scope instead. The reason: a handle that was shareable may have been resolved by another caller and cached the reference; demoting would silently break that caller. Forward-only promotion keeps the contract one-way.
+
+A handle's effective accessibility is the *intersection* of its `share_scope` and the underlying state's [PolicyScope](/docs/concepts/policy/policy-scopes) `context_share_scope`. A `shareable_within_tenant` handle whose underlying ContextManifest is bound to `context_share_scope="project"` is still only visible within that one Project — the policy is the floor, the handle scope is the ceiling.
+
+## Passing a handle on inference
+
+Once a handle exists, the inference path consumes it via the `activation_handle` field on the `kovaserve` extension:
+
+```python
+from kovaserve import OpenAI
+inference = OpenAI()
+
+response = inference.chat.completions.create(
+    model="meta-llama/Llama-3-70B-Instruct",
+    messages=[{"role": "user", "content": "Continue the review"}],
+    extra_body={"kovaserve": {
+        "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T2",
+        "activation_handle": "01J8X9Y2Z3K4M5N6P7Q8R9S0T8",
+    }},
+)
+```
+
+The router resolves the handle (with scope check), reads the underlying location, and biases placement toward the node that owns the cached state. The handle is consumed as advisory — if the node is unavailable or the handle is expired, routing falls back to a cold path and the response is unaffected on the wire.
+
+## Async parallel
+
+Every method is mirrored on `AsyncKovaControlClient.handles`:
+
+```python
+import asyncio
+from kovaserve import AsyncKovaControlClient
+
+async def main() -> None:
+    client = AsyncKovaControlClient()
+    handle = await client.handles.create(
+        handle_type="context_manifest",
+        target_id="01J8X9Y2Z3K4M5N6P7Q8R9SCM07",
+        share_scope="shareable_within_project",
+    )
+
+asyncio.run(main())
+```
+
+## Where to go next
+
+<Cards>
+  <Card title="Checkpoints" href="/docs/sdk/control/checkpoints" description="The most common source of handles — every Checkpoint exposes typed StateHandles." />
+  <Card title="Sessions" href="/docs/sdk/control/sessions" description="Where `kv_prefix` handles originate." />
+  <Card title="Context manifests" href="/docs/sdk/control/context-manifests" description="What a `context_manifest` handle points at." />
+  <Card title="Context artifacts" href="/docs/sdk/control/context-artifacts" description="The objects backing an `artifact_bundle` handle." />
+</Cards>
+
+## See also
+
+- [StateHandle concept](/docs/concepts/recovery/state-handles) — the five handle types in depth
+- [PolicyScope](/docs/concepts/policy/policy-scopes) — the floor on handle accessibility
+- [Extension envelope](/docs/sdk/inference/extension-envelope) — passing `activation_handle` on inference
+- [API: Handles](/docs/api/handles/create) — the wire surface

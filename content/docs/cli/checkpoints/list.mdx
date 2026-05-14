@@ -1,0 +1,55 @@
+---
+title: "`kova checkpoints list`"
+description: List Checkpoints scoped to a Run or Project. Filter by status, trigger label, and time window.
+---
+
+List [Checkpoints](/docs/concepts/recovery/checkpoints) for a Run or across a Project.
+
+## Synopsis
+
+```bash
+kova checkpoints list [OPTIONS]
+```
+
+## Options
+
+| Option | Meaning |
+|---|---|
+| `--run-id <id>` | List Checkpoints for one Run. The common case. |
+| `--project-id <id>` | Broader Project scope. Defaults to the active profile's Project when `--run-id` is omitted. |
+| `--status <status>` | Filter by `CheckpointStatus`. Accept-multiple: `--status VALIDATED --status STORED`. |
+| `--trigger <label>` | Filter by trigger label — `before_file_write`, `before_shell_command`, `after_stable_analysis`, `on_budget_warning`, `periodic`, `manual`, or any string. |
+| `--limit <n>` | Per-page count. Default 50, max 100. |
+| `--order <asc\|desc>` | Sort by `created_at`. Default `asc` (oldest first when scoping to a Run). |
+| `--all` | Fetch every page. |
+| `--json` | Emit a JSON array. |
+
+## Examples
+
+```bash
+# All Checkpoints on a Run, oldest first
+kova checkpoints list --run-id 01J8X9Y2Z3K4M5N6P7Q8R9S0T1
+
+# Only restorable Checkpoints
+kova checkpoints list --run-id 01J... --status VALIDATED
+
+# Most recent Checkpoint for the Run
+kova checkpoints list --run-id 01J... --order desc --limit 1
+
+# All `before_file_write` Checkpoints across the Project
+kova checkpoints list --trigger before_file_write
+```
+
+## Output
+
+```
+ID                                STATUS      RUN                            TRIGGER             SIZE       CREATED
+01J8X9Y2Z3K4M5N6P7Q8R9S0T7        VALIDATED   01J8X9Y2Z3K4M5N6P7Q8R9S0T1     before_file_write   12.4 MB    2026-05-15T11:42:18Z
+01J8X9Y2Z3K4M5N6P7Q8R9S0T9        STORED      01J8X9Y2Z3K4M5N6P7Q8R9S0T1     periodic            8.9 MB     2026-05-15T11:48:22Z
+```
+
+## See also
+
+- [`kova checkpoints restore`](/docs/cli/checkpoints/restore) — restore from a listed Checkpoint
+- [`kova runs branch`](/docs/cli/runs/branch) — branch into a new Run from a Checkpoint
+- [`client.checkpoints.list`](/docs/sdk/control/checkpoints) — the SDK equivalent

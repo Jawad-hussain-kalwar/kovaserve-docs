@@ -1,0 +1,61 @@
+---
+title: "`kova runs list`"
+description: List Runs filtered by Project, status, Session, and time window. Cursor-paginated; `--json` emits the page as one JSON array.
+---
+
+List [Runs](/docs/concepts/run-hierarchy/runs) in the active Project. Cursor-paginated; the default fetches the most recent 50 Runs.
+
+## Synopsis
+
+```bash
+kova runs list [OPTIONS]
+```
+
+## Options
+
+| Option | Meaning |
+|---|---|
+| `--project-id <id>` | Project to list under. Defaults to the active profile's Project. |
+| `--status <status>` | Filter by `RunStatus`. Accept-multiple: `--status RUNNING --status PAUSED`. |
+| `--session-id <id>` | Filter to a single Session. |
+| `--created-after <iso8601>` | Filter to Runs created on or after this timestamp. |
+| `--created-before <iso8601>` | Filter to Runs created before this timestamp. |
+| `--limit <n>` | Per-page count. Range 1–100, default 50. |
+| `--order <asc\|desc>` | Sort by `created_at`. Default `desc` (newest first). |
+| `--all` | Fetch every page until exhausted, not just the first. |
+| `--json` | Emit one JSON array of all Runs in the page (or all pages with `--all`). |
+
+## Examples
+
+```bash
+# Most recent Runs in the active Project
+kova runs list
+
+# Running and paused Runs only
+kova runs list --status RUNNING --status PAUSED
+
+# All Runs created in May
+kova runs list --created-after 2026-05-01 --created-before 2026-05-31 --all
+
+# JSON output piped to jq
+kova runs list --status RUNNING --json | jq '.[] | {id: .id, model: .model}'
+```
+
+## Output
+
+Table by default:
+
+```
+ID                                STATUS    PROJECT          MODEL                          STEPS  CREATED                  COST
+01J8X9Y2Z3K4M5N6P7Q8R9S0T1        RUNNING   proj_review_bot  meta-llama/Llama-3-70B-Instruct   3   2026-05-15T11:42:01Z     $0.0420
+01J8X9Y2Z3K4M5N6P7Q8R9S0T4        COMPLETED proj_review_bot  meta-llama/Llama-3-70B-Instruct   8   2026-05-15T10:18:30Z     $0.1240
+...
+```
+
+`--json` emits a JSON array. With `--all`, every page is concatenated into one array.
+
+## See also
+
+- [`kova runs get`](/docs/cli/runs/get) — fetch one Run by ID
+- [`kova runs tail`](/docs/cli/runs/tail) — live-tail a Run's event timeline
+- [`client.runs.list`](/docs/sdk/control/runs) — the SDK equivalent

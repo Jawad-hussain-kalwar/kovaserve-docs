@@ -1,0 +1,117 @@
+---
+title: Document review (DocRuns)
+description: A reference recipe for a managed document-review agent — contract review, compliance check, clause extraction. End-to-end with durable runs, governance, and cost per completed run.
+---
+
+**DocRuns** is the managed-agent SKU for document-heavy enterprise workflows. This recipe walks through a complete DocRuns agent — ingest a document, extract clauses, check compliance, produce a redline, and ship a structured report. The pattern fits contract review, policy review, regulatory submissions, and any workflow where the output is a marked-up document plus a structured summary.
+
+## The recipe
+
+```python
+from kovaserve import OpenAI, KovaControlClient, kova
+from kovaserve.context import ArtifactClient
+
+inference = OpenAI()
+ks = KovaControlClient()
+artifacts = ArtifactClient(ks)
+
+@kova.budget(cost_cents="20.0000", tokens=500_000)
+@kova.run(project="proj_docruns", model="meta-llama/Llama-3-70B-Instruct")
+def review_contract(document_uri: str) -> dict:
+    @kova.tool(name="ingest_document")
+    def ingest():
+        bytes_ = fetch(document_uri)
+        # Offload the raw document — too big for inline
+        ref = artifacts.upload_content(
+            bytes_,
+            name="contract.pdf",
+            mime_type="application/pdf",
+            artifact_type="retrieved_document",
+            run_id=kova.current_run().id,
+        )
+        return {"artifact_id": ref.id, "text": pdf_to_text(bytes_)}
+
+    @kova.tool(name="extract_clauses")
+    def extract(text):
+        return inference.chat.completions.create(
+            model="meta-llama/Llama-3-70B-Instruct",
+            messages=[{"role": "user", "content": f"Extract clauses from:\n{text}"}],
+            response_format={"type": "json_schema", "json_schema": CLAUSE_SCHEMA},
+        ).choices[0].message.content
+
+    @kova.tool(name="check_compliance")
+    def check(clauses):
+        return inference.chat.completions.create(
+            model="meta-llama/Llama-3-70B-Instruct",
+            messages=[{"role": "user", "content": f"Check compliance for:\n{clauses}"}],
+            response_format={"type": "json_schema", "json_schema": COMPLIANCE_SCHEMA},
+        ).choices[0].message.content
+
+    @kova.tool(name="produce_redline")
+    def redline(text, compliance):
+        return inference.chat.completions.create(
+            model="meta-llama/Llama-3-70B-Instruct",
+            messages=[{"role": "user", "content": f"Produce a redline:\n{text}\nIssues:\n{compliance}"}],
+        ).choices[0].message.content
+
+    # Pipeline
+    doc = ingest()
+    clauses = extract(doc["text"])
+    compliance = check(clauses)
+    redline_text = redline(doc["text"], compliance)
+
+    # Persist the redline as an artifact
+    redline_ref = artifacts.upload_content(
+        redline_text.encode(),
+        name="contract-redline.md",
+        mime_type="text/markdown",
+        artifact_type="tool_output",
+        run_id=kova.current_run().id,
+    )
+
+    return {
+        "clauses": clauses,
+        "compliance": compliance,
+        "redline_artifact_id": redline_ref.id,
+    }
+```
+
+## What the recipe demonstrates
+
+- **Document offloading.** The raw PDF is uploaded as a [ContextArtifact](/docs/sdk/control/context-artifacts) — too large for inline. The downstream model sees the extracted text, not the bytes.
+- **Structured outputs.** Each phase uses `response_format=json_schema` to produce typed clauses and compliance reports the downstream code consumes directly.
+- **Tool-step attribution.** Each phase is a `@kova.tool` step with its own model call nested under it. Cost is attributed per phase in the timeline.
+- **Audit-ready outputs.** The final redline is persisted as an artifact; the run's structured return is queryable post-hoc.
+
+## SKU summary
+
+DocRuns ships with default toolchain access for:
+
+- Document ingestion (PDF, DOCX, HTML, RTF, plain text).
+- OCR for scanned documents.
+- Structured extraction (clause-by-clause, table-by-table).
+- Compliance and policy checking against configurable rule sets.
+- Redline generation with track-changes output.
+- Cross-document reconciliation (compare two contracts).
+
+The toolset is configurable per Project. The exact composition depends on the deployment.
+
+## Common DocRuns workflows
+
+| Workflow | Inputs | Outputs |
+|---|---|---|
+| Contract review | A new contract | Clause inventory, compliance issues, redline. |
+| Compliance audit | A document corpus | Per-document compliance status, aggregated findings. |
+| Policy review | An organizational policy | Issues, suggested rewrites, jurisdictional notes. |
+| Clause extraction | Many documents | Structured clause database. |
+| Redline assistance | Two versions of a document | Diff with annotations on each change. |
+| Document reconciliation | Two versions / two parties' drafts | Consolidated draft with each party's preferences flagged. |
+
+## Where to go next
+
+<Cards>
+  <Card title="CodeRuns" href="/docs/cookbook/coding-agent" description="The coding-agent SKU." />
+  <Card title="OpsRuns" href="/docs/cookbook/ops-automation" description="The IT / ops SKU." />
+  <Card title="Managing artifacts" href="/docs/guides/context/managing-artifacts" description="Document offload patterns." />
+  <Card title="Reading run timelines" href="/docs/guides/observability/reading-run-timelines" description="Audit the full execution." />
+</Cards>

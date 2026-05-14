@@ -1,0 +1,181 @@
+---
+title: OpenAI compatibility
+description: `from kovaserve import OpenAI` is a pure re-export of the official `openai` SDK with KovaServe's base URL and API key defaulted. Migration is two lines; every OpenAI feature works for free.
+---
+
+The KovaServe inference path is the official **`openai`** SDK with two constructor defaults — base URL and API key — pre-filled. There is no fork, no shim, no subclass adding methods. Everything that ships in `openai` (streaming, tool calls, structured outputs, async, file uploads, the beta namespace) works on KovaServe the day you `pip install --upgrade openai`.
+
+```python
+from kovaserve import OpenAI
+
+client = OpenAI()    # KOVASERVE_API_KEY + base_url defaulted from env
+
+response = client.chat.completions.create(
+    model="meta-llama/Llama-3-70B-Instruct",
+    messages=[{"role": "user", "content": "Review PR #42"}],
+)
+print(response.choices[0].message.content)
+```
+
+## The migration contract
+
+Migrating an existing OpenAI integration is two lines:
+
+```python
+# before
+from openai import OpenAI
+client = OpenAI()
+
+# after
+from kovaserve import OpenAI
+client = OpenAI()
+```
+
+A request body without the `kovaserve` extension field is wire-identical to the same call against `api.openai.com` — same JSON shape, same response shape, same status codes, same error envelope. The gateway routes such requests through the stateless path with no execution records created. This is the **anonymous mode** guarantee: you can adopt the SDK without changing application behaviour, then add control-plane features incrementally by attaching metadata.
+
+## What you inherit
+
+The re-export is `class OpenAI(openai.OpenAI)` with constructor defaults — nothing more. The full OpenAI surface flows through transparently:
+
+| Feature | How it works on KovaServe |
+|---|---|
+| Sync and async clients | `from kovaserve import OpenAI, AsyncOpenAI`. Both pre-configured. |
+| Streaming chat completions | `client.chat.completions.create(..., stream=True)` returns the same `Stream[ChatCompletionChunk]` you already know. |
+| Tool calls | `tools=[...]` and `tool_choice=...` pass through. The KovaServe extension can record which tool was called as a Step. |
+| Structured outputs | `response_format={"type": "json_schema", ...}` works identically. |
+| Idempotency | `client.with_options(...).chat.completions.create(..., extra_headers={"Idempotency-Key": "..."})` — the SDK's idempotency layer is untouched. |
+| Automatic retries | OpenAI's built-in retry logic applies. KovaServe's `KOVASERVE_MAX_RETRIES` does not override the OpenAI re-export — set retries via `OpenAI(max_retries=...)` if you want to change it. |
+| Raw responses | `client.chat.completions.with_raw_response.create(...)` returns the `httpx.Response`. |
+| Streaming responses | `client.chat.completions.with_streaming_response.create(...)` for low-level iteration. |
+| Beta namespace | `client.beta.threads.create(...)` etc. flows through. KovaServe does not gate the beta namespace. |
+| File uploads | `client.files.create(...)` reaches KovaServe's file endpoints (or your private deployment's S3-compatible store). |
+
+When OpenAI ships a new feature, you get it on KovaServe by upgrading the `openai` dependency. The KovaServe SDK does not version-pin `openai`; it tracks `openai >= 1.0`.
+
+## How the defaults resolve
+
+The re-export's constructor reads two environment variables and falls back to a documented default:
+
+```python
+KOVASERVE_API_KEY  →  OPENAI_API_KEY  →  raise AuthenticationError at first call
+KOVASERVE_BASE_URL →  "https://api.kovaserve.com/v1"
+```
+
+`KOVASERVE_API_KEY` falls back to `OPENAI_API_KEY` **only on this re-export.** The `KovaControlClient` does not fall back — it requires `KOVASERVE_API_KEY` explicitly. The fallback exists to make the two-line migration genuinely two lines: if your environment already has `OPENAI_API_KEY` set, you do not need to add another variable to point the SDK at KovaServe.
+
+Override either default explicitly:
+
+```python
+client = OpenAI(api_key="ks_live_...", base_url="https://kovaserve.internal/v1")
+```
+
+See [configuration](/docs/sdk/configuration) for the full resolution chain and the staging / private deployment patterns.
+
+## Pure re-export, not subclass
+
+The class is a constructor-defaulting subclass — `class OpenAI(openai.OpenAI)` — but it adds **no methods** of its own. This is deliberate. A heavier shim could expose `client.runs.create(...)` directly on the OpenAI client, but that would pollute the surface every OpenAI user already knows. Two import paths, two distinct shapes:
+
+```python
+from kovaserve import OpenAI          # inference path — exactly the openai shape
+client = OpenAI()
+client.chat.completions.create(...)   # works
+client.runs.create(...)               # AttributeError — not on this client
+
+from kovaserve import KovaControlClient   # control plane — distinct shape
+control = KovaControlClient()
+control.runs.create(...)              # works
+control.chat.completions.create(...)  # AttributeError — not on this client
+```
+
+The two clients can coexist in the same process; they hold independent connection pools and read independent credentials. See [the SDK overview](/docs/sdk) for when to reach for each.
+
+## Opting into the control plane
+
+Add the `kovaserve` extension field through `extra_body` to opt into Runs, Sessions, Budgets, [ContextManifest](/docs/concepts/context/context-manifests) assembly, and the rest of the control plane:
+
+```python
+response = client.chat.completions.create(
+    model="meta-llama/Llama-3-70B-Instruct",
+    messages=[{"role": "user", "content": "Review PR #42"}],
+    extra_body={
+        "kovaserve": {
+            "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+            "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+        }
+    },
+)
+
+print(response.choices[0].message.content)
+```
+
+To read the KovaServe cost headers, use the OpenAI SDK's `with_raw_response` accessor — the standard way to reach response headers from a chat completion. The raw response carries the typed cost headers; `.parse()` returns the same `ChatCompletion` object:
+
+```python
+raw = client.chat.completions.with_raw_response.create(
+    model="meta-llama/Llama-3-70B-Instruct",
+    messages=[{"role": "user", "content": "Review PR #42"}],
+    extra_body={"kovaserve": {"run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1"}},
+)
+cost_cents = raw.headers["X-KS-Cost-Cents"]              # "0.0420"
+cache_savings = raw.headers["X-KS-Cache-Savings-Cents"]  # "0.0260"
+chat = raw.parse()                                        # the ChatCompletion
+```
+
+For streaming, cost arrives in the final SSE chunk before `data: [DONE]` — see [cost and streaming](/docs/sdk/inference/cost-and-streaming).
+
+The `extra_body` kwarg is part of the OpenAI SDK's published API; the re-export does not intercept it. See [extension envelope](/docs/sdk/inference/extension-envelope) for the full typed field reference, and [cost and streaming](/docs/sdk/inference/cost-and-streaming) for the cost headers and final-SSE-chunk semantics.
+
+## Async parallel
+
+The async re-export follows the same pattern:
+
+```python
+import asyncio
+from kovaserve import AsyncOpenAI
+
+async def main() -> None:
+    client = AsyncOpenAI()
+    response = await client.chat.completions.create(
+        model="meta-llama/Llama-3-70B-Instruct",
+        messages=[{"role": "user", "content": "Review PR #42"}],
+    )
+    print(response.choices[0].message.content)
+
+asyncio.run(main())
+```
+
+Sync and async re-exports do not share a connection pool. See [sync vs async](/docs/sdk/sync-vs-async) for picking one.
+
+## Errors
+
+The re-export raises the **`openai`** SDK's own exception classes on `/v1/*` calls — `openai.AuthenticationError`, `openai.RateLimitError`, `openai.APIStatusError`, and the rest. The SDK does **not** rewrap OpenAI exceptions; doing so would break the migration promise. Existing `except openai.RateLimitError:` blocks in your code continue to work.
+
+The `KovaControlClient` raises `kovaserve.KovaError` subclasses on `/v1/ks/*` calls. See [errors](/docs/sdk/errors) for the full hierarchy.
+
+## What is *not* on the re-export
+
+The re-export deliberately keeps the OpenAI surface clean. The following live on `KovaControlClient` instead:
+
+- `runs`, `sessions`, `budgets`, `checkpoints`, `handles`
+- `context.manifests`, `context.segments`, `context.artifacts`, `context.budgets`, `context.compaction`
+- `metering`, `events`, `cluster`, `tenancy`
+- `cache.prewarm`, `cache.salt`
+
+If you find yourself reaching for one of these, switch to `KovaControlClient` for that call and keep `OpenAI` for the inference path. The two clients are designed to coexist.
+
+## Where to go next
+
+<Cards>
+  <Card title="Extension envelope" href="/docs/sdk/inference/extension-envelope" description="`extra_body={'kovaserve': {...}}` field reference." />
+  <Card title="Cost and streaming" href="/docs/sdk/inference/cost-and-streaming" description="Cost headers, final SSE chunk, `accumulate_stream_cost` helper." />
+  <Card title="KovaControlClient" href="/docs/sdk/control" description="The native client for Runs, Sessions, Budgets, and the rest." />
+  <Card title="Decorators" href="/docs/sdk/decorators" description="Open a Run / Session / Budget context around a function body." />
+</Cards>
+
+## See also
+
+- [Configuration](/docs/sdk/configuration) — env var resolution and per-client overrides
+- [Sync vs async](/docs/sdk/sync-vs-async) — `OpenAI` vs `AsyncOpenAI` parallels
+- [Errors](/docs/sdk/errors) — OpenAI exceptions on `/v1/*` vs `KovaError` on `/v1/ks/*`
+- [`POST /v1/chat/completions`](/docs/api/inference/chat-completions) — the underlying endpoint
+- [Extension envelope (API)](/docs/api/inference/extension-envelope) — the wire shape of the `kovaserve` field

@@ -1,0 +1,10 @@
+{
+  "title": "Framework adapters",
+  "pages": [
+    "index",
+    "langgraph",
+    "pydantic-ai",
+    "openai-agents",
+    "temporal"
+  ]
+}

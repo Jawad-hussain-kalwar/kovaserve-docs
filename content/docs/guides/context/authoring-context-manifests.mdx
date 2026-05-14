@@ -1,0 +1,108 @@
+---
+title: Authoring context manifests
+description: Use `ContextBuilder` to shape the request for maximum cache reuse and audit fidelity. The four-tier order is canonical; the builder enforces it.
+---
+
+The fastest way to author a ContextManifest is to skip authoring it directly and use [`ContextBuilder`](/docs/sdk/primitives/context-builder). The builder produces the canonical 4-tier shape the [Cache-Aware Router](/docs/concepts/routing/manifest-aware-routing) expects, refuses dynamic content in early slots, computes deterministic identity, and stamps the multi-tenant `cache_salt` invisibly.
+
+## The standard pattern
+
+```python
+from kovaserve import OpenAI
+from kovaserve.context import ContextBuilder
+
+client = OpenAI()
+
+ctx = ContextBuilder()
+ctx.add_tools(TOOL_DEFINITIONS)                       # tier 0 — tools
+ctx.add_system("You are a code-review agent.")        # tier 1 — system
+ctx.add_project_context(repo_summary, stable=True)    # tier 2 — history prefix
+ctx.add_session_summary(summary_segment)              # tier 3 — summary
+ctx.add_user_message("Review PR #42")                 # dynamic tail
+
+response = client.chat.completions.create(
+    model="meta-llama/Llama-3-70B-Instruct",
+    messages=ctx.messages(),
+    extra_body={"kovaserve": ctx.build()},
+)
+```
+
+The chat completion produces a ContextManifest the [router](/docs/concepts/routing/manifest-aware-routing) consults for warm-prefix placement and the [admission service](/docs/concepts/policy/admission) evaluates against ContextBudget.
+
+## The four-tier order is binding
+
+The router exploits the four-tier prefix structure. Get the order wrong and the cache stops working:
+
+```
+tier 0       tier 1        tier 2              tier 3            dynamic tail
+[ tools ][ system ][ history_prefix ][ summary ][ agent_state + user_message + tool_result ]
+```
+
+The builder enforces the order on output regardless of the order in which you called the `add_*` methods. Two builders that consumed the same inputs in different orders produce the same canonical output and the same `stable_context_id`.
+
+## Refuse dynamic content in early slots
+
+A templated string in tier 0–3 is a cache breaker:
+
+```python
+ctx.add_system(f"You are an agent. Now: {datetime.now()}")
+# ❌ DynamicContentError: tier 1 content contains a dynamic value.
+```
+
+Move dynamic content to the user message or use `allow_dynamic=True` when you have a deliberate reason.
+
+## When to declare a stable context ID
+
+For cache groups across unrelated Runs that don't share segments, declare a label:
+
+```python
+ctx.declare_stable_context_id("repo_review_v3")
+```
+
+The label and segment digests compose:
+
+```
+stable_context_id = sha256((label or "") || segment_1.digest || segment_2.digest || ...)
+```
+
+Same label + same content → same identity (cache hit). Same label + different content → different identity (no pollution). Different labels → different cache groups.
+
+## Pre-call token counts and admission preflight
+
+To know if the assembled shape will be admitted before dispatching, run a preflight:
+
+```python
+from kovaserve.context import ContextBudgetClient
+
+budgets = ContextBudgetClient(client)
+decision = budgets.admit(run_id=run.id, builder=ctx)
+
+if decision.decision == "COMPACT_REQUIRED":
+    # Compact before dispatch instead of letting admission reject the call
+    ...
+```
+
+See [compaction strategies](/docs/guides/context/compaction-strategies) for the reduce-and-retry pattern.
+
+## Offload large content
+
+For large tool outputs, file diffs, or retrieved documents, upload them as [ContextArtifacts](/docs/sdk/control/context-artifacts) and reference them from segments:
+
+```python
+from kovaserve.context import ArtifactClient
+
+artifacts = ArtifactClient(client)
+ref = artifacts.upload_path("./big-tool-output.json", artifact_type="tool_output")
+ctx.add_tool_result(content_preview="Tool returned 1247 records; full payload offloaded.", artifact_ref=ref.id)
+```
+
+The manifest renders only the preview; the artifact body is fetched on demand. See [managing artifacts](/docs/guides/context/managing-artifacts).
+
+## Where to go next
+
+<Cards>
+  <Card title="Managing artifacts" href="/docs/guides/context/managing-artifacts" description="Offloading large content." />
+  <Card title="Compaction strategies" href="/docs/guides/context/compaction-strategies" description="When and how to summarize older turns." />
+  <Card title="ContextBuilder reference" href="/docs/sdk/primitives/context-builder" description="Full primitive surface." />
+  <Card title="Manifest-aware routing" href="/docs/concepts/routing/manifest-aware-routing" description="Why the four-tier order matters." />
+</Cards>

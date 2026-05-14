@@ -1,0 +1,138 @@
+---
+title: Cache
+description: The `client.cache` namespace — pre-fill a warm placement before the first real call (`prewarm`) and override the multi-tenant cache salt (`salt`).
+---
+
+The `client.cache` namespace carries two operations that aren't quite resources but are too important to leave to folk knowledge. `prewarm` pre-fills a node's KV cache against a known ContextManifest so the first real call lands warm. `salt` overrides the per-tenant `cache_salt` the SDK injects on every request, for the narrow cases where the default `sha256(tenant_id)` salt isn't what you want.
+
+```python
+from kovaserve import KovaControlClient
+from kovaserve.context import ContextBuilder
+
+client = KovaControlClient()
+builder = ContextBuilder()
+builder.add_tools([...])
+builder.add_system("You are a code-review agent.")
+builder.add_project_context(repo_summary, stable=True)
+
+# Pre-fill the cache against this manifest shape
+client.cache.prewarm(
+    model="meta-llama/Llama-3-70B-Instruct",
+    manifest=builder.build(),
+    target_node_id=None,        # let the router pick
+)
+```
+
+## Methods
+
+| Method | What it does |
+|---|---|
+| [`prewarm`](#prewarm) | Issue a `max_tokens=0` chat completion against the manifest shape so the cache is hot before the first real call. |
+| [`salt`](#salt) | Override the per-client `cache_salt` value. |
+
+## `prewarm`
+
+```python
+plan = client.cache.prewarm(
+    model="meta-llama/Llama-3-70B-Instruct",     # required — the model whose cache to warm
+    manifest=builder.build(),                     # required — the manifest shape (a ContextBuilder output or a dict)
+    target_node_id=None,                          # optional — pin to a specific node
+    timeout_seconds=30.0,                         # optional — bound the wait
+)
+
+print(plan.node_id)                               # which node was warmed
+print(plan.cached_tokens)                         # how many tokens the cache holds for this manifest
+```
+
+The mechanism: `prewarm` issues a chat completion against the model with the supplied manifest shape and `max_tokens=0`. The model's prefill stage runs end-to-end — populating the KV cache on the selected node — but no output tokens are generated, so the cost is the prefill cost alone. Anthropic ships this as official guidance, OpenAI implicitly supports it via `max_tokens=0`, and vLLM fully supports it. The SDK wraps the technique in one method so you don't have to remember the parameter.
+
+When to reach for prewarm:
+
+- A long-prefix workload where you know the first real call is coming (a chat about to start; an agent's tool definitions about to be exercised). Pre-warming the prefix on the right node turns a cold first call into a warm first call, saving the prefill cost on the user-visible path.
+- A burst-start workload where N parallel calls will all share the same prefix. One prewarm followed by N warm calls beats N cold calls.
+
+When **not** to reach for prewarm:
+
+- Every chat completion. Prewarm is a one-time setup; routine calls warm the cache naturally.
+- Tiny prompts. The cache savings have to exceed the prewarm cost; for short prefixes the math doesn't work.
+
+`target_node_id` is an optional placement hint. By default the router selects the warmest node that satisfies the [PolicyScope](/docs/concepts/policy/policy-scopes). Pin a specific node only when you have an operational reason — for example, you're running a load test and want the next N calls to all go to one node.
+
+`timeout_seconds` bounds the wait. The call returns when the prefill completes or the timeout expires; on timeout the cache is still populated (asynchronously inside the engine), but the SDK returns control to you.
+
+## `salt`
+
+```python
+client.cache.salt("staging-isolation")            # per-client override
+```
+
+`salt` overrides the per-client `cache_salt` value. The SDK's default behaviour is to inject `cache_salt = sha256(tenant_id)` invisibly on every request, providing cross-tenant data isolation and timing-side-channel protection at zero perf cost inside the tenant. Users never see the salt — it's an HTTP detail.
+
+There are two cases where overriding the default is the right call:
+
+| Case | Override |
+|---|---|
+| **Test isolation.** Two integration tests run under the same tenant. Default salting pools their caches. | `client.cache.salt("test-suite-A")` on suite A; a different value on suite B. Each suite's cache becomes invisible to the other. |
+| **Benchmark reproducibility.** Cold-start measurement requires a fresh, empty cache every run. | `client.cache.salt("")` disables salting entirely (no cross-tenant isolation; never use in production). |
+
+Setting the salt to `""` is supported but **strongly discouraged in production** — it disables tenant isolation and re-enables the multi-tenant timing-side-channel risk that the default salt mitigates. The SDK logs a warning at salt-clear time and a second warning on the first request after the clear.
+
+### Narrower-than-tenant scoping is an anti-pattern
+
+The default tenant-wide salt is deliberate. Per-Session or per-Run salting *seems* like tighter isolation but defeats two important capabilities:
+
+- **`client.handles.share`** — sharing a handle across Sessions requires that the underlying cache be reachable from the receiving Session. Per-Session salting makes the underlying cache invisible.
+- **Cross-Session reuse** — the entire point of [StateHandles](/docs/concepts/recovery/state-handles) is to span Sessions. Per-Session salting eliminates the savings.
+
+The official mechanism for intra-tenant cache isolation is the [PolicyScope](/docs/concepts/policy/policy-scopes) `data_boundary` field — set it on the scope, not on the salt. Cache reuse boundaries are a policy concern, not a salting concern.
+
+### Per-request override
+
+For the rare case where one specific request needs a different salt, the SDK accepts a `cache_salt` value on the `kovaserve` extension envelope:
+
+```python
+from kovaserve import OpenAI
+inference = OpenAI()
+
+response = inference.chat.completions.create(
+    model="meta-llama/Llama-3-70B-Instruct",
+    messages=[...],
+    extra_body={"kovaserve": {
+        "run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+        "cache_salt": "experiment-2026-05-15",
+    }},
+)
+```
+
+Per-request salt overrides the per-client salt for that one call. Use this for canary tests or controlled experiments where you want one specific request not to participate in the tenant's shared cache.
+
+## Async parallel
+
+```python
+import asyncio
+from kovaserve import AsyncKovaControlClient
+
+async def main() -> None:
+    client = AsyncKovaControlClient()
+    plan = await client.cache.prewarm(
+        model="meta-llama/Llama-3-70B-Instruct",
+        manifest={"messages": [{"role": "system", "content": "..."}]},
+    )
+
+asyncio.run(main())
+```
+
+## Where to go next
+
+<Cards>
+  <Card title="ContextBuilder" href="/docs/sdk/primitives/context-builder" description="The 4-tier builder whose output you `prewarm` against." />
+  <Card title="Cluster" href="/docs/sdk/control/cluster" description="`cache_lookup` and `routing_plan` for operator-side cache introspection." />
+  <Card title="KV cache" href="/docs/concepts/routing/kv-cache" description="What `prewarm` populates." />
+  <Card title="PolicyScope" href="/docs/concepts/policy/policy-scopes" description="`data_boundary` — the official path for intra-tenant cache isolation." />
+</Cards>
+
+## See also
+
+- [Manifest-aware routing](/docs/concepts/routing/manifest-aware-routing) — what the Router consults
+- [Cached tokens](/docs/concepts/routing/cached-tokens) — how `cached_tokens` flows through usage records
+- [Extension envelope](/docs/sdk/inference/extension-envelope) — per-request `cache_salt`

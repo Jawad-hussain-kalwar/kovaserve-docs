@@ -1,0 +1,143 @@
+---
+title: Pagination
+description: Cursor-based pagination with auto-iterating `for x in client.runs.list(...)` and manual `page.has_next_page()` / `page.get_next_page()` control.
+---
+
+Every list operation in the SDK returns a cursor-paginated iterator. The default — `for run in client.runs.list(...)` — pages lazily until the server reports no more results. Manual page control is available when you need it.
+
+```python
+# Auto-iterating — the common case
+for run in client.runs.list(project_id="proj_review_bot"):
+    print(run.id, run.status)
+```
+
+## Auto-iteration
+
+The auto-iterator pulls the first page on the first request, yields each item, then pulls the next page on demand. There's no buffer that holds the whole result set in memory — the iterator is fully lazy.
+
+```python
+for run in client.runs.list(project_id="proj_review_bot", limit=20):
+    # Yields 20 items, then pulls page 2, yields 20 more, and so on
+    ...
+```
+
+`limit=` controls the **per-page** count, not the total. The iterator continues across pages regardless. To cap total results, break or use `itertools.islice`:
+
+```python
+import itertools
+
+# Just the first 100 across however many pages it takes
+for run in itertools.islice(client.runs.list(project_id="proj_review_bot"), 100):
+    ...
+```
+
+## Manual paging
+
+For cases where you want to control the cursor explicitly:
+
+```python
+page = client.runs.list(project_id="proj_review_bot", limit=50).get_page()
+
+while True:
+    for run in page.data:
+        process(run)
+    if not page.has_next_page():
+        break
+    page = page.get_next_page()
+```
+
+`page.data` is the materialized list for the current page. `page.has_next_page()` / `page.has_previous_page()` test cursor presence. `page.get_next_page()` / `page.get_previous_page()` fetch the adjacent page.
+
+The cursor values themselves are also exposed:
+
+```python
+page = client.runs.list(project_id="proj_review_bot").get_page()
+next_cursor = page.next_cursor          # → opaque string, pass to `after=`
+prev_cursor = page.previous_cursor      # → opaque string, pass to `before=`
+```
+
+You can resume from a cursor explicitly:
+
+```python
+for run in client.runs.list(project_id="proj_review_bot", after=saved_cursor):
+    ...
+```
+
+This is useful for resumable batch jobs — persist the cursor between runs.
+
+## `before` / `after` / `limit`
+
+The three cursor kwargs:
+
+| Kwarg | Meaning |
+|---|---|
+| `after` | Return items after this cursor. Used to page forward. |
+| `before` | Return items before this cursor. Used to page backward. |
+| `limit` | Items per page. Default varies by resource; range 1–100. |
+
+`before` and `after` are mutually exclusive on the same call. Passing both raises `BadRequestError`.
+
+## Sort order
+
+The default sort order varies by resource — most resources sort by `created_at` ascending (oldest first), matching the wire shape. Override with `order="desc"` for newest-first:
+
+```python
+for run in client.runs.list(project_id="proj_review_bot", order="desc", limit=10):
+    print(run.id)
+```
+
+The first 10 are the newest 10 because `order="desc"` and `limit=10` together cap the result at the most recent 10 entries — equivalent to `LIMIT 10 ORDER BY created_at DESC`.
+
+## Server-side filters
+
+Every list call accepts resource-specific filters that compose with pagination:
+
+```python
+runs = client.runs.list(
+    project_id="proj_review_bot",
+    status="RUNNING",                            # filter
+    session_id="ses_a7f3c2b8d4e1f0925a1b6c3d",   # filter
+    created_after="2026-05-01T00:00:00Z",        # filter
+    order="desc",                                 # sort
+    limit=20,                                     # per page
+)
+
+for run in runs:
+    print(run.id)
+```
+
+Filters bind on the server before pagination — the cursor advances through *filtered* results, not raw results. Two queries with different filters produce different cursor sequences; cursors are not transferable between queries.
+
+## Async parallels
+
+The async iterator uses `async for`:
+
+```python
+async for run in async_client.runs.list(project_id="proj_review_bot"):
+    print(run.id)
+```
+
+Manual page control mirrors the sync API:
+
+```python
+page = await async_client.runs.list(project_id="proj_review_bot").get_page()
+while True:
+    for run in page.data:
+        await handle(run)
+    if not page.has_next_page():
+        break
+    page = await page.get_next_page()
+```
+
+## Where to go next
+
+<Cards>
+  <Card title="`expand=` parameter" href="/docs/sdk/expand-parameter" description="Hydrate nested resources in one round trip — works orthogonally to pagination." />
+  <Card title="Errors" href="/docs/sdk/errors" description="`BadRequestError` for invalid cursor combinations." />
+  <Card title="Pagination (API)" href="/docs/api/using-the-api/pagination" description="The wire-side contract." />
+</Cards>
+
+## See also
+
+- [Configuration](/docs/sdk/configuration) — `KOVASERVE_TIMEOUT` applies per page
+- [Sync vs async](/docs/sdk/sync-vs-async) — same pagination, different transport

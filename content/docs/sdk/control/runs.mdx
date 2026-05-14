@@ -1,0 +1,288 @@
+---
+title: Runs
+description: The `client.runs` namespace — create, retrieve, list, update, cancel, branch, and stream Runs through the typed Python client.
+---
+
+The `client.runs` namespace operates on [Runs](/docs/concepts/run-hierarchy/runs), the durable execution objective at the center of the canonical model. Every method on the namespace resolves to one endpoint under [`/v1/ks/runs/*`](/docs/api/runs/create).
+
+```python
+from kovaserve import KovaControlClient
+
+client = KovaControlClient()
+run = client.runs.create(
+    project_id="proj_review_bot",
+    model="meta-llama/Llama-3-70B-Instruct",
+)
+```
+
+## Methods
+
+| Method | Wire | What it does |
+|---|---|---|
+| [`create`](#create) | `POST /v1/ks/runs` | Allocate a new Run in `CREATED`. |
+| [`get`](#get) | `GET /v1/ks/runs/{id}` | Fetch a Run, optionally hydrating nested resources. |
+| [`list`](#list) | `GET /v1/ks/runs` | Cursor-paginated list scoped to a Project. |
+| [`update`](#update) | `PATCH /v1/ks/runs/{id}` | Transition Run state — `pause`, `resume`, `complete`. |
+| [`cancel`](#cancel) | `PATCH /v1/ks/runs/{id}` (status=CANCELED) | Cancel a Run from any non-terminal state. |
+| [`steps`](#steps) | `GET /v1/ks/runs/{id}/steps` | List the Steps inside a Run. |
+| [`timeline`](#timeline) | `GET /v1/ks/runs/{id}/timeline` | Replay the event timeline. |
+| [`branch`](#branch) | `POST /v1/ks/runs/{id}/branch` | Branch into a new Run from a Checkpoint. |
+| [`stream`](#stream) | `GET /v1/ks/runs/{id}/timeline?stream=1` | Stream live events. |
+
+## The Run shape
+
+Every method returns a typed `Run` model from `kovaserve.types`:
+
+```python
+class Run(BaseModel):
+    id: str
+    tenant_id: str
+    project_id: str
+    session_id: str | None
+    policy_scope_id: str
+    budget_id: str | None
+    context_budget_id: str | None
+    branch_from: BranchOrigin | None
+    status: RunStatus
+    model: str | None
+    external_run_id: str | None
+    external_runtime: str | None
+    step_count: int
+    created_at: datetime
+    started_at: datetime | None
+    completed_at: datetime | None
+
+    # Populated only when expand=["steps", ...] is requested
+    steps: list[Step] | None
+```
+
+`RunStatus` is an upper-case string enum matching the [Run state machine](/docs/concepts/run-hierarchy/run-state-machine): `CREATED`, `READY`, `RUNNING`, `WAITING`, `PAUSED`, `CHECKPOINTING`, `RECOVERING`, `RESUMING`, `BRANCHING`, `COMPLETED`, `FAILED`, `CANCELED`.
+
+## `create`
+
+```python
+run = client.runs.create(
+    project_id="proj_review_bot",                       # required
+    model="meta-llama/Llama-3-70B-Instruct",            # optional default model
+    session_id="ses_a7f3c2b8d4e1f0925a1b6c3d",          # optional
+    external_run_id="lg-task-9821",                     # optional opaque correlation
+    external_runtime="langgraph",                       # optional label
+    policy_scope_ref="project:01J8X9Y2Z3K4M5N6P7Q8R9S0T0",  # optional explicit PolicyScope
+)
+print(run.id, run.status)                               # 01J8X9... CREATED
+```
+
+A new Run starts in `CREATED` with no Steps. The Run's [PolicyScope](/docs/concepts/policy/policy-scopes) is resolved from `policy_scope_ref` if supplied, otherwise from the API key's `(tenant, project)` triple. If the Project has a default [Budget](/docs/concepts/policy/budgets) or [ContextBudget](/docs/concepts/policy/context-budgets), they are attached to the Run automatically — the response carries their IDs in `budget_id` and `context_budget_id`.
+
+`external_run_id` is the natural [idempotency key](/docs/sdk/retries-and-idempotency) for runtimes that have their own identifiers. The SDK auto-generates an `Idempotency-Key` per call, but you can supply one explicitly:
+
+```python
+run = client.runs.create(
+    project_id="proj_review_bot",
+    external_run_id="lg-task-9821",
+    idempotency_key="lg-task-9821",
+)
+```
+
+## `get`
+
+```python
+run = client.runs.get("01J8X9Y2Z3K4M5N6P7Q8R9S0T1")
+```
+
+Fetches one Run by ID. Without `expand`, `run.steps` is `None` — the bare Run row is returned.
+
+To hydrate the nested graph in a single request, pass `expand=`:
+
+```python
+run = client.runs.get(
+    "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    expand=["steps.model_calls.context_manifest"],
+)
+
+for step in run.steps:
+    print(step.ordinal, step.step_type, step.status)
+    for call in step.model_calls:
+        print(f"  tokens={call.prompt_tokens + call.completion_tokens}  cost={call.cost_cents}¢")
+        print(f"  manifest={call.context_manifest.stable_context_id}")
+```
+
+Valid expansion paths include `steps`, `steps.model_calls`, `steps.model_calls.context_manifest`, `steps.model_calls.context_manifest.segments`, `session`, `budget`, `context_budget`, `policy_scope`. See [`expand=` parameter](/docs/sdk/expand-parameter) for the complete allow-list.
+
+A non-existent ID raises `NotFoundError`. A cross-tenant ID returns the same error — the SDK never confirms the existence of resources outside the caller's tenant.
+
+## `list`
+
+```python
+for run in client.runs.list(project_id="proj_review_bot"):
+    print(run.id, run.status, run.step_count)
+```
+
+Returns an iterator that pages lazily. The default page size is 50; cap with `limit=`. The iterator stops when the server reports no next cursor.
+
+Filter and order:
+
+```python
+runs = client.runs.list(
+    project_id="proj_review_bot",
+    status="RUNNING",                       # filter by RunStatus
+    session_id="ses_a7f3c2b8d4e1f0925a1b6c3d",   # filter by Session
+    created_after="2026-05-01T00:00:00Z",   # ISO-8601
+    created_before="2026-05-15T00:00:00Z",
+    limit=20,                               # per page; iterator still paginates beyond
+)
+```
+
+For manual page control, see [pagination](/docs/sdk/pagination).
+
+## `update`
+
+```python
+run = client.runs.update("01J8X9Y2Z3K4M5N6P7Q8R9S0T1", status="PAUSED")
+```
+
+Transitions the Run state. The wire endpoint is a single `PATCH` with `status` in the body; the SDK accepts the target status as a string or `RunStatus` value. Valid transitions are enforced by the [Run state machine](/docs/concepts/run-hierarchy/run-state-machine) — an illegal transition raises `ConflictError(error_code="illegal_state_transition")` (or its `IllegalStateTransitionError` feature subclass).
+
+The legal user-driven transitions from a non-terminal state:
+
+| From | To | Method shorthand |
+|---|---|---|
+| `RUNNING` | `PAUSED` | `client.runs.update(id, status="PAUSED")` |
+| `PAUSED` | `RUNNING` | `client.runs.update(id, status="RUNNING")` |
+| `RUNNING` | `COMPLETED` | `client.runs.update(id, status="COMPLETED")` |
+| any non-terminal | `CANCELED` | `client.runs.cancel(id)` (preferred) |
+
+System-driven transitions — `CHECKPOINTING`, `RECOVERING`, `RESUMING`, `BRANCHING`, `FAILED` — are not accepted from this method. Those flow from the [`checkpoints`](/docs/sdk/control/checkpoints) and [`branch`](#branch) operations.
+
+## `cancel`
+
+```python
+run = client.runs.cancel("01J8X9Y2Z3K4M5N6P7Q8R9S0T1")
+assert run.status == "CANCELED"
+```
+
+A convenience wrapper around `update(id, status="CANCELED")`. The Run transitions to `CANCELED` regardless of the current non-terminal state (including `RUNNING`, `PAUSED`, `WAITING`, `CHECKPOINTING`). Cancelling an already-terminal Run is a no-op and returns the existing row unchanged.
+
+Any inflight ModelCalls bound to the Run continue to execute and record metering — KovaServe does not kill mid-flight GPU work. The Run state flip is the durable cancellation signal; the runtime is responsible for terminating worker processes.
+
+## `steps`
+
+```python
+for step in client.runs.steps("01J8X9Y2Z3K4M5N6P7Q8R9S0T1"):
+    print(step.ordinal, step.step_type, step.status, step.parent_step_id)
+```
+
+Returns the [Steps](/docs/concepts/run-hierarchy/steps) for a Run, sorted by `ordinal`. Steps include nested ModelCalls when fetched via `expand=`:
+
+```python
+steps = list(client.runs.steps(
+    "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    expand=["model_calls.context_manifest"],
+))
+```
+
+`parent_step_id` populates for nested Steps (a `TOOL_EXECUTE` under a `TOOL_PLAN`, a `MODEL_CALL` issued inside a `@kova.step` body). Reconstruct the tree client-side by grouping on `parent_step_id`; the flat ordinal-ordered list is the canonical wire shape.
+
+## `timeline`
+
+```python
+timeline = client.runs.timeline("01J8X9Y2Z3K4M5N6P7Q8R9S0T1")
+for event in timeline:
+    print(event.timestamp, event.event_type, event.payload)
+```
+
+Returns the chronological event timeline for a Run. By default the timeline includes the `execution` stream (`ks.run.*`, `ks.step.*`, `ks.model_call.*`). Filter to other streams with `streams=`:
+
+```python
+timeline = client.runs.timeline(
+    "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    streams=["execution", "budget", "context_engineering"],
+)
+```
+
+Valid streams: `execution`, `state` (KV), `routing`, `policy`, `budget`, `checkpoint`, `runtime`, `context_engineering`. See [events](/docs/concepts/events) for what each stream carries.
+
+The timeline returns a finite, ordered list of past events. For live tailing, use [`stream`](#stream).
+
+## `branch`
+
+```python
+new_run = client.runs.branch(
+    "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",                    # parent Run
+    from_checkpoint_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T7",  # restore point
+    project_id="proj_review_bot",
+    task_override="Continue review but focus on test coverage",
+)
+print(new_run.branch_from)
+# {"run_id": "01J8X9Y2...", "checkpoint_id": "01J8X9Y2...", "branch_step_id": "01J8X9Y2..."}
+```
+
+Creates a new Run as a [branch](/docs/concepts/recovery/branches) from a [Checkpoint](/docs/concepts/recovery/checkpoints) on an existing Run. The new Run starts in `CREATED`, inherits bounded copies of the parent Run's Budget and PolicyScope, and is positioned in the branch lineage tree under `branch_from`. The parent Run is unaffected.
+
+`task_override` is an optional free-form string the runtime can use to change the goal of the branched lineage — e.g., re-running the same Run with a different scope or constraint set. It surfaces on `Run.metadata.task_override`.
+
+## `stream`
+
+```python
+with client.runs.stream("01J8X9Y2Z3K4M5N6P7Q8R9S0T1") as stream:
+    for event in stream:
+        print(event.event_type, event.payload)
+```
+
+Live-tail the event timeline. The SDK opens an SSE connection to `GET /v1/ks/runs/{id}/timeline?stream=1` and yields events as they arrive. The iterator terminates when the Run reaches a terminal state.
+
+The stream reconnects transparently on network failures, resuming from the last seen `id:` field via `Last-Event-ID` — see [streaming](/docs/sdk/streaming) for the reconnection contract.
+
+Multi-stream tailing:
+
+```python
+with client.runs.stream(
+    "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    streams=["execution", "budget", "context_engineering"],
+) as stream:
+    for event in stream:
+        if event.event_type == "ks.budget.warning":
+            alert_operator(event.payload)
+```
+
+## Async parallel
+
+Every method is mirrored on `AsyncKovaControlClient.runs`:
+
+```python
+import asyncio
+from kovaserve import AsyncKovaControlClient
+
+async def main() -> None:
+    client = AsyncKovaControlClient()
+    run = await client.runs.create(
+        project_id="proj_review_bot",
+        model="meta-llama/Llama-3-70B-Instruct",
+    )
+    async for step in client.runs.steps(run.id):
+        print(step.ordinal, step.step_type)
+    async with client.runs.stream(run.id) as stream:
+        async for event in stream:
+            ...
+
+asyncio.run(main())
+```
+
+## Where to go next
+
+<Cards>
+  <Card title="Sessions" href="/docs/sdk/control/sessions" description="Continuity containers that host multiple Runs." />
+  <Card title="Budgets" href="/docs/sdk/control/budgets" description="Attach active cost, token, and time limits." />
+  <Card title="Checkpoints" href="/docs/sdk/control/checkpoints" description="Snapshot a Run for restore and branch." />
+  <Card title="Decorators" href="/docs/sdk/decorators" description="`@kova.run` wraps a function body in a Run context." />
+  <Card title="Events" href="/docs/sdk/control/events" description="Tail event streams across many Runs." />
+  <Card title="`expand=` parameter" href="/docs/sdk/expand-parameter" description="Hydrate Steps, ModelCalls, and Manifests in one round trip." />
+</Cards>
+
+## See also
+
+- [Run concept](/docs/concepts/run-hierarchy/runs) — what a Run is
+- [Run state machine](/docs/concepts/run-hierarchy/run-state-machine) — the 12-state lifecycle
+- [Branches](/docs/concepts/recovery/branches) — the `BRANCH` step and `BRANCHING` Run state
+- [API: Runs](/docs/api/runs/create) — the wire surface
+- [Pagination](/docs/sdk/pagination) · [Retries and idempotency](/docs/sdk/retries-and-idempotency) · [Errors](/docs/sdk/errors)

@@ -1,0 +1,128 @@
+---
+title: Tool loops with budget kill
+description: Set a hard budget on a tool loop and let the run hard-stop before it runaways. The pattern every long-running agent should use.
+---
+
+A managed agent that loops over tools can run away. KovaServe's [Budget](/docs/guides/policy/per-run-budgets) gives every run a kill switch: when cost, tokens, steps, time, or tools cross the hard-stop threshold, the next call rejects with `429 budget_exceeded` and the run hard-stops cleanly. This is the recipe.
+
+```python
+from kovaserve import OpenAI, kova
+
+inference = OpenAI()
+
+@kova.budget(
+    cost_cents="5.0000",        # $0.05 hard cost ceiling
+    tokens=100_000,              # 100K token ceiling
+    steps=30,                    # 30-step ceiling
+    time_seconds=600,            # 10-minute wall clock
+    tools=20,                    # 20-tool-call ceiling
+    warning_threshold=0.70,
+    on_exceed="hard_stop",
+)
+@kova.run(project="proj_review_bot", model="meta-llama/Llama-3-70B-Instruct")
+def agent_loop(task: str) -> str:
+    @kova.tool(name="think")
+    def think(state):
+        return inference.chat.completions.create(
+            model="meta-llama/Llama-3-70B-Instruct",
+            messages=[{"role": "user", "content": f"State:\n{state}\nWhat next?"}],
+        ).choices[0].message.content
+
+    @kova.tool(name="act")
+    def act(action):
+        return execute_action(action)
+
+    state = {"task": task}
+    while not is_done(state):
+        plan = think(state)
+        action = parse_action(plan)
+        result = act(action)
+        state = update(state, action, result)
+        # The budget hard-stops here if any dimension exhausts.
+    return state["output"]
+```
+
+## Five ceilings, priority order
+
+The recipe sets all five dimensions deliberately. When multiple cross simultaneously, the priority order is `cost > tokens > steps > time > tools` — the dimension that's most expensive is reported first.
+
+| Dimension | When the ceiling matters |
+|---|---|
+| `cost_cents` | Production-cost hard limit. The most important for billing-sensitive workloads. |
+| `tokens` | When you want to bound the conversational budget separately from cost (different models price tokens differently). |
+| `steps` | The simplest runaway-loop kill switch — caps the loop iteration count. |
+| `time_seconds` | Wall-clock kill switch. Good for runs with parallel tool calls or sleeps. |
+| `tools` | Bounds the number of external actions. Useful when tools cost something other than tokens (HTTP requests, payments). |
+
+You don't have to set all five — the minimum is one. Setting all five gives belt-and-braces protection.
+
+## What hard-stop looks like
+
+When the run hard-stops mid-loop:
+
+```
+ERROR  [429 budget_exceeded] Budget exceeded on cost_cents: 5.0042 / 5.0000
+       request_id=01J8X9Y2Z3K4M5N6P7Q8R9XX01
+       run_id=01J8X9Y2Z3K4M5N6P7Q8R9S0T1
+```
+
+The exception propagates to the caller as `BudgetExceededError`. The run state transitions to `FAILED` with `details.exception_type = "BudgetExceededError"`. The budget transitions to `HARD_STOP`. No further model calls dispatch.
+
+Catch in application code if you want a different outcome:
+
+```python
+from kovaserve.errors import BudgetExceededError
+
+try:
+    result = agent_loop(task)
+except BudgetExceededError as e:
+    # Graceful fallback — return partial state, alert operator
+    return {"partial": True, "run_id": e.details["run_id"]}
+```
+
+## React via hooks
+
+```python
+class LoopAlerts(RunHooks):
+    def on_budget_warning(self, decision):
+        # 70% — early-warning notification
+        slack.send(f"Loop warning at {decision.budget_remaining_pct:.0%}")
+
+    def on_admission_rejected(self, rejection):
+        # Hard stop fired
+        slack.send(f"Loop hard-stopped on {rejection.run_id}")
+
+@kova.budget(cost_cents="5.0000", hooks=LoopAlerts())
+@kova.run(...)
+def agent_loop(...): ...
+```
+
+## Graceful degradation instead of hard-stop
+
+For loops where partial output beats no output, use `on_exceed="degrade"`:
+
+```python
+@kova.budget(cost_cents="5.0000", on_exceed="degrade")
+@kova.run(...)
+def agent_loop(...):
+    ...
+```
+
+When the budget hits 100%, subsequent model calls apply degradation (reduced `max_tokens`, dropped optional segments, model downgrade) instead of rejecting. The loop continues; the output may differ.
+
+## Per-call vs per-run vs per-loop budgets
+
+| Pattern | When |
+|---|---|
+| **Per-call budget** | Single chat completion that should never exceed a fixed cost. Use `extra_body["kovaserve"]["budget_context"]`. |
+| **Per-run budget** | One end-to-end agent task with a known ceiling. Use `@kova.budget`. The recipe in this page. |
+| **Per-loop budget** | Bounded loop that should not exceed a ceiling even if the run as a whole runs longer. Nest a smaller budget inside a larger one — split the function into smaller `@kova.run`-decorated bodies, each with its own `@kova.budget`. |
+
+## Where to go next
+
+<Cards>
+  <Card title="Per-run budgets" href="/docs/guides/policy/per-run-budgets" description="Full Budget guide." />
+  <Card title="Coding agent" href="/docs/cookbook/coding-agent" description="A real CodeRuns recipe with budgets." />
+  <Card title="Hooks" href="/docs/sdk/hooks" description="React to budget events." />
+  <Card title="Branching from a checkpoint" href="/docs/cookbook/branching-from-checkpoint" description="Recover from a hard-stop by branching at the warning." />
+</Cards>

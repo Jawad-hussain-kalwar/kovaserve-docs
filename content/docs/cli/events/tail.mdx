@@ -1,0 +1,80 @@
+---
+title: "`kova events tail`"
+description: Live-tail events across one or more streams. `Last-Event-ID` reconnection; filter by stream, event type, Run, or Project.
+---
+
+Live-tail one or more of the eight [event streams](/docs/concepts/events). Unlike [`kova runs tail`](/docs/cli/runs/tail), which scopes to a single Run, `kova events tail` runs at the Project / Tenant level and can mix streams.
+
+## Synopsis
+
+```bash
+kova events tail [OPTIONS]
+```
+
+## Options
+
+| Option | Meaning |
+|---|---|
+| `--streams <stream>` | One or more streams. Accept-multiple. Valid: `execution`, `state`, `routing`, `policy`, `budget`, `checkpoint`, `runtime`, `context_engineering`. |
+| `--event-types <type>` | Filter to specific event types. Supports wildcards: `--event-types "ks.budget.*"`. |
+| `--run-id <id>` | Filter to events on one Run. |
+| `--session-id <id>` | Filter to events on one Session. |
+| `--project-id <id>` | Default scope when no other filter is set. |
+| `--from-beginning` | Start from the first recorded event matching the filter, not from now. |
+| `--no-follow` | Print existing events and exit. |
+| `--json` | Emit one JSON object per line (JSON Lines). |
+
+## Examples
+
+```bash
+# Default — live execution events in the active Project
+kova events tail
+
+# Budget warnings only — across all Runs
+kova events tail --streams budget --event-types "ks.budget.warning"
+
+# Multi-stream, multi-filter
+kova events tail \
+    --streams execution \
+    --streams context_engineering \
+    --event-types "ks.model_call.completed" \
+    --event-types "ks.context.compaction.completed"
+
+# JSON Lines for downstream tooling
+kova events tail --streams budget --json | jq -r '.event_type'
+
+# Replay last 24h of policy events
+kova events tail --streams policy --from-beginning --no-follow \
+    | awk -v cutoff="$(date -u -d "-1 day" -Iseconds)" '$1 > cutoff'
+```
+
+## Output
+
+```
+2026-05-15T11:42:01.124Z  ks.budget.warning           run=01J8X9... budget=01J... remaining=42%
+2026-05-15T11:43:18.840Z  ks.model_call.completed     run=01J8X9... cached=820/1303 cost=$0.0510
+2026-05-15T11:44:02.122Z  ks.context.compaction.completed run=01J8X9... saved=1500 tokens
+2026-05-15T11:45:18.040Z  ks.checkpoint.created       run=01J8X9... trigger=periodic
+```
+
+`--json` emits one JSON object per line — the full event envelope.
+
+## Reconnection
+
+`kova events tail` follows the WHATWG SSE reconnection contract, reconnecting transparently on transient failures via `Last-Event-ID`. After 10 consecutive failed reconnects, the command exits with `KovaStreamReconnectError`. See [streaming](/docs/sdk/streaming) for the full contract.
+
+## Useful filters
+
+| Goal | Filter |
+|---|---|
+| Live operator dashboard | `--streams execution --streams budget --streams checkpoint` |
+| Budget alerts | `--streams budget --event-types "ks.budget.warning" --event-types "ks.budget.hard_stop"` |
+| Compaction analytics | `--streams context_engineering --event-types "ks.context.compaction.*"` |
+| KV cache lifecycle | `--streams state` |
+| Routing audit | `--streams routing` |
+
+## See also
+
+- [`kova runs tail`](/docs/cli/runs/tail) — single-Run tail
+- [`client.events.tail`](/docs/sdk/control/events) — the SDK equivalent
+- [Event taxonomy](/docs/concepts/events) — every event type

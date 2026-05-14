@@ -1,0 +1,182 @@
+---
+title: Private deployment recipe
+description: Launch managed agents end-to-end inside your perimeter — from cluster install to first completed agent run on private infrastructure. The neocloud and sovereign-platform pattern.
+---
+
+This recipe walks from zero-infrastructure to one completed managed agent run on a private KovaServe deployment. The target audience is **neoclouds packaging managed-agent SKUs** (CodeRuns / OpsRuns / DocRuns) on GPU capacity, and **regulated enterprises** deploying internally with strict data-residency requirements.
+
+## Step 1 — Provision the cluster
+
+A bare-metal or cloud Kubernetes cluster with GPU nodes:
+
+```bash
+# Provision a k3s cluster (or use EKS / GKE / OpenShift)
+curl -sfL https://get.k3s.io | sh -
+
+# Install the NVIDIA device plugin
+kubectl apply -f https://raw.githubusercontent.com/NVIDIA/k8s-device-plugin/main/deployments/static/nvidia-device-plugin.yml
+```
+
+## Step 2 — Install KovaServe via Helm
+
+```bash
+helm repo add kovaserve https://charts.kovaserve.com
+
+cat > values.yaml <<'EOF'
+gateway:
+  hostname: kovaserve.your-org.internal
+  tls:
+    secretName: kovaserve-tls
+
+objectStorage:
+  endpoint: https://s3.your-org.internal
+  bucket: ks-context-artifacts
+
+inference:
+  nodes:
+    - name: node-1
+      model: meta-llama/Llama-3-70B-Instruct
+      gpu: A100-80GB
+      tensor_parallel: 2
+    - name: node-2
+      model: qwen3-coder-30b
+      gpu: A100-80GB
+EOF
+
+helm install kovaserve kovaserve/kovaserve \
+    --namespace kovaserve \
+    --create-namespace \
+    --values ./values.yaml
+```
+
+See [self-hosting on Kubernetes](/docs/guides/deployment/self-hosting-kubernetes) for the complete chart reference.
+
+## Step 3 — Bootstrap a tenant and key
+
+Bootstrap a fresh deployment by setting `KOVASERVE_BOOTSTRAP_KEY` in the Helm values. The gateway provisions an initial Tenant and an admin-scope key on first startup using the value you supply:
+
+```yaml
+# values.yaml — add the bootstrap key
+bootstrap:
+  enabled: true
+  apiKey: ks_live_AKIA...        # generate a fresh value; this becomes the admin key
+  tenantName: "Acme Co"
+  projectName: "CodeRuns"
+  environmentName: "prod"
+```
+
+After re-applying the chart, use that key as your admin credential:
+
+```bash
+export KOVASERVE_API_KEY=ks_live_AKIA...
+export KOVASERVE_BASE_URL=https://kovaserve.your-org.internal/v1
+
+kova auth status
+# Active profile: default
+# Tenant:         01J8X9Y2Z3K4M5N6P7Q8R9S0T2  (Acme Co)
+# Project:        proj_coderuns                (CodeRuns)
+# Environment:    env_prod                     (prod)
+# Role:           admin
+```
+
+The bootstrap key is the only admin-scope key issued automatically. Use it to provision narrower keys for application traffic ([`kova keys create`](/docs/cli/keys/create)) — production application code should never use the admin key.
+
+## Step 4 — Run an agent against the private deployment
+
+From a developer workstation or CI runner inside the perimeter:
+
+```bash
+pip install kovaserve
+
+export KOVASERVE_API_KEY=ks_live_AKIA...
+export KOVASERVE_BASE_URL=https://kovaserve.your-org.internal/v1
+```
+
+Then:
+
+```python
+from kovaserve import OpenAI, kova
+
+inference = OpenAI()
+
+@kova.budget(cost_cents="500.0000")    # 500 cents = $5
+@kova.run(project="proj_coderuns", model="meta-llama/Llama-3-70B-Instruct")
+def hello_private(prompt: str) -> str:
+    response = inference.chat.completions.create(
+        model="meta-llama/Llama-3-70B-Instruct",
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return response.choices[0].message.content
+
+print(hello_private("Confirm we're running on the private cluster."))
+```
+
+The function executes against the private cluster. Every byte of the request and response stays inside your perimeter. Verify via the CLI:
+
+```bash
+kova runs list --status COMPLETED --limit 1
+```
+
+## Step 5 — Configure data-residency for regulated workloads
+
+For sovereign deployments where artifacts must stay in a specific region:
+
+```yaml
+objectStorage:
+  buckets:
+    default: ks-context-artifacts
+    eu_only: ks-context-artifacts-eu
+    canada_only: ks-context-artifacts-ca
+
+defaults:
+  policy_scope:
+    data_boundary: eu_only
+```
+
+Every artifact upload now routes to the EU bucket. PolicyScopes on individual Projects can override this default for projects that need a different region. See [sovereign deployment](/docs/guides/deployment/sovereign-deployment).
+
+## Step 6 — Provision keys for end-customers
+
+For neocloud and platform deployments, each end-customer gets their own Bearer Key bound to their Project:
+
+```bash
+kova keys create \
+    --project-id proj_customer_acme \
+    --name "customer-acme-app" \
+    --role inference \
+    --rate-limit-rpm 600 \
+    --rate-limit-tpm 100000
+```
+
+The customer's application sets `KOVASERVE_API_KEY` to their key and hits the same private gateway URL. KovaServe enforces tenancy isolation — Customer A's data is invisible to Customer B's keys.
+
+## What the deployment ships with
+
+Out of the box, every private KovaServe deployment has:
+
+- **The full SDK surface** — every adapter, every primitive, every decorator.
+- **The full CLI** — `kova` works identically against managed cloud and private.
+- **All eight event streams** — execution / state / routing / policy / budget / checkpoint / runtime / context-engineering.
+- **Audit-ready usage records** — every model call recorded with pricing snapshots for compliance.
+- **Grafana dashboards** — pre-built panels for run rate, cost per completed run, cache hit ratio, queue depth, p50 / p99 latency.
+- **Helm-managed upgrade path** — `helm upgrade` for new versions; migrations apply automatically.
+
+## When to package managed-agent SKUs
+
+For neocloud and platform deployments wanting to package CodeRuns / OpsRuns / DocRuns:
+
+1. Provision one Project per SKU (`proj_coderuns`, `proj_opsruns`, `proj_docruns`).
+2. Configure each Project's default Budget, ContextBudget, and PolicyScope.
+3. Pre-load the reference tools each SKU uses (Git for CodeRuns, log search for OpsRuns, PDF ingestion for DocRuns).
+4. Issue a Bearer Key per end-customer, bound to the appropriate Project.
+
+The customer's experience is identical to managed cloud — they get the SDK, the CLI, the dashboards. The cluster, the data, and the operations live in your perimeter.
+
+## Where to go next
+
+<Cards>
+  <Card title="Self-hosting on Kubernetes" href="/docs/guides/deployment/self-hosting-kubernetes" description="Full chart reference." />
+  <Card title="Sovereign deployment" href="/docs/guides/deployment/sovereign-deployment" description="Data-residency and offline licensing." />
+  <Card title="Provisioning keys" href="/docs/guides/tenancy/provisioning-keys" description="Issue keys for end-customers." />
+  <Card title="CodeRuns" href="/docs/cookbook/coding-agent" description="The reference agent for a CodeRuns SKU." />
+</Cards>

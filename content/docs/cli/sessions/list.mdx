@@ -1,0 +1,52 @@
+---
+title: "`kova sessions list`"
+description: List Sessions filtered by state, last-accessed time, or Project. Cursor-paginated; `--json` emits the page as one JSON array.
+---
+
+List [Sessions](/docs/concepts/continuity/sessions) in the active Project.
+
+## Synopsis
+
+```bash
+kova sessions list [OPTIONS]
+```
+
+## Options
+
+| Option | Meaning |
+|---|---|
+| `--project-id <id>` | Defaults to the active profile's Project. |
+| `--state <state>` | Filter by `SessionState`. Accept-multiple: `--state OPEN --state IDLE`. |
+| `--last-accessed-after <iso8601>` | Filter to Sessions accessed on or after this timestamp. |
+| `--created-after <iso8601>` / `--created-before <iso8601>` | Time window on creation. |
+| `--limit <n>` | Per-page count. Default 50, max 100. |
+| `--order <asc\|desc>` | Sort by `last_accessed_at`. Default `desc`. |
+| `--all` | Fetch every page. |
+| `--json` | Emit a JSON array. |
+
+## Examples
+
+```bash
+# Active Sessions in the active Project
+kova sessions list --state OPEN
+
+# Idle Sessions older than a week — candidates for archive
+kova sessions list --state IDLE --last-accessed-after $(date -u -d "-7 days" +%Y-%m-%dT%H:%M:%SZ)
+
+# JSON for scripting
+kova sessions list --json | jq '.[] | {id: .id, turns: .turn_count}'
+```
+
+## Output
+
+```
+ID                                STATE      MODEL                          TURNS  LAST ACCESSED          CURRENT RUN
+ses_a7f3c2b8d4e1f0925a1b6c3d      OPEN       meta-llama/Llama-3-70B-Instruct   12   2026-05-15T11:42:01Z   01J8X9Y2Z3K4M5N6P7Q8R9S0T1
+ses_b1c4d2a8e3f7104985b2c5d4      IDLE       meta-llama/Llama-3-70B-Instruct    3   2026-05-14T08:18:22Z   —
+```
+
+## See also
+
+- [`kova sessions get`](/docs/cli/sessions/get) — fetch one Session
+- [`kova sessions archive`](/docs/cli/sessions/archive) — archive an inactive Session
+- [`client.sessions.list`](/docs/sdk/control/sessions) — the SDK equivalent

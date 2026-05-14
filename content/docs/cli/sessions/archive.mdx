@@ -1,0 +1,50 @@
+---
+title: "`kova sessions archive`"
+description: Archive a Session — transitions state to `ARCHIVED`. The Session row is preserved for audit; it cannot host new Runs after archival.
+---
+
+Archive a [Session](/docs/concepts/continuity/sessions) — transitions state to `ARCHIVED`. The Session row remains queryable for audit and replay; it stops accepting new Runs. Existing bound Runs in non-terminal states continue executing.
+
+## Synopsis
+
+```bash
+kova sessions archive <SESSION_ID> [OPTIONS]
+```
+
+## Options
+
+| Option | Meaning |
+|---|---|
+| `--json` | Emit the updated Session as one JSON document. |
+
+## Examples
+
+```bash
+kova sessions archive ses_a7f3c2b8d4e1f0925a1b6c3d
+
+kova sessions archive ses_a7f3c2b8d4e1f0925a1b6c3d --json | jq '.state'   # → "ARCHIVED"
+```
+
+## Output
+
+```
+Session ses_a7f3c2b8d4e1f0925a1b6c3d
+State:     OPEN → ARCHIVED
+Project:   proj_review_bot
+Turns:     12
+```
+
+## `ARCHIVED` vs `EXPIRED`
+
+| State | Trigger | Meaning |
+|---|---|---|
+| `ARCHIVED` | Explicit — `kova sessions archive` or `client.sessions.archive`. | Deliberate retirement. The runtime is done with the Session before TTL. |
+| `EXPIRED` | Automatic — TTL elapsed. | The Session's `expires_at` passed without intervention. |
+
+Both are terminal. Both preserve the Session row for audit. The distinction is preserved so operators can see which Sessions ended by intent versus by TTL sweep — `kova sessions list --state ARCHIVED` and `kova sessions list --state EXPIRED` answer different questions.
+
+## See also
+
+- [`kova sessions list`](/docs/cli/sessions/list) — find Sessions to archive
+- [`client.sessions.archive`](/docs/sdk/control/sessions) — the SDK equivalent
+- [Session state machine](/docs/concepts/continuity/session-state-machine)

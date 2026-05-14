@@ -1,0 +1,152 @@
+---
+title: Type model
+description: Pydantic v2 response models, `TypedDict` request shapes, `py.typed` marker. Hand-mirrored from the canonical wire schemas, CI-guarded for drift.
+---
+
+The SDK's typed surface is **Pydantic v2 responses + `TypedDict` requests**. Responses are full Pydantic models with `.model_dump()`, `.model_validate_json()`, and forward-compat `model_extra` on every class. Requests are `TypedDict`s with `total=False` and `NotRequired[T]` so you get autocomplete without mandatory model construction.
+
+```python
+from kovaserve import KovaControlClient
+from kovaserve.types import Run, RunStatus
+
+client = KovaControlClient()
+
+# Request — a TypedDict, all fields optional
+run: Run = client.runs.create(
+    project_id="proj_review_bot",                     # required
+    model="meta-llama/Llama-3-70B-Instruct",          # optional
+)
+
+# Response — a Pydantic model
+assert isinstance(run, Run)
+assert run.status == RunStatus.CREATED
+
+# Standard Pydantic methods
+data = run.model_dump()
+serialized = run.model_dump_json()
+restored = Run.model_validate_json(serialized)
+```
+
+## Responses — Pydantic v2
+
+Every response is a Pydantic v2 `BaseModel`. The full Pydantic surface is available:
+
+- `model_dump(mode="json"|"python")` — convert to dict.
+- `model_dump_json()` — convert to JSON bytes.
+- `model_validate(...)` / `model_validate_json(...)` — parse.
+- `model_copy(...)` — produce a modified copy.
+- `model_extra` — forward-compat dict of fields the server returned that the SDK doesn't know about yet.
+
+`model_extra` is the key forward-compat mechanism. When the server starts returning a new field, your old SDK reads it from `response.model_extra["new_field"]` without crashing. Upgrading the SDK promotes the field to a typed attribute.
+
+## Requests — `TypedDict`
+
+Most request bodies are `TypedDict`s with every field as `NotRequired[T]`:
+
+```python
+from typing import NotRequired, TypedDict
+
+class RunCreateParams(TypedDict, total=False):
+    project_id: str                          # required (no NotRequired)
+    model: NotRequired[str]
+    session_id: NotRequired[str]
+    external_run_id: NotRequired[str]
+    external_runtime: NotRequired[str]
+    policy_scope_ref: NotRequired[str]
+```
+
+The `TypedDict` shape gives you autocomplete and `mypy` validation without forcing you to construct a Pydantic model. Pass arguments as kwargs and the SDK validates server-side:
+
+```python
+run = client.runs.create(project_id="proj_review_bot", model="meta-llama/Llama-3-70B-Instruct")
+```
+
+Pydantic-model alternatives exist when you want client-side validation, but the kwarg-and-typed-dict path is the canonical one.
+
+## Why two shapes
+
+Responses are full Pydantic because:
+
+- You read fields off them in many places.
+- Forward-compat via `model_extra` matters for SDK upgrade paths.
+- Validation catches server-side bugs early.
+
+Requests are `TypedDict` because:
+
+- Constructing a full model for every call is friction.
+- Optional fields are common; `NotRequired` keeps them ergonomic.
+- The server validates the request anyway — client-side validation is redundant.
+
+Convergent across OpenAI, Anthropic, and Pydantic AI in 2026.
+
+## `py.typed`
+
+The wheel ships `py.typed` (PEP 561) so static type checkers pick up the SDK's annotations without a separate `.pyi` stub file. Inline annotations stay in sync with the implementation better than stubs.
+
+```bash
+mypy --strict your_module.py    # picks up kovaserve types automatically
+```
+
+## Forward-compat in practice
+
+When the server starts returning a new field — say, `run.priority` — your old SDK sees:
+
+```python
+run = client.runs.get("01J...")
+print(run.priority)                # AttributeError: 'Run' has no field 'priority'
+print(run.model_extra["priority"]) # → "high"
+```
+
+Upgrade the SDK: `run.priority` becomes a typed attribute on the Pydantic model.
+
+Going the other way — your new SDK against an older server that doesn't return a field — Pydantic produces the default value (typically `None`) for the missing field. The server's omission doesn't crash the model.
+
+## Enum values
+
+Status enums and other constrained fields are exposed as Python `StrEnum` subclasses:
+
+```python
+from kovaserve.types import RunStatus, BudgetState, CheckpointStatus
+
+assert RunStatus.CREATED == "CREATED"
+assert run.status == RunStatus.RUNNING
+```
+
+`StrEnum` means comparison to strings works (`run.status == "RUNNING"`) but typed code gets autocomplete and `mypy` coverage.
+
+## Decimal precision
+
+Cost fields are decimal strings with four fractional digits — `"5.0000"`, not `5.0`. The SDK validates the precision on construction:
+
+```python
+from decimal import Decimal
+
+budget = client.budgets.create(run_id=run.id, cost_limit_cents="500.0000")     # ✅ 500 cents = $5
+budget = client.budgets.create(run_id=run.id, cost_limit_cents=Decimal("500"))  # ✅ normalized to "500.0000"
+budget = client.budgets.create(run_id=run.id, cost_limit_cents=5.00)            # ❌ ValueError: float loses precision
+```
+
+Passing a `float` raises `ValueError` at construction time to prevent precision loss. The gross / net / cache-savings identity holds exactly because all three are decimal strings with the same precision.
+
+## CI-guarded drift
+
+The SDK's `kovaserve.types` package is **hand-mirrored** from the canonical wire schemas. CI tests verify the mirror against the server-side schemas on every PR — new server enum values must appear in the mirror, new fields must have compatible annotations, and the mirror cannot have extra fields the server doesn't know about. Drift fails the build.
+
+The mirror is hand-kept rather than codegen'd because:
+
+- Vendor SDK generators are forbidden ([sovereign and self-sustainable](/docs/sdk) constraint).
+- Hand-mirroring lets us pick the most ergonomic Python representation independent of the wire shape.
+- The SDK's surface is small enough that drift is visible on inspection.
+
+## Where to go next
+
+<Cards>
+  <Card title="Errors" href="/docs/sdk/errors" description="`BadRequestError` raised on type-validation failures." />
+  <Card title="`expand=` parameter" href="/docs/sdk/expand-parameter" description="How nested types appear on Pydantic models." />
+  <Card title="Escape hatches" href="/docs/sdk/escape-hatches" description="`with_raw_response` for cases where the typed model isn't enough." />
+</Cards>
+
+## See also
+
+- [Pydantic v2 docs](https://docs.pydantic.dev/latest/) — the underlying library
+- [Configuration](/docs/sdk/configuration) — `KOVASERVE_PREVIEWS` for preview-tier typed fields

@@ -1,0 +1,150 @@
+---
+title: LangGraph adapter
+description: Three components — `KovaCheckpointer`, `KovaStore`, and `KovaMiddleware` — that plug into LangGraph's native interfaces. KovaServe stores graph state as ContextArtifacts; LangGraph stays the source of graph semantics.
+---
+
+The **LangGraph adapter** integrates KovaServe under an existing LangGraph application by plugging into three of LangGraph's native extension interfaces: `BaseCheckpointSaver`, `BaseStore`, and the LangChain 1.0 `AgentMiddleware`. Install with `pip install "kovaserve[langgraph]"`.
+
+```python
+from kovaserve import KovaControlClient
+from kovaserve.adapters.langgraph import KovaCheckpointer, KovaStore, KovaMiddleware
+from langgraph.graph import StateGraph
+
+ks = KovaControlClient()
+graph = StateGraph(MyState)
+graph.set_middleware([KovaMiddleware(client=ks, project_id="proj_review_bot")])
+graph.add_node("review", review_node)
+
+app = graph.compile(
+    checkpointer=KovaCheckpointer(ks),
+    store=KovaStore(ks),
+)
+```
+
+## The three components
+
+| Component | What it implements | What it does |
+|---|---|---|
+| `KovaMiddleware(AgentMiddleware)` | LangChain 1.0 middleware protocol | Opens a Run on `before_agent`; builds a ContextManifest on `before_model`; runs admission; records cost on `after_model`; closes the Run on `after_agent`. |
+| `KovaCheckpointer(BaseCheckpointSaver)` | LangGraph's checkpointer protocol | Stores LangGraph state-channel snapshots as KovaServe `ContextArtifact`s with `artifact_type="langgraph_state"`. Wraps a real LangGraph Checkpoint in a KovaServe Checkpoint envelope. |
+| `KovaStore(BaseStore)` | LangGraph's long-term memory protocol | Backs the long-term memory interface with `client.context.artifacts` for bytes and `client.context.segments` for typed metadata. |
+
+The three are **independent** — install only what you need. Most production setups use all three; smaller setups use just `KovaMiddleware` to attach run-level governance without changing LangGraph's persistence.
+
+## `KovaMiddleware`
+
+```python
+from kovaserve.adapters.langgraph import KovaMiddleware
+
+middleware = KovaMiddleware(
+    client=ks_client,
+    project_id="proj_review_bot",                  # required
+    default_budget={"cost_limit_cents": "500.0000", "token_limit": 100_000},
+    default_context_budget={"active_token_limit": 8000},
+    hooks=MyRunHooks(),                            # optional
+    map_thread_to_session=True,                    # default — thread_id → session_id
+)
+
+graph.set_middleware([middleware])
+```
+
+Lifecycle:
+
+| LangChain hook | KovaServe action |
+|---|---|
+| `before_agent(state, thread_id)` | Opens a Run; if the thread is new, opens a Session and binds the Run to it. Sets the ContextVar. |
+| `before_model(state)` | Assembles a ContextManifest from the current state; runs ContextBudget admission; attaches the manifest ID for the upcoming model call. |
+| `after_model(state, response)` | Records the ModelCall with cost / tokens / cache_savings from response headers. Transitions the Step. |
+| `after_agent(state, output)` | Transitions the Run to COMPLETED (or FAILED on exception). Clears the ContextVar. |
+
+The middleware reads the LangGraph thread ID via `state.thread_id` (the canonical place LangGraph exposes it in 1.0). `map_thread_to_session=True` (the default) maps LangGraph threads to KovaServe Sessions — a new thread opens a new Session; an existing thread rebinds to its prior Session. Set to `False` for one-Run-per-call patterns.
+
+## `KovaCheckpointer`
+
+```python
+from kovaserve.adapters.langgraph import KovaCheckpointer
+
+checkpointer = KovaCheckpointer(client=ks_client)
+app = graph.compile(checkpointer=checkpointer)
+```
+
+`KovaCheckpointer` implements LangGraph's `BaseCheckpointSaver` interface — `put`, `put_writes`, `get_tuple`, `list`. On every `put`:
+
+1. The LangGraph state-channel snapshot is serialised to bytes.
+2. The bytes are uploaded as a KovaServe `ContextArtifact` with `artifact_type="langgraph_state"`.
+3. A KovaServe `Checkpoint` is created (or updated) referencing the artifact and the active Run.
+4. The LangGraph `Checkpoint` ID is returned to LangGraph unchanged.
+
+The crucial property: **LangGraph's persistence remains the source of graph state.** The adapter references the LangGraph snapshot as a ContextArtifact for durability and audit, but does not replace LangGraph's own state representation. LangGraph reads back its snapshot through `KovaCheckpointer.get_tuple(...)` exactly as it would from `MemorySaver` or `SqliteSaver` — same `Checkpoint` and `CheckpointTuple` shapes.
+
+This is by design. Replacing LangGraph's state representation would require KovaServe to understand graph semantics; KovaServe is the *execution control plane*, not the graph engine. The adapter wraps; it does not absorb.
+
+## `KovaStore`
+
+```python
+from kovaserve.adapters.langgraph import KovaStore
+
+store = KovaStore(client=ks_client)
+app = graph.compile(store=store)
+```
+
+`KovaStore` implements LangGraph's `BaseStore` interface for long-term memory. Namespace tuples like `("user_123", "preferences")` map to scope-tagged ContextSegments; values map to ContextArtifacts when large, inline when small. The store supports semantic search (when enabled), TTLs, and namespace queries — all backed by KovaServe object storage.
+
+Most agents that use LangGraph's long-term memory ship `KovaStore` alongside `KovaCheckpointer` for full state durability through one infrastructure layer.
+
+## Mixing with decorators
+
+`@kova.run` inside a node body sees the Run that `KovaMiddleware` opened and binds to it rather than creating a new one:
+
+```python
+@kova.run(project="proj_review_bot", model="meta-llama/Llama-3-70B-Instruct")
+def review_node(state):
+    # KovaMiddleware already opened a Run. @kova.run binds to the active Run.
+    @kova.tool(name="fetch_pr")
+    def fetch():
+        return github.get_pr(state.pr_url)
+
+    pr = fetch()
+    # ...
+```
+
+`@kova.step` and `@kova.checkpoint` work normally inside nodes — they look up the active Run via the ContextVar and operate against it.
+
+## Configuration
+
+| Kwarg | Default | Meaning |
+|---|---|---|
+| `client` | required | The `KovaControlClient` to use. |
+| `project_id` | required | The Project all Runs belong to. |
+| `default_budget` | `None` | Inline Budget config applied on Run creation. |
+| `default_context_budget` | `None` | Inline ContextBudget config applied on Run creation. |
+| `hooks` | `None` | A `RunHooks` instance. Composes with client-level and per-call hooks. |
+| `map_thread_to_session` | `True` | Map LangGraph threads to KovaServe Sessions. |
+| `step_type_for_node` | `"MODEL_CALL"` | The default step_type for nodes that issue a model call. Override per-node via a `KovaMiddleware.step_type(...)` decorator. |
+
+## Async parallel
+
+LangGraph 1.0 is async-first. The adapter exports `AsyncKovaCheckpointer`, `AsyncKovaStore`, and `AsyncKovaMiddleware` for use with async LangGraph applications:
+
+```python
+from kovaserve import AsyncKovaControlClient
+from kovaserve.adapters.langgraph import AsyncKovaCheckpointer, AsyncKovaMiddleware
+
+ks = AsyncKovaControlClient()
+graph.set_middleware([AsyncKovaMiddleware(client=ks, project_id="proj_review_bot")])
+app = graph.compile(checkpointer=AsyncKovaCheckpointer(ks))
+```
+
+## Where to go next
+
+<Cards>
+  <Card title="Adapters overview" href="/docs/sdk/adapters" description="Which adapter to pick." />
+  <Card title="Decorators composition" href="/docs/sdk/decorators/composition" description="How `@kova.run` binds to adapter-opened Runs." />
+  <Card title="Hooks" href="/docs/sdk/hooks" description="`KovaMiddleware` is a `RunHooks` subclass internally." />
+  <Card title="Checkpoints" href="/docs/sdk/control/checkpoints" description="What `KovaCheckpointer` wraps the LangGraph snapshot into." />
+</Cards>
+
+## See also
+
+- [BYO runtime mode](/docs/concepts/deployment/byo-runtime) — the broader pattern LangGraph adapts to
+- [Context artifacts](/docs/sdk/control/context-artifacts) — the storage `KovaCheckpointer` and `KovaStore` use

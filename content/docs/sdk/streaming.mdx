@@ -1,0 +1,118 @@
+---
+title: Streaming
+description: Two streaming modes — the naive iterator and the accumulating context manager — plus `Last-Event-ID` reconnection and multi-mode emission for tail-shaped endpoints.
+---
+
+The SDK exposes streaming responses through two patterns, both built on `httpx`'s SSE iterator. Inference responses arrive token-by-token; the event tail iterator yields events as they happen; both follow the WHATWG SSE reconnection contract transparently.
+
+## The two modes
+
+### Naive iterator
+
+```python
+stream = client.chat.completions.create(
+    model="meta-llama/Llama-3-70B-Instruct",
+    messages=[...],
+    stream=True,
+    extra_body={"kovaserve": {"run_id": run.id}},
+)
+for chunk in stream:
+    delta = chunk.choices[0].delta.content if chunk.choices else None
+    if delta:
+        print(delta, end="", flush=True)
+```
+
+The simplest path — iterate, consume, done. The stream terminates on `data: [DONE]`. Use this when you don't need a final cost or you'll read it from the underlying response object.
+
+### Accumulating context manager
+
+```python
+from kovaserve import accumulate_stream_cost
+
+with accumulate_stream_cost(stream) as acc:
+    for chunk in acc.chunks():
+        ...
+    final = acc.final()        # → StreamCost(cost_cents, cache_savings_cents, cost_status, ...)
+```
+
+Buffers the final usage chunk so `acc.final()` returns it whether you stopped early or read every chunk. Closes the stream cleanly on exit, even on exception. See [cost and streaming](/docs/sdk/inference/cost-and-streaming) for the full helper surface.
+
+## Reconnection
+
+Every stream the SDK opens follows the WHATWG SSE reconnection rules:
+
+| Behaviour | Detail |
+|---|---|
+| Track `id:` field | The SDK remembers the last seen event ID. |
+| Reconnect on failure | Network failure, idle timeout, or 5xx triggers a reconnect with `Last-Event-ID: <last seen id>` so the server resumes from that point. |
+| Honour `retry:` field | If the server emits a `retry: <ms>` value, the SDK uses it. Otherwise jittered exponential backoff capped at 60 s. |
+| Bounded retries | After 10 consecutive failed reconnects, the iterator raises `KovaStreamReconnectError`. |
+
+This means routine network blips are invisible to your code. Wrap a stream in your own retry loop only when you want application-level reconnection on top of the SDK's transport-level handling.
+
+## Multi-mode emission
+
+Some streams support multiple emission modes. `client.events.tail` and `client.runs.stream` accept `stream_mode=` for callers that want different views over the same underlying stream:
+
+```python
+with client.events.tail(
+    streams=["execution"],
+    stream_mode=["values", "updates", "events"],
+) as stream:
+    for kind, event in stream:
+        if kind == "events":
+            handle_event(event)
+        elif kind == "updates":
+            handle_delta(event)
+        elif kind == "values":
+            handle_full_state(event)
+```
+
+| Mode | Yields |
+|---|---|
+| `values` | Full materialized state on each event (default for UI consumers). |
+| `updates` | Just the delta from the previous event (efficient for high-frequency consumers). |
+| `events` | The full event envelope as in `list` (default; matches the typed iterator shape). |
+
+When `stream_mode` is omitted, the iterator yields events in the `events` shape — a flat sequence matching `list`. When supplied, the iterator yields `(kind, value)` tuples so the caller can route by mode.
+
+## Sync and async parallels
+
+Both modes work on `KovaControlClient` and `AsyncKovaControlClient`:
+
+```python
+# Sync
+with client.events.tail(streams=["budget"]) as stream:
+    for event in stream:
+        ...
+
+# Async
+async with client.events.tail(streams=["budget"]) as stream:
+    async for event in stream:
+        ...
+```
+
+The sync transport uses `httpx.Client`; the async transport uses `httpx.AsyncClient`. No `nest_asyncio` glue — picking one transport is a real choice. See [sync vs async](/docs/sdk/sync-vs-async).
+
+## What is streamable
+
+| Surface | Sync | Async |
+|---|---|---|
+| `client.chat.completions.create(stream=True)` (re-export) | `openai.Stream` | `openai.AsyncStream` |
+| `client.runs.stream(id)` | `Stream[ExecutionEvent]` | `AsyncStream[ExecutionEvent]` |
+| `client.events.tail(...)` | `Stream[ExecutionEvent]` or tuples with `stream_mode` | async equivalent |
+
+`client.metering.export` is also streaming but yields raw JSONL lines, not SSE events — use it as a normal iterator (`with ... as stream: for line in stream:`).
+
+## Where to go next
+
+<Cards>
+  <Card title="Cost and streaming" href="/docs/sdk/inference/cost-and-streaming" description="The final SSE chunk that carries cost on streaming chat completions." />
+  <Card title="Events" href="/docs/sdk/control/events" description="The primary multi-mode-tail consumer." />
+  <Card title="Run timeline" href="/docs/sdk/control/runs" description="`client.runs.stream(id)` for live-tailing one Run." />
+  <Card title="Sync vs async" href="/docs/sdk/sync-vs-async" description="Picking the transport." />
+</Cards>
+
+## See also
+
+- [Errors](/docs/sdk/errors) — `KovaStreamReconnectError` and stream-error subclasses

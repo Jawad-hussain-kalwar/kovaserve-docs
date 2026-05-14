@@ -1,0 +1,97 @@
+---
+title: Changelog
+description: Dated API and SDK changes. Additive changes (MINOR) and breaking changes (MAJOR) clearly distinguished. Every breaking change passes through at least one deprecation cycle.
+---
+
+Every release is dated. Entries are grouped by type:
+
+- **Added** — new functionality. Always a MINOR or MAJOR bump; never a PATCH.
+- **Changed** — modifications to existing behaviour. MINOR when additive (new fields, new optional kwargs); MAJOR when breaking.
+- **Deprecated** — flagged for removal in a future MAJOR. The minor that adds the deprecation is included for context.
+- **Removed** — fully retired. Preceded by at least one minor with `DeprecationWarning`.
+- **Fixed** — bug fixes. PATCH releases unless a fix changes documented behaviour.
+
+For the conceptual contract — how SemVer maps to the Python API, why deprecation cycles work the way they do — see [SDK lifecycle](/docs/sdk/lifecycle).
+
+---
+
+## 2026-05-15 — 1.2.0
+
+### Added
+
+- `client.cache.prewarm(...)` — pre-fill warm cache against a manifest before the first real call.
+- `client.cache.salt(value)` — per-client `cache_salt` override.
+- Preview tier: `previews=[...]` per-request opt-in; `client.previews.*` typed namespace.
+- `RunHooks.compose(...)` — combine multiple hooks instances explicitly.
+- `kova` CLI: `cluster cache-lookup`, `nodes list`, `sessions archive`.
+
+### Changed
+
+- `ContextBuilder.declare_stable_context_id(label)` now composes with segment digests rather than replacing them. Two callers with the same label and different content now produce different identities (no cache pollution).
+- Pagination iterators now expose `page.get_page()` for manual cursor control alongside the auto-iterating default.
+
+### Deprecated
+
+- `client.beta.*` namespace (introduced in 1.1) → use the per-request `previews=[...]` shape. Removal in 2.0.
+
+### Fixed
+
+- Streaming reconnect loop no longer races on rapid disconnect-reconnect cycles.
+- `KovaCheckpointer` now serializes LangGraph state-channel snapshots deterministically; two restores of the same checkpoint produce byte-identical state.
+
+---
+
+## 2026-04-30 — 1.1.0
+
+### Added
+
+- LangGraph adapter: `KovaCheckpointer`, `KovaStore`, `KovaMiddleware`.
+- Pydantic AI adapter: `KovaDeps`, `kova_agent` factory.
+- OpenAI Agents SDK adapter: `KovaSession`, `KovaRunHooks`, `KovaTracingExporter`.
+- Temporal adapter: `@kova_activity`, `KovaInterceptor`.
+- `kova` CLI: `events tail`, `context manifests/segments/artifacts/budgets`.
+- ContextBudget admission preflight via `client.context.budgets.admit(...)`.
+- CompactionClient: `reduce_and_retry` helper.
+
+### Changed
+
+- `client.runs.steps(id)` now returns `parent_step_id` populated on nested steps; runtimes get hierarchical step trees.
+- ContextBudget decisions are typed as `ContextBudgetDecision` (six values), distinct from `RunBudgetDecision` (four values). The two are not interchangeable.
+
+### Fixed
+
+- `Run.metadata` is now a `dict[str, Any]` — was previously a `dict[str, str]` and lost typed values on round-trip.
+
+---
+
+## 2026-04-15 — 1.0.0
+
+### Added
+
+- Initial GA release.
+- `KovaControlClient` / `AsyncKovaControlClient` with namespaces: `runs`, `sessions`, `budgets`, `checkpoints`, `handles`, `context.*`, `metering`, `events`, `cluster`, `tenancy`.
+- OpenAI re-export: `from kovaserve import OpenAI, AsyncOpenAI`.
+- Decorators: `@kova.run`, `@kova.session`, `@kova.budget`, `@kova.step`, `@kova.checkpoint`.
+- Step type aliases: `@kova.tool`, `@kova.observe`, `@kova.think`, `@kova.compact`.
+- `RunHooks` reactivity surface.
+- ContextBuilder, ArtifactClient, ContextBudgetClient, CompactionClient.
+- `expand=` parameter for graph hydration.
+- `accumulate_stream_cost` helper.
+- `kova` CLI with full resource-namespace surface.
+- Pydantic v2 response models, `TypedDict` request shapes, `py.typed` marker.
+- Stable wire format with bare 26-character Crockford ULIDs (Session IDs are the documented exception, `ses_<24hex>`).
+- Cost decimal-string precision (4 fractional digits) with exact `gross - savings = net` identity.
+
+---
+
+## What "added" means versus "preview"
+
+When a new feature appears under "Added", it's part of the **stable** typed surface. Preview features are listed under a separate **"Preview tier"** sub-heading in the release where they're introduced, and migrate to "Added" when they graduate. Abandoned previews appear under "Removed" with a deprecation cycle. See [previews](/docs/sdk/previews) for the lifecycle contract.
+
+## Where to go next
+
+<Cards>
+  <Card title="SDK lifecycle" href="/docs/sdk/lifecycle" description="SemVer policy and deprecation rules." />
+  <Card title="Previews" href="/docs/sdk/previews" description="Per-request preview opt-in." />
+  <Card title="Status" href="/docs/status" description="Operational status — uptime and incidents." />
+</Cards>

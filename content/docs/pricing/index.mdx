@@ -1,0 +1,131 @@
+---
+title: Pricing
+description: KovaServe charges per completed managed agent run, not per token. Pricing examples for CodeRuns, OpsRuns, and DocRuns workloads. Cache savings reduce gross cost; private deployments use customer-controlled pricing.
+---
+
+KovaServe's unit of value is a **completed agent run** — not a token, not a request. The pricing reflects this: managed-cloud rates are scoped to the work the agent does, and **cache savings reduce gross cost directly** thanks to the `gross - savings = net` identity baked into every usage record.
+
+## How managed cloud bills
+
+Managed cloud bills on three dimensions:
+
+| Dimension | Unit | What it covers |
+|---|---|---|
+| **Tokens** | Per million prompt + completion tokens. | Raw inference cost. Different models have different per-token rates. |
+| **Cache savings discount** | Applied automatically against cached tokens. | The discount the cache provides; visible on every usage record. |
+
+The total cost per Run is `tokens × per-token-rate − cache_savings`, summed across every ModelCall in the Run. The CLI surfaces it directly:
+
+```bash
+kova usage query --scope run --id 01J... --json | jq '.total_cost_cents'
+```
+
+## Indicative rates by model
+
+Indicative managed-cloud rates per million tokens — exact prices live on `kovaserve.com/pricing` and update with model changes:
+
+| Model | Input ($/M tokens) | Output ($/M tokens) | Cache discount |
+|---|---|---|---|
+| `meta-llama/Llama-3-70B-Instruct` | $0.60 | $0.90 | 50% on cached input |
+| `meta-llama/Llama-3-8B-Instruct` | $0.10 | $0.20 | 50% on cached input |
+| `qwen3-coder-30b` | $0.30 | $0.50 | 50% on cached input |
+| `anthropic/claude-3-5-sonnet` | $3.00 | $15.00 | 90% on cached input (Anthropic) |
+| `openai/gpt-4o` | $2.50 | $10.00 | 50% on cached input (OpenAI) |
+
+## Worked examples
+
+### CodeRuns — a bug-fix run
+
+- 3 model calls on `qwen3-coder-30b`.
+- Prompt tokens total: 12 000 (with 8 000 cached from prior steps).
+- Completion tokens total: 1 800.
+- Cache discount: 50% on the 8 000 cached input tokens.
+
+```
+gross  = (12 000 × $0.30 / 1M) + (1 800 × $0.50 / 1M)
+       = $0.0036 + $0.0009
+       = $0.0045
+
+savings = 8 000 × $0.30 / 1M × 0.50
+        = $0.0012
+
+net     = gross - savings
+        = $0.0033  (per completed run)
+```
+
+A 1000-runs-per-day CodeRuns workflow → ~$3.30 / day at typical cache reuse.
+
+### DocRuns — a contract review
+
+- 4 model calls on `anthropic/claude-3-5-sonnet`.
+- Prompt tokens total: 45 000 (with 35 000 cached for the same contract template).
+- Completion tokens total: 4 200.
+- Cache discount: 90% on the 35 000 cached input tokens (Anthropic).
+
+```
+gross   = (45 000 × $3.00 / 1M) + (4 200 × $15.00 / 1M)
+        = $0.1350 + $0.0630
+        = $0.1980
+
+savings = 35 000 × $3.00 / 1M × 0.90
+        = $0.0945
+
+net     = $0.1035  (per completed run)
+```
+
+The cache savings make a Claude-3.5-Sonnet review fit a sub-$0.15-per-run budget after the first call warms the cache.
+
+### OpsRuns — an incident investigation
+
+- 6 model calls on `meta-llama/Llama-3-70B-Instruct`.
+- Prompt tokens total: 28 000 (with 18 000 cached from earlier turns in the Session).
+- Completion tokens total: 2 800.
+- Cache discount: 50%.
+
+```
+gross   = (28 000 × $0.60 / 1M) + (2 800 × $0.90 / 1M)
+        = $0.0168 + $0.00252
+        = $0.01932
+
+savings = 18 000 × $0.60 / 1M × 0.50
+        = $0.0054
+
+net     = $0.01392  (per completed run)
+```
+
+## Cost per completed run is the unit of measure
+
+The "cost per completed run" framing is how KovaServe reports economics — not a separate billing dimension on top of token rates. The total cost of a Run is the sum of its ModelCall costs (net of cache savings); the metric reflects the business outcome of the work the agent did. Runs that fail or get cancelled still incur token costs for the model calls that dispatched; the metric makes both successful and failed runs visible side-by-side, with the cache savings reducing both.
+
+## Private deployments
+
+Private and sovereign deployments use **customer-controlled pricing** — the `model_pricing` table in the customer's PostgreSQL contains the per-token rates. KovaServe's commercial software license is separate from the inference rates; the deployment doesn't impose token costs.
+
+For a neocloud packaging managed-agent SKUs to end-customers, the typical pattern is:
+
+1. Configure the model pricing for the rates the neocloud charges customers.
+2. KovaServe records `cost_cents` against those rates.
+3. The neocloud bills end-customers based on the recorded usage.
+4. KovaServe's separate commercial fee covers the licensing.
+
+## Cost identity guarantees
+
+Every usage record carries the **pricing snapshot columns** so historical costs remain stable across price changes:
+
+```
+input_price_snapshot   = the per-1K input price at call time
+output_price_snapshot  = the per-1K output price at call time
+discount_snapshot      = the cache discount fraction at call time
+```
+
+The identity `gross - savings = net` holds **exactly** because all three values are decimal strings with four fractional digits — no floating-point drift. Replay an old `usage_records` row from JSONL and the numbers match the original to the last digit.
+
+See [cost model](/docs/concepts/cost/cost-model) and [pricing snapshots](/docs/concepts/cost/pricing-snapshots) for the full audit semantics.
+
+## Where to go next
+
+<Cards>
+  <Card title="Cost per completed run" href="/docs/concepts/cost/cost-per-completed-run" description="Why this metric replaces tokens." />
+  <Card title="Per-run budgets" href="/docs/guides/policy/per-run-budgets" description="Cap cost before the run runs." />
+  <Card title="Metering query" href="/docs/cli/usage/query" description="Inspect your usage and cost." />
+</Cards>

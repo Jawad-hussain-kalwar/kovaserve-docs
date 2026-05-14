@@ -1,0 +1,208 @@
+---
+title: Cost and streaming
+description: Cost headers on non-streaming responses; the final SSE chunk that carries cost on streaming responses; the `accumulate_stream_cost` helper for the common "I want the final cost" case.
+---
+
+KovaServe surfaces the cost of every ModelCall through two channels: **HTTP response headers** on non-streaming responses and the **final SSE chunk** on streaming responses. The two channels are not interchangeable — headers must be sent before the response body begins, and a streaming response does not know its final cost until generation completes.
+
+## Non-streaming: cost headers
+
+A non-streaming call carrying a `kovaserve` extension returns three cost headers on every response:
+
+```text
+X-KS-Cost-Cents:           0.0420
+X-KS-Cache-Savings-Cents:  0.0180
+X-KS-Cost-Status:          ok
+```
+
+| Header | Meaning |
+|---|---|
+| `X-KS-Cost-Cents` | The net cost of the call in cents, after cache discount. Decimal string with four fractional digits. |
+| `X-KS-Cache-Savings-Cents` | Gross cost minus net cost — what cache reuse saved. Decimal string with four fractional digits. The identity `gross = net + savings` holds exactly. |
+| `X-KS-Cost-Status` | One of `ok`, `warn`, `degraded`. `warn` indicates the call crossed a Budget warning threshold; `degraded` indicates the call ran under [Budget](/docs/concepts/policy/budgets) `DEGRADED_ALLOWED` mode. |
+
+Read them off the underlying `httpx.Response`:
+
+```python
+from kovaserve import OpenAI
+
+client = OpenAI()
+response = client.chat.completions.with_raw_response.create(
+    model="meta-llama/Llama-3-70B-Instruct",
+    messages=[{"role": "user", "content": "Review PR #42"}],
+    extra_body={"kovaserve": {"run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1"}},
+)
+print(response.headers["X-KS-Cost-Cents"])
+print(response.headers["X-KS-Cache-Savings-Cents"])
+parsed = response.parse()        # → ChatCompletion
+print(parsed.choices[0].message.content)
+```
+
+The cost headers are present on every non-streaming response carrying the `kovaserve` extension. Anonymous calls (no extension) do not get them — cost is not attributed when no Run exists.
+
+## Streaming: the final SSE chunk
+
+HTTP requires response headers to be sent before the body. A streaming response begins emitting tokens immediately, and the final cost is not known until generation completes — so headers cannot carry it. KovaServe extends the OpenAI streaming protocol with the cost on the **final usage chunk** instead.
+
+The OpenAI streaming protocol already supports a usage chunk via `stream_options={"include_usage": True}`. KovaServe extends that chunk with three additional fields on the `usage` object:
+
+```text
+data: {"id":"chatcmpl-...","object":"chat.completion.chunk","choices":[],
+       "usage":{
+         "prompt_tokens": 1247,
+         "completion_tokens": 312,
+         "total_tokens": 1559,
+         "prompt_tokens_details": {"cached_tokens": 940},
+         "cost_cents": "0.0420",
+         "cache_savings_cents": "0.0180",
+         "cost_status": "ok"
+       }}
+
+data: [DONE]
+```
+
+| Field | Meaning |
+|---|---|
+| `cost_cents` | Net cost of the streamed call, decimal string with four fractional digits. |
+| `cache_savings_cents` | Gross cost minus net cost. Decimal string with four fractional digits. |
+| `cost_status` | One of `ok`, `warn`, `degraded`. Same semantics as the header. |
+
+The `prompt_tokens_details.cached_tokens` field is the canonical cross-vendor accounting field — KovaServe populates it from real vLLM cache-hit data, not estimates.
+
+## The `accumulate_stream_cost` helper
+
+The common pattern is "stream the tokens to a user, then capture the final cost." The SDK ships a context manager that handles the bookkeeping:
+
+```python
+from kovaserve import OpenAI, accumulate_stream_cost
+
+client = OpenAI()
+stream = client.chat.completions.create(
+    model="meta-llama/Llama-3-70B-Instruct",
+    messages=[{"role": "user", "content": "Review PR #42"}],
+    stream=True,
+    stream_options={"include_usage": True},
+    extra_body={"kovaserve": {"run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1"}},
+)
+
+with accumulate_stream_cost(stream) as acc:
+    for chunk in acc.chunks():
+        delta = chunk.choices[0].delta.content if chunk.choices else None
+        if delta:
+            print(delta, end="", flush=True)
+    final = acc.final()        # → StreamCost
+
+print()
+print(f"cost: {final.cost_cents}¢  saved: {final.cache_savings_cents}¢  status: {final.cost_status}")
+```
+
+The helper:
+
+- Sets `stream_options={"include_usage": True}` if you forgot to.
+- Buffers the final usage chunk so `acc.final()` returns it whether you stopped iterating early or read every chunk.
+- Returns a typed `StreamCost(cost_cents, cache_savings_cents, cost_status, prompt_tokens, completion_tokens, cached_tokens)`.
+- Closes the underlying stream on exit, even on exception.
+- Raises `KovaStreamIncompleteError` if the stream ends without a usage chunk (e.g. the connection dropped).
+
+## Async parallel
+
+The async version follows the same shape:
+
+```python
+import asyncio
+from kovaserve import AsyncOpenAI, accumulate_stream_cost
+
+async def main() -> None:
+    client = AsyncOpenAI()
+    stream = await client.chat.completions.create(
+        model="meta-llama/Llama-3-70B-Instruct",
+        messages=[{"role": "user", "content": "Review PR #42"}],
+        stream=True,
+        stream_options={"include_usage": True},
+        extra_body={"kovaserve": {"run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1"}},
+    )
+
+    async with accumulate_stream_cost(stream) as acc:
+        async for chunk in acc.chunks():
+            delta = chunk.choices[0].delta.content if chunk.choices else None
+            if delta:
+                print(delta, end="", flush=True)
+        final = await acc.final()
+
+    print()
+    print(f"cost: {final.cost_cents}¢  saved: {final.cache_savings_cents}¢")
+
+asyncio.run(main())
+```
+
+`accumulate_stream_cost` is import-overloaded — the same name dispatches to a sync or async implementation based on the stream's transport.
+
+## Reading the cost without the helper
+
+If you prefer to consume the raw OpenAI stream and pull cost yourself, capture the final chunk whose `usage` object is non-null:
+
+```python
+stream = client.chat.completions.create(
+    model="meta-llama/Llama-3-70B-Instruct",
+    messages=[{"role": "user", "content": "Review PR #42"}],
+    stream=True,
+    stream_options={"include_usage": True},
+    extra_body={"kovaserve": {"run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1"}},
+)
+
+cost_cents = None
+for chunk in stream:
+    if chunk.usage is not None:
+        cost_cents = chunk.usage.cost_cents
+        cache_savings_cents = chunk.usage.cache_savings_cents
+        cost_status = chunk.usage.cost_status
+    # ... handle choices[0].delta.content
+```
+
+The `usage` field is `None` on every chunk except the final one. The final usage chunk arrives **after** the last token chunk and **before** the `data: [DONE]` terminator.
+
+## Cost dimensions
+
+The cost values surfaced through both channels reflect the real ModelCall economics. They are computed against the active model's pricing table at call time and snapshotted into the `usage_records` row, so historical replays return the same value even after a price change.
+
+| Dimension | Source |
+|---|---|
+| `prompt_tokens` | Real vLLM input token count — not an estimate from message strings. |
+| `completion_tokens` | Real vLLM output token count. |
+| `prompt_tokens_details.cached_tokens` | Real KV cache hit count from vLLM, joined to the [ContextManifest](/docs/concepts/context/context-manifests) for attribution. |
+| `cost_cents` | `(prompt_tokens - cached_tokens) * input_price + completion_tokens * output_price`, in cents. |
+| `cache_savings_cents` | `cached_tokens * input_price`, in cents. |
+
+See [cost model](/docs/concepts/cost/cost-model) for the gross / net / cache-savings identity and [pricing snapshots](/docs/concepts/cost/pricing-snapshots) for the audit semantics.
+
+## Cost status interpretation
+
+`X-KS-Cost-Status` and the streaming `cost_status` field share these three values:
+
+| Status | Meaning | What you should do |
+|---|---|---|
+| `ok` | The call ran under all Budget and ContextBudget thresholds. | Nothing — proceed normally. |
+| `warn` | The call crossed the Budget warning threshold. The call succeeded. | Surface a UI warning to the operator; consider pre-emptive cleanup or compaction. |
+| `degraded` | The Run is in [Budget](/docs/concepts/policy/budgets) `DEGRADED_ALLOWED` state. The call applied an active degradation (smaller `max_tokens`, dropped optional segments, model downgrade). | The output may differ from the un-degraded path; surface that to your caller. |
+
+`HARD_STOP` does not appear here — a hard-stopped request is rejected with `429 budget_exceeded` before the body is generated, so there is no cost status to return.
+
+## Anonymous calls
+
+A request **without** the `kovaserve` extension does not get cost headers, does not get a usage extension, and does not produce a [usage record](/docs/concepts/cost/cost-model). Anonymous mode preserves the wire shape of the OpenAI API verbatim — anything beyond the OpenAI spec only appears when you opt into the control plane.
+
+## Where to go next
+
+<Cards>
+  <Card title="Streaming" href="/docs/sdk/streaming" description="The sync / async iterator and context-manager protocols in detail." />
+  <Card title="Extension envelope" href="/docs/sdk/inference/extension-envelope" description="What `extra_body['kovaserve']` accepts." />
+  <Card title="Cost model" href="/docs/concepts/cost/cost-model" description="Gross / net / cache savings, the canonical identity." />
+  <Card title="Budgets" href="/docs/concepts/policy/budgets" description="What `warn` and `degraded` mean upstream." />
+</Cards>
+
+## See also
+
+- [Cost headers (API)](/docs/api/using-the-api/cost-headers) — the wire surface
+- [Streaming (API)](/docs/api/using-the-api/streaming) — the final-chunk protocol on the wire
+- [`POST /v1/chat/completions`](/docs/api/inference/chat-completions)
+- [Metering: usage](/docs/api/metering/usage) — pulling historical cost data

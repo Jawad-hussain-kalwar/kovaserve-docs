@@ -1,0 +1,110 @@
+---
+title: Policy scopes
+description: PolicyScope is the normalized governance binding across Tenant / Project / Environment / deployment. It carries `context_share_scope`, `data_boundary`, and tool policy references.
+---
+
+A [PolicyScope](/docs/concepts/policy/policy-scopes) is the governance binding every Run is evaluated against. One PolicyScope per Run, resolved from the request's identity at admission time. PolicyScope is what determines:
+
+- **`context_share_scope`** — which cache entries this Run can see (tenant / project / private).
+- **`data_boundary`** — which storage bucket artifacts route to (regional residency).
+- **`tool_policy_ref`** — which tool policy applies, if any.
+
+## How PolicyScope resolves
+
+Every chat completion's `kovaserve` extension carries (or implies) a PolicyScope:
+
+| Field on extension | Resolution |
+|---|---|
+| `policy_scope_ref` set explicitly | Use that scope. |
+| Not set | Resolve a default scope from the API key's `(tenant, project, environment)` triple. |
+
+The resolved scope is bound to the Run on creation. Subsequent calls inherit it; explicit overrides require operator privileges.
+
+## Create a PolicyScope
+
+```python
+scope = client.policy.scopes.create(
+    project_id="proj_review_bot",
+    environment_id="env_prod",
+    context_share_scope="project",       # tenant | project | private
+    data_boundary="eu_only",              # default | eu_only | us_only | custom
+    tool_policy_ref="tools_review_v3",
+)
+```
+
+Reference it from a Run:
+
+```python
+run = client.runs.create(
+    project_id="proj_review_bot",
+    model="...",
+    policy_scope_ref=scope.id,
+)
+```
+
+Or inline on a chat completion:
+
+```python
+response = inference.chat.completions.create(
+    model="...",
+    messages=[...],
+    extra_body={"kovaserve": {"policy_scope_ref": scope.id}},
+)
+```
+
+## `context_share_scope` — cache isolation
+
+The router consults `context_share_scope` to decide which cache entries are visible to this Run:
+
+| Value | Effect |
+|---|---|
+| `tenant` | Cache entries from any Project in the Tenant are visible. Wide reuse, less isolation. |
+| `project` | Cache entries from this Project only. The default for most workloads. |
+| `private` | Cache entries from this Run / Session only. Maximum isolation, no cross-call reuse. |
+
+Tighter scopes reduce cache hit rate; wider scopes increase it. For multi-customer SaaS deployments, `project` is the common choice — one Project per customer, isolated cache pools.
+
+## `data_boundary` — regional residency
+
+The `data_boundary` field controls which storage bucket [ContextArtifacts](/docs/sdk/control/context-artifacts) route to:
+
+| `data_boundary` | Bucket |
+|---|---|
+| unset / `default` | `ks-context-artifacts` |
+| `eu_only` | `ks-context-artifacts-eu` |
+| `us_only` | `ks-context-artifacts-us` |
+| custom | `ks-context-artifacts-<suffix>` |
+
+For deployments with multi-region buckets configured, setting `data_boundary` on the PolicyScope is how every artifact upload in that scope routes to the right region.
+
+## Hierarchy
+
+PolicyScopes are scoped to the Tenant → Project → Environment hierarchy. A scope at a higher level (e.g., Tenant) applies to every Run unless an explicit narrower scope overrides it:
+
+```
+Tenant default scope          ← lowest priority
+  └─ Project scope             ← overrides Tenant default
+     └─ Environment scope      ← overrides Project
+        └─ Run's policy_scope_ref ← explicit; overrides Environment
+```
+
+Operator-managed scopes are the right unit for compliance — set them at the highest level that makes sense and rely on inheritance.
+
+## Auditing scope decisions
+
+Every admission decision emits a `ks.policy.evaluated` event with the resolved scope:
+
+```bash
+kova events tail --streams policy --json | jq '{run: .run_id, scope: .payload.scope_id, decision: .payload.outcome}'
+```
+
+For rejected calls — `ks.policy.denied` carries the failing rule and the decision rationale.
+
+## Where to go next
+
+<Cards>
+  <Card title="Per-run budgets" href="/docs/guides/policy/per-run-budgets" description="The other admission control surface." />
+  <Card title="Context budgets" href="/docs/guides/policy/context-budgets" description="Per-request context-size admission." />
+  <Card title="PolicyScope concept" href="/docs/concepts/policy/policy-scopes" description="Full conceptual reference." />
+  <Card title="`kova events tail --streams policy`" href="/docs/cli/events/tail" description="Tail policy decisions live." />
+</Cards>

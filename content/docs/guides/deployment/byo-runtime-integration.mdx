@@ -1,0 +1,168 @@
+---
+title: BYO runtime integration
+description: Bring your own runtime — LangGraph, Pydantic AI, OpenAI Agents SDK, Temporal, custom. KovaServe sits underneath as the execution control plane; your runtime keeps its orchestration logic.
+---
+
+KovaServe is **not** an agent framework. It sits below LangGraph, Pydantic AI, OpenAI Agents SDK, Temporal, and custom runtimes — providing durable runs, budget enforcement, recovery, governance, and observability — while letting your runtime keep its orchestration logic intact.
+
+This guide walks through integrating an existing agent runtime with KovaServe.
+
+## Pick your integration shape
+
+Three shapes, in order of intrusion:
+
+| Shape | When |
+|---|---|
+| **OpenAI re-export only.** Two-line migration. | You have an OpenAI client and want runs / budgets / observability without changing your code. |
+| **OpenAI re-export + extension envelope.** | You want to opt specific calls into the control plane (run binding, budget context, manifest pinning). |
+| **Framework adapter.** | Your runtime has a clean extension seam — LangGraph middleware, Pydantic AI `RunContext`, OpenAI Agents `RunHooks`, Temporal interceptors — and you want KovaServe state to flow under it automatically. |
+
+The three shapes coexist — start with the lightest and adopt more as you grow.
+
+## Shape 1 — OpenAI re-export only
+
+```python
+# Before
+from openai import OpenAI
+
+# After
+from kovaserve import OpenAI
+
+client = OpenAI()
+```
+
+Every call now flows through KovaServe with anonymous-mode semantics: no run binding, no budget, no manifest, wire-identical to OpenAI. Cost-per-call is still recorded at the Tenant / Project level for metering.
+
+When you want to opt a specific call into the control plane, attach the extension envelope:
+
+```python
+response = client.chat.completions.create(
+    model="...",
+    messages=[...],
+    extra_body={"kovaserve": {"run_id": run.id}},
+)
+```
+
+## Shape 2 — Extension envelope as your contract
+
+For runtimes that orchestrate multiple calls under one logical "execution," carry a run identifier on the envelope:
+
+```python
+# Open a run via the control client
+run = client.runs.create(project_id="proj_review_bot", model="meta-llama/Llama-3-70B-Instruct")
+
+# Carry the run_id on every model call in this execution
+for turn in agent_loop:
+    response = inference.chat.completions.create(
+        model="meta-llama/Llama-3-70B-Instruct",
+        messages=turn.messages,
+        extra_body={"kovaserve": {"run_id": run.id}},
+    )
+
+# Mark the run complete
+client.runs.update(run.id, status="COMPLETED")
+```
+
+The runtime's orchestration logic stays in place; KovaServe records the run, the steps inside it, the costs, and the cache savings.
+
+## Shape 3 — Framework adapter
+
+For runtimes with a clean extension seam, an adapter wires KovaServe into the framework's own lifecycle. Each adapter installs as an extra:
+
+```bash
+pip install "kovaserve[langgraph]"        # LangGraph
+pip install "kovaserve[pydantic-ai]"      # Pydantic AI
+pip install "kovaserve[openai-agents]"    # OpenAI Agents SDK
+pip install "kovaserve[temporal]"         # Temporal
+```
+
+### LangGraph
+
+```python
+from kovaserve.adapters.langgraph import KovaCheckpointer, KovaStore, KovaMiddleware
+from langgraph.graph import StateGraph
+
+graph = StateGraph(MyState)
+graph.set_middleware([KovaMiddleware(client=ks, project_id="proj_review_bot")])
+app = graph.compile(checkpointer=KovaCheckpointer(ks), store=KovaStore(ks))
+```
+
+The middleware opens a Run on `before_agent`, records Steps on every node, and closes the Run on `after_agent`. LangGraph's persistence stays the source of graph state; KovaServe stores snapshots as `ContextArtifact`s. See [LangGraph adapter](/docs/sdk/adapters/langgraph).
+
+### Pydantic AI
+
+```python
+from pydantic_ai import Agent, RunContext
+from kovaserve.adapters.pydantic_ai import KovaDeps, kova_agent
+
+agent: Agent[KovaDeps, str] = kova_agent(
+    model="meta-llama/Llama-3-70B-Instruct",
+    project_id="proj_review_bot",
+)
+
+@agent.tool
+async def fetch_pr(ctx: RunContext[KovaDeps], url: str) -> str:
+    # ctx.deps.client → KovaControlClient
+    # ctx.deps.run_id → active Run ID
+    return await github.get_pr(url)
+
+result = await agent.run("Review PR #42", deps=KovaDeps.create(project_id="proj_review_bot"))
+```
+
+See [Pydantic AI adapter](/docs/sdk/adapters/pydantic-ai).
+
+### OpenAI Agents SDK
+
+```python
+from openai_agents import Agent, Runner
+from kovaserve.adapters.openai_agents import KovaSession, KovaRunHooks
+
+agent = Agent(name="reviewer", instructions="...", hooks=KovaRunHooks(client=ks, project_id="proj_review_bot"))
+session = KovaSession(client=ks, project_id="proj_review_bot")
+result = await Runner.run(agent, "Review PR #42", session=session)
+```
+
+See [OpenAI Agents SDK adapter](/docs/sdk/adapters/openai-agents).
+
+### Temporal
+
+```python
+from temporalio.client import Client
+from temporalio.worker import Worker
+from kovaserve.adapters.temporal import kova_activity, KovaInterceptor
+
+@kova_activity(project_id="proj_review_bot", step_type="TOOL_EXECUTE")
+@activity.defn
+async def fetch_pr(url: str) -> str:
+    return await github.get_pr(url)
+
+worker = Worker(
+    client,
+    task_queue="review-bot",
+    activities=[fetch_pr],
+    interceptors=[KovaInterceptor(client=ks_client, project_id="proj_review_bot")],
+)
+```
+
+The Workflow stays deterministic; Activities record ModelCalls inside KovaServe. See [Temporal adapter](/docs/sdk/adapters/temporal).
+
+## What KovaServe records under every shape
+
+Regardless of integration shape, KovaServe records:
+
+- The Run, Steps, and ModelCalls for every model call.
+- The ContextManifest for every ModelCall (audit anchor).
+- Cost, tokens, cache savings — real metering, not estimates.
+- Admission decisions — Budget and ContextBudget.
+- Checkpoints, if the runtime opts in via `@kova.checkpoint` or `client.checkpoints.create`.
+- Events on every state transition — tail via [`client.events.tail`](/docs/sdk/control/events).
+
+## Where to go next
+
+<Cards>
+  <Card title="LangGraph adapter" href="/docs/sdk/adapters/langgraph" />
+  <Card title="Pydantic AI adapter" href="/docs/sdk/adapters/pydantic-ai" />
+  <Card title="OpenAI Agents SDK adapter" href="/docs/sdk/adapters/openai-agents" />
+  <Card title="Temporal adapter" href="/docs/sdk/adapters/temporal" />
+  <Card title="BYO runtime mode" href="/docs/concepts/deployment/byo-runtime" description="The conceptual model behind every adapter." />
+</Cards>

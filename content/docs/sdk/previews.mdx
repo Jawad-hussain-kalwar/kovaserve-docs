@@ -1,0 +1,127 @@
+---
+title: Previews
+description: Opt into in-flight server features per request with `previews=[...]`. Stable promotion / removal lifecycle with a deprecation window; never overload `client.beta.*`.
+---
+
+The SDK exposes in-flight server features through a **previews** tier: a per-request opt-in list that tells the gateway "this client wants the preview behaviour for the named features." Previews live at `client.previews.*` for SDK-typed access and ride on the `X-Kova-Previews` header for per-call selection.
+
+```python
+response = client.chat.completions.create(
+    model="meta-llama/Llama-3-70B-Instruct",
+    messages=[...],
+    extra_body={"kovaserve": {"run_id": run.id}},
+    previews=["context-budgets-2026-01-12", "routing-rationale-v2"],
+)
+```
+
+## Why a tier, not a namespace
+
+Anthropic's `client.beta.*` accumulates over time — every preview feature adds another namespace, and the namespace stays after the feature graduates. The SDK takes a different shape: a **per-request list** of preview identifiers. Each preview has a lifecycle, and the list shrinks when previews graduate.
+
+| Feature lifecycle | Where it lives |
+|---|---|
+| Stable | Top-level — `client.runs`, `client.budgets`, etc. The same API your code already uses. |
+| Preview | `client.previews.*` (typed access) and `previews=[...]` (per-request opt-in). |
+| Removed | A `DeprecationWarning` for one minor release, then the preview identifier is no longer accepted. |
+
+Previews don't add a permanent namespace. When a preview graduates, the feature appears in the main surface; when it's removed, the identifier becomes invalid.
+
+## Per-request opt-in
+
+The most common form is per-request:
+
+```python
+runs = client.runs.list(
+    project_id="proj_review_bot",
+    previews=["filter-by-cost-2026-02-01"],
+)
+```
+
+The `previews=` kwarg is accepted on every method. The list is typed as `list[str]` with a `(str & {})` escape valve so any preview identifier compiles in `mypy` — the SDK does not gate which strings are valid; the server returns `400 invalid_preview` for unknown identifiers.
+
+## Per-client default
+
+For a preview you want active on every request from a client:
+
+```python
+client = KovaControlClient(previews=["context-budgets-2026-01-12"])
+```
+
+This sets `X-Kova-Previews: context-budgets-2026-01-12` on every outgoing request. Per-call `previews=` overrides the client default for that call.
+
+## Environment variable
+
+```bash
+export KOVASERVE_PREVIEWS=context-budgets-2026-01-12,routing-rationale-v2
+```
+
+Comma-separated. The SDK reads `KOVASERVE_PREVIEWS` at client construction and uses it as the default. Per-client and per-call kwargs override it.
+
+## `client.previews.*` for typed access
+
+Some previews surface new namespaces or new methods on existing namespaces. Those land at `client.previews.<feature>`:
+
+```python
+# A preview that adds a whole namespace
+results = client.previews.experimental_search.query("...")
+
+# A preview that adds methods to an existing resource
+client.previews.runs.experimental_pause("01J8X9Y2Z3K4M5N6P7Q8R9S0T1")
+```
+
+Calls through `client.previews.*` set the corresponding `X-Kova-Previews` header automatically — you don't pass `previews=` explicitly when you go through the typed accessor.
+
+When a preview graduates, `client.previews.<feature>` becomes a deprecated alias for the stable location for one minor release, then is removed. `DeprecationWarning` fires from the call site naming the new location.
+
+## The graduation lifecycle
+
+A preview goes through three stages:
+
+1. **Active preview.** Available via `previews=[...]` and (when applicable) `client.previews.*`. Behaviour may change between minor SDK releases; the wire shape may shift.
+2. **Promoted to stable.** Behaviour stabilises; the feature appears in the main typed surface. The preview identifier still works for one minor release as an alias, then is removed.
+3. **Removed without promotion.** Some previews are abandoned. A `DeprecationWarning` fires from every call passing the removed identifier for one minor release; in the following minor, the identifier returns `400 invalid_preview`.
+
+Even abandoned previews follow the deprecation window — preventing the Anthropic `beta.*` accumulation problem where a preview becomes load-bearing without a clear migration story.
+
+## Versioned preview identifiers
+
+Preview identifiers carry a date suffix (`-2026-01-12`) so the SDK and server can negotiate behaviour across versions. When a preview's wire shape changes incompatibly, the date suffix changes — both forms remain valid for a deprecation window. Old code keeps the old identifier; new code adopts the new one.
+
+```python
+# Two date-suffixed versions of the same preview
+previews=["context-budgets-2026-01-12"]
+previews=["context-budgets-2026-04-30"]
+```
+
+The server emits a header — `X-Kova-Preview-Stability` — on every response listing which previews in the request are deprecated. The SDK logs a `WARNING` for deprecated previews via the `kovaserve.previews` logger.
+
+## What previews unlock
+
+Examples of preview-tier features:
+
+| Preview | What it adds |
+|---|---|
+| `context-budgets-2026-01-12` | The `client.context.budgets.admit` preflight call (graduated). |
+| `routing-rationale-v2` | A richer `route.rationale` payload with per-component scoring weights. |
+| `experimental-search` | Server-side semantic search over ContextManifests. |
+
+Specific available previews change over time. Query the gateway for the current list:
+
+```python
+catalog = client.previews.catalog()
+for preview in catalog:
+    print(preview.id, preview.stability, preview.description)
+```
+
+## Where to go next
+
+<Cards>
+  <Card title="Lifecycle" href="/docs/sdk/lifecycle" description="SemVer policy, deprecation window, preview promotion." />
+  <Card title="Configuration" href="/docs/sdk/configuration" description="`KOVASERVE_PREVIEWS` env var." />
+  <Card title="Escape hatches" href="/docs/sdk/escape-hatches" description="`extra_body` for preview server features the SDK doesn't ship typed support for." />
+</Cards>
+
+## See also
+
+- [Errors](/docs/sdk/errors) — `BadRequestError` raised on unknown preview identifiers
+- [Logging](/docs/sdk/logging-and-tracing) — the `kovaserve.previews` logger

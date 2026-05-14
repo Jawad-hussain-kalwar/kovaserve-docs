@@ -1,0 +1,63 @@
+---
+title: "`kova budgets get`"
+description: Fetch a Budget with live consumption counters. Renders all set dimensions and the current state.
+---
+
+Fetch a [Budget](/docs/concepts/policy/budgets) with live consumption counters.
+
+## Synopsis
+
+```bash
+kova budgets get <BUDGET_ID> [OPTIONS]
+```
+
+## Options
+
+| Option | Meaning |
+|---|---|
+| `--json` | Emit the Budget as one JSON document. |
+
+## Examples
+
+```bash
+kova budgets get 01J8X9Y2Z3K4M5N6P7Q8R9BG04
+
+kova budgets get 01J... --json | jq '{state: .state, cost: .cost_used_cents}'
+```
+
+## Output
+
+```
+Budget 01J8X9Y2Z3K4M5N6P7Q8R9BG04  WARNING
+Run:               01J8X9Y2Z3K4M5N6P7Q8R9S0T1
+─────────────────────────────────────────────────────────────────────
+DIMENSION   USED            LIMIT           %
+cost        $0.0420         $0.0500         84%   ← strictest dimension
+tokens      82 304          200 000         41%
+steps       6               100             6%
+time        342s            3600s           9%
+tools       3               20              15%
+
+Warning threshold: 70%   (crossed at $0.0350)
+On exceed:         hard_stop
+```
+
+The strictest dimension is highlighted because that's the dimension the Run will hard-stop on first. When two dimensions hit thresholds simultaneously, the priority order is `cost > tokens > steps > time > tools` — the dimension highest in the order is reported first.
+
+## Reading state
+
+`Budget.state` reflects the most-recent admission decision. The five values:
+
+| State | Meaning |
+|---|---|
+| `ACTIVE` | Under all warning thresholds. |
+| `WARNING` | At least one dimension crossed `warning_threshold`. Inference continues; informational. |
+| `DEGRADED_ALLOWED` | The Run is operating under degraded execution (smaller `max_tokens`, dropped optional segments, model downgrade). Only reachable with `on_exceed="degrade"`. |
+| `HARD_STOP` | At least one dimension hit 100%. Further inference calls fail with `429 budget_exceeded`. |
+| `CLOSED` | Terminal. The Run has reached a terminal state and the Budget is final. |
+
+## See also
+
+- [`kova budgets create`](/docs/cli/budgets/create) — attach a new Budget
+- [`client.budgets.get`](/docs/sdk/control/budgets) — the SDK equivalent
+- [Budget state machine](/docs/concepts/policy/budget-state-machine)

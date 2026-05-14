@@ -29,12 +29,12 @@ Living roadmap for `docs.kovaserve.com`. Source of structure for `content/docs/`
 
 ## 2. Quickstart   (positioning voice)
 
-- [ ] `quickstart/index.mdx` — <10 lines to a completed managed run
-- [ ] `quickstart/install-sdk.mdx` — install the `kovaserve` Python SDK
-- [ ] `quickstart/install-cli.mdx` — install the `kova` CLI
-- [ ] `quickstart/environment.mdx` — `KOVASERVE_API_KEY`, base URL, env vars
-- [ ] `quickstart/first-run.mdx` — first managed run end-to-end (Run → Steps → completion)
-- [ ] `quickstart/managed-vs-private.mdx` — managed cloud vs private deployment
+- [x] `quickstart/index.mdx` — Agentic Execution Cloud category claim; pick-your-path cards; ICP / value summary
+- [x] `quickstart/install-sdk.mdx` — `pip install kovaserve`; verification; adapter extras
+- [x] `quickstart/install-cli.mdx` — same package; `kova auth login`; no-op verification
+- [x] `quickstart/environment.mdx` — `KOVASERVE_API_KEY`, base URL, SDK vs CLI config separation, profiles
+- [x] `quickstart/first-run.mdx` — 10-line end-to-end with `@kova.budget` + `@kova.run`; CLI inspection
+- [x] `quickstart/managed-vs-private.mdx` — same semantic model; differences are operations only; one-env-var migration path
 
 ## 3. Concepts   (reference voice — blueprint vocabulary)
 
@@ -157,44 +157,44 @@ Living roadmap for `docs.kovaserve.com`. Source of structure for `content/docs/`
 
 ### Migration   (positioning voice)
 
-- [ ] `guides/migration/migrating-from-openai.mdx` — "Change two lines"
-- [ ] `guides/migration/migrating-from-openrouter.mdx` — Private deployment + run hierarchy
-- [ ] `guides/migration/migrating-from-langsmith.mdx` — Replacing trace UX
+- [x] `guides/migration/migrating-from-openai.mdx` — Change two lines; anonymous-mode preservation; opt-in patterns
+- [x] `guides/migration/migrating-from-openrouter.mdx` — Same OpenAI shape; capabilities gained; private-deployment portability
+- [x] `guides/migration/migrating-from-langsmith.mdx` — Trace surface vs execution control plane; hybrid setup; full-migration path
 
 ### Authoring runs
 
-- [ ] `guides/authoring-runs/multi-step-runs.mdx`
-- [ ] `guides/authoring-runs/branching-from-checkpoint.mdx`
-- [ ] `guides/authoring-runs/resuming-after-failure.mdx`
+- [x] `guides/authoring-runs/multi-step-runs.mdx` — Tool / think / observe / compact step decorators; nesting; parallel siblings
+- [x] `guides/authoring-runs/branching-from-checkpoint.mdx` — `client.runs.branch`; `task_override`; what branches inherit
+- [x] `guides/authoring-runs/resuming-after-failure.mdx` — `@kova.checkpoint` boundaries; three restore modes; compatibility validation
 
 ### Context
 
-- [ ] `guides/context/authoring-context-manifests.mdx`
-- [ ] `guides/context/managing-artifacts.mdx`
-- [ ] `guides/context/compaction-strategies.mdx`
+- [x] `guides/context/authoring-context-manifests.mdx` — `ContextBuilder` patterns; four-tier order; dynamic-content refusal; pre-call admission
+- [x] `guides/context/managing-artifacts.mdx` — Four upload paths; auto-mime; data-residency bucket selection; retention
+- [x] `guides/context/compaction-strategies.mdx` — Reactive vs proactive; `reduce_and_retry`; what to compact
 
 ### Budgets & Policy
 
-- [ ] `guides/policy/per-run-budgets.mdx`
-- [ ] `guides/policy/context-budgets.mdx`
-- [ ] `guides/policy/policy-scopes.mdx`
+- [x] `guides/policy/per-run-budgets.mdx` — Decorator, inline, control-client, CLI patterns; five dimensions; state machine
+- [x] `guides/policy/context-budgets.mdx` — Per-request admission; six decisions; distinct from `RunBudgetDecision`; on-exceed modes
+- [x] `guides/policy/policy-scopes.mdx` — `context_share_scope`, `data_boundary`, `tool_policy_ref`; hierarchy; auditing
 
 ### Observability
 
-- [ ] `guides/observability/reading-run-timelines.mdx`
-- [ ] `guides/observability/opentelemetry-export.mdx`
-- [ ] `guides/observability/consuming-events.mdx`
+- [x] `guides/observability/reading-run-timelines.mdx` — Four views; CLI + SDK + portal; joining to traces
+- [x] `guides/observability/opentelemetry-export.mdx` — Auto-instrumentation via httpx; W3C `traceparent`; opt-in GenAI conventions
+- [x] `guides/observability/consuming-events.mdx` — Live tail + historical query; common consumer patterns; envelope reference
 
 ### Tenancy
 
-- [ ] `guides/tenancy/provisioning-keys.mdx`
-- [ ] `guides/tenancy/managing-environments.mdx`
+- [x] `guides/tenancy/provisioning-keys.mdx` — Four roles, rate limits, expiry, rotation, revocation, audit
+- [x] `guides/tenancy/managing-environments.mdx` — prod / staging / dev separation; scoped config; retirement
 
 ### Deployment
 
-- [ ] `guides/deployment/self-hosting-kubernetes.mdx` — k3s + Helm install
-- [ ] `guides/deployment/sovereign-deployment.mdx`
-- [ ] `guides/deployment/byo-runtime-integration.mdx`
+- [x] `guides/deployment/self-hosting-kubernetes.mdx` — k3s + Helm; values.yaml; bootstrap; observability; upgrade path
+- [x] `guides/deployment/sovereign-deployment.mdx` — Offline license; telemetry disable; regional buckets; compliance
+- [x] `guides/deployment/byo-runtime-integration.mdx` — Three integration shapes; each adapter snippet; what KovaServe records under each
 
 ## 5. API Reference (hand-authored MDX; curl + Python tabs)
 
@@ -327,102 +327,169 @@ Living roadmap for `docs.kovaserve.com`. Source of structure for `content/docs/`
 
 ### Getting started
 
-- [ ] `sdk/index.mdx` — install, configure, `KOVASERVE_API_KEY`
-- [ ] `sdk/openai-compat.mdx` — drop-in OpenAI replacement; `extra_body=`
-- [ ] `sdk/extension-envelope.mdx`
+- [x] `sdk/index.mdx` — package overview; the three surfaces (re-export, control plane, decorators); hooks, primitives, adapters; sync/async; package map
+- [x] `sdk/install.mdx` — `pip install kovaserve` plus extras (`langgraph`, `pydantic-ai`, `openai-agents`, `temporal`); CLI ships in the same package; Python 3.11+; verify the install
+- [x] `sdk/configuration.mdx` — env vars, per-client kwargs, custom `httpx` clients, no module globals, CLI profile separation, precedence
+- [x] `sdk/sync-vs-async.mdx` — parallel classes (vs `.aio` / `_async` suffix), `nest_asyncio` policy, side-by-side recipes, construction cost, close semantics
+
+### Inference path (OpenAI re-export)
+
+- [x] `sdk/inference/openai-compat.mdx` — drop-in `openai.OpenAI`; the re-export contract; what you inherit; anonymous mode; how the defaults resolve; opting into the control plane
+- [x] `sdk/inference/extension-envelope.mdx` — `extra_body={"kovaserve": {...}}`; typed `KovaServeExtension`; full field reference; response surface; mutual exclusivity rules; the builder
+- [x] `sdk/inference/cost-and-streaming.mdx` — cost headers (non-streaming); final SSE chunk (streaming); `accumulate_stream_cost`; sync/async parallels; cost dimensions; status interpretation
+
+### Control plane client
+
+- [x] `sdk/control/index.mdx` — `KovaControlClient` overview; resource namespaces table; construction; sync/async; `expand=`; cross-cutting behaviour; coexisting with the inference client
+- [x] `sdk/control/runs.mdx` — methods (create / get / list / update / cancel / steps / timeline / branch / stream); typed `Run` shape; legal user-driven transitions; idempotency via `external_run_id`
+- [x] `sdk/control/sessions.mdx` — methods (create / get / list / archive); `ses_<24hex>` exception; binding Runs; turn history; state machine
+- [x] `sdk/control/budgets.mdx` — methods (create / get / list / update); 5 dimensions; cost decimal-string precision; inline budgeting through extension envelope
+- [x] `sdk/control/checkpoints.mdx` — methods (create / get / list / restore); logical-context-first; split-phase capture; `restore_mode` (cold / warm-logical / warm-kv); resume order
+- [x] `sdk/control/handles.mdx` — methods (create / get / list / delete / share); five handle types; scope and expiry; share scopes; activation through inference
+- [x] `sdk/control/context-manifests.mdx` — methods (get / list); ContextManifest shape; identity-of-record; admission decisions; `expand=["segments"]`
+- [x] `sdk/control/context-segments.mdx` — `get` only; six `context_type` values; five `memory_class` values; inline vs offloaded; querying by manifest
+- [x] `sdk/control/context-artifacts.mdx` — methods (upload / get / list / delete); ADK shape; `upload_path` / `upload_content`; data-boundary bucket selection
+- [x] `sdk/control/context-budgets.mdx` — methods (create / get / update / admit); six dimensions; six decisions; distinct from `RunBudgetDecision`; preflight admission
+- [x] `sdk/control/compaction.mdx` — methods (compact / records); lineage contract; runtime-produced summaries; ContextBudget trigger flow
+- [x] `sdk/control/cache.mdx` — `prewarm` (max_tokens=0); `salt` override; tenant-wide-salt default; narrower-than-tenant anti-pattern; per-request salt
+- [x] `sdk/control/metering.mdx` — `usage` (scoped to run / project / tenant — scope-dependent errors); `export` (JSONL); cost identity
+- [x] `sdk/control/events.mdx` — `list` / `tail`; eight streams; WHATWG reconnection; multi-mode tailing
+- [x] `sdk/control/cluster.mdx` — operator namespace; `nodes`, `cache_lookup`, `routing_plan`; rationale payload
+- [x] `sdk/control/tenancy.mdx` — sub-namespaces (`tenants` / `projects` / `environments` / `keys`); four roles; credential file separation
 
 ### Decorators
 
-- [ ] `sdk/decorators/run.mdx` — `@kova.run`
-- [ ] `sdk/decorators/session.mdx` — `@kova.session`
-- [ ] `sdk/decorators/budget.mdx` — `@kova.budget`
+- [x] `sdk/decorators/index.mdx` — five decorators; lifecycle contract; implicit metadata propagation; what decorators are not; stacking order rule
+- [x] `sdk/decorators/run.mdx` — signature, on entry / return / exception / streaming, async, composing with `@kova.session`, reading active Run, `run_id=` reuse
+- [x] `sdk/decorators/session.mdx` — signature, `complete=True/False` semantics, exception behaviour, implicit propagation, cache affinity
+- [x] `sdk/decorators/budget.mdx` — signature, decimal-string `cost_cents`, entry-time admission, degrade mode, stacking outermost
+- [x] `sdk/decorators/step.mdx` — `@kova.step` + four named aliases; contextvar step-stack and `parent_step_id`; required explicit `type=`
+- [x] `sdk/decorators/checkpoint.mdx` — six canonical triggers; split-phase vs full mode; capture-on-entry vs capture-on-exit; cost discipline
+- [x] `sdk/decorators/composition.mdx` — stacking rule; `mypy`-enforced ordering; step/checkpoint nesting choices; control-client mixing; framework-adapter coexistence
 
-### Clients
+### Hooks
 
-- [ ] `sdk/clients/runs.mdx`
-- [ ] `sdk/clients/sessions.mdx`
-- [ ] `sdk/clients/checkpoints.mdx`
-- [ ] `sdk/clients/budgets.mdx`
-- [ ] `sdk/clients/context.mdx`
-- [ ] `sdk/clients/events.mdx`
+- [x] `sdk/hooks/index.mdx` — `RunHooks` class; full on_x surface; composition order (all layers fire); `inheritable` flag; `strict=True`; `RunHooks.compose(...)`; metrics / checkpoint / adapter patterns
+
+### Context primitives
+
+- [x] `sdk/primitives/context-builder.mdx` — 4-tier order; dynamic-content refusal; deterministic serialisation; full method surface; `declare_stable_context_id` composition rule; Trap-4 boundary
+- [x] `sdk/primitives/artifact-client.mdx` — three upload paths (`upload_path` / `upload_content` / `upload`); three download paths; streaming uploads; data-boundary bucket selection
+- [x] `sdk/primitives/context-budget-client.mdx` — `admit` preflight; `AdmissionDecision` typed shape; `reduce_and_retry` orchestrator; composing with `count_tokens`
+- [x] `sdk/primitives/compaction-client.mdx` — `report` (ergonomic single-summary); `compact` (multi-output); `records` audit; `reduce_and_retry` helper; Trap-4 boundary inside one primitive
+
+### Framework adapters
+
+- [x] `sdk/adapters/index.mdx` — which adapter, what every adapter does, what they do not do, composition with decorators
+- [x] `sdk/adapters/langgraph.mdx` — `KovaCheckpointer` (wraps LangGraph snapshots as ContextArtifacts) + `KovaStore` + `KovaMiddleware` (LangChain 1.0); thread → Session mapping
+- [x] `sdk/adapters/pydantic-ai.mdx` — `KovaDeps` typed injection via `RunContext[KovaDeps]`; `kova_agent` factory; `KovaDeps.create` vs `KovaDeps.bind`
+- [x] `sdk/adapters/openai-agents.mdx` — `KovaSession` + `KovaRunHooks` + `KovaTracingExporter`; framework lifecycle hooks; streaming + parallel tool dispatch
+- [x] `sdk/adapters/temporal.mdx` — `@kova_activity` Activity wrapper; `KovaInterceptor` header propagation; deterministic Workflow rule; Activity retry mapping
+
+### Cross-cutting
+
+- [x] `sdk/streaming.mdx` — naive iterator + `accumulate_stream_cost`; WHATWG reconnection (`Last-Event-ID`); multi-mode `stream_mode`
+- [x] `sdk/errors.mdx` — hierarchy table; status class vs feature subclass; OpenAI exceptions on re-export; what is/isn't retried
+- [x] `sdk/retries-and-idempotency.mdx` — retry matrix; jittered backoff; `Retry-After`; auto-`Idempotency-Key`; `X-Kova-Retry-Count`
+- [x] `sdk/pagination.mdx` — auto-iteration; manual paging; `before`/`after`/`limit`; sort order; server-side filter composition
+- [x] `sdk/expand-parameter.mdx` — dotted paths; 4-level cap; allow-list; cycle detection; combining with pagination; when not to expand
+- [x] `sdk/logging-and-tracing.mdx` — logger tree, levels, API-key redaction; OTel via `httpx` instrumentation; W3C `traceparent`; opt-in GenAI conventions
+- [x] `sdk/type-model.mdx` — Pydantic v2 responses, `TypedDict` requests, `py.typed`, forward-compat via `model_extra`, enum values, decimal precision, CI-guarded mirror
+- [x] `sdk/escape-hatches.mdx` — `with_raw_response`, `with_streaming_response`, `extra_body`/`extra_headers`/`extra_query`, per-client defaults
+- [x] `sdk/previews.mdx` — per-request opt-in; per-client default; env var; `client.previews.*`; versioned identifiers; graduation lifecycle
+- [x] `sdk/lifecycle.mdx` — SemVer applied to Python surface; one-minor `DeprecationWarning` window; previews follow same rule
 
 ### Reference
 
-- [ ] `sdk/reference/errors.mdx` — exception hierarchy
-- [ ] `sdk/reference/auto-generated.mdx` — `pdoc` output (build-time)
+- [x] `sdk/reference/errors.mdx` — full exception class table; status + feature subclasses; validation error shape; helper methods
+- [x] `sdk/reference/auto-generated.mdx` — `pdoc` output (build-time); inclusion/exclusion rules; navigation pointers
 
 ## 7. CLI Reference (`kova`)
 
-- [ ] `cli/index.mdx` — install, auth, global flags
+### Getting started
+
+- [x] `cli/index.mdx` — `kova` overview; resource namespace table; global flags; same-code-path-as-SDK; output and config precedence
+- [x] `cli/install.mdx` — `pip install kovaserve` ships SDK + CLI; Python 3.11+; framework extras; editable installs
+- [x] `cli/auth.mdx` — `kova auth login / logout / status`; profile file format; OAuth flow; file permissions
+- [x] `cli/configuration.mdx` — resolution order; profiles; env vars; global flags
+- [x] `cli/output.mdx` — table default; `--json` (single doc vs JSON Lines); tree rendering; ANSI colour; quiet/verbose; exit codes
 
 ### runs
 
-- [ ] `cli/runs/list.mdx`
-- [ ] `cli/runs/get.mdx`
-- [ ] `cli/runs/tail.mdx`
-- [ ] `cli/runs/cancel.mdx`
-- [ ] `cli/runs/branch.mdx`
+- [x] `cli/runs/list.mdx` — filters, pagination, JSON
+- [x] `cli/runs/get.mdx` — single Run, `--expand`, `--flat`, `--max-depth`
+- [x] `cli/runs/tail.mdx` — live tail; reconnection; polling fallback
+- [x] `cli/runs/cancel.mdx` — cancel from any non-terminal state; in-flight ModelCalls
+- [x] `cli/runs/branch.mdx` — branch from a Checkpoint; lineage queryable
 
 ### sessions
 
-- [ ] `cli/sessions/list.mdx`
-- [ ] `cli/sessions/get.mdx`
+- [x] `cli/sessions/list.mdx` — filters, `--state` accept-multiple, JSON
+- [x] `cli/sessions/get.mdx` — single Session, `--expand turns / current_run`
+- [x] `cli/sessions/archive.mdx` — explicit archival; `ARCHIVED` vs `EXPIRED`
 
 ### checkpoints
 
-- [ ] `cli/checkpoints/list.mdx`
-- [ ] `cli/checkpoints/get.mdx`
-- [ ] `cli/checkpoints/restore.mdx`
+- [x] `cli/checkpoints/list.mdx` — filter by run / status / trigger
+- [x] `cli/checkpoints/get.mdx` — full bound refs + compatibility vector
+- [x] `cli/checkpoints/restore.mdx` — three modes (cold / warm-logical / warm-kv); failure modes
 
 ### budgets
 
-- [ ] `cli/budgets/create.mdx`
-- [ ] `cli/budgets/get.mdx`
+- [x] `cli/budgets/create.mdx` — five dimensions, decimal-string `--cost-cents`, on-exceed
+- [x] `cli/budgets/get.mdx` — live consumption; strictest dimension; state interpretation
 
 ### context
 
-- [ ] `cli/context/manifests.mdx`
-- [ ] `cli/context/artifacts.mdx`
+- [x] `cli/context/manifests.mdx` — `list` (filters) and `get` (`--expand segments`); admission decisions
+- [x] `cli/context/segments.mdx` — `get` only; six `context_type` values; offloaded vs inline
+- [x] `cli/context/artifacts.mdx` — `upload` / `list` / `get` (with `--signed`) / `delete`
+- [x] `cli/context/budgets.mdx` — `create` / `get` / `update` / `admit`; distinct from run-level
 
 ### usage
 
-- [ ] `cli/usage/query.mdx`
-- [ ] `cli/usage/export.mdx`
+- [x] `cli/usage/query.mdx` — three scopes with distinct error semantics; per-Run / Project / Tenant aggregates
+- [x] `cli/usage/export.mdx` — JSONL streaming export with pricing snapshots
 
 ### keys
 
-- [ ] `cli/keys/create.mdx`
-- [ ] `cli/keys/rotate.mdx`
-- [ ] `cli/keys/revoke.mdx`
+- [x] `cli/keys/create.mdx` — issue Bearer Keys; raw value once; four roles
+- [x] `cli/keys/rotate.mdx` — atomic issue-and-revoke; grace period
+- [x] `cli/keys/revoke.mdx` — revoke without replacement; revoke vs rotate
 
 ### events
 
-- [ ] `cli/events/tail.mdx`
+- [x] `cli/events/tail.mdx` — live tail one or more streams; filters; WHATWG reconnection; useful filter recipes
+
+### cluster   (operator)
+
+- [x] `cli/cluster/nodes.mdx` — `kova nodes list`; live health and load
+- [x] `cli/cluster/cache-lookup.mdx` — `kova cluster cache-lookup`; find which nodes hold a prefix or context identity
 
 ## 8. Cookbook   (positioning voice)
 
-- [ ] `cookbook/coding-agent.mdx` — CodeRuns reference recipe
-- [ ] `cookbook/document-review.mdx` — DocRuns reference recipe
-- [ ] `cookbook/ops-automation.mdx` — OpsRuns reference recipe
-- [ ] `cookbook/tool-loops-with-budget-kill.mdx`
-- [ ] `cookbook/branching-from-checkpoint.mdx`
-- [ ] `cookbook/private-deployment.mdx`
+- [x] `cookbook/coding-agent.mdx` — Full CodeRuns recipe; budget + checkpoints + hooks; SKU summary; resume from failure
+- [x] `cookbook/document-review.mdx` — Full DocRuns recipe; document offload; structured outputs; common workflows
+- [x] `cookbook/ops-automation.mdx` — Full OpsRuns recipe; policy-controlled remediation; log offload; common workflows
+- [x] `cookbook/tool-loops-with-budget-kill.mdx` — Five-dimensional ceilings; hard-stop vs degrade; per-call vs per-run vs per-loop budget
+- [x] `cookbook/branching-from-checkpoint.mdx` — What-if analysis; comparing branches; multi-level lineage tree
+- [x] `cookbook/private-deployment.mdx` — Full end-to-end neocloud / sovereign install + first run
 
 ## 9. Models
 
-- [ ] `models/index.mdx` — deployable models, capability matrix, context windows, tokenizers
+- [x] `models/index.mdx` — Capability matrix; recommendations by workload; tokenizer fingerprints; layering reminder
 
 ## 10. Pricing   (positioning voice)
 
-- [ ] `pricing/index.mdx` — rate cards + cost-per-completed-run examples
+- [x] `pricing/index.mdx` — Three billing dimensions; worked CodeRuns / OpsRuns / DocRuns examples; pricing-snapshot guarantees
 
 ## 11. Changelog
 
-- [ ] `changelog/index.mdx` — dated API changes, additive vs. breaking
+- [x] `changelog/index.mdx` — Dated entries grouped Added / Changed / Deprecated / Removed / Fixed; cross-link to lifecycle
 
 ## 12. Status
 
-- [ ] `status/index.mdx` — public status page link / embedded health
+- [x] `status/index.mdx` — status.kovaserve.com + `/health` API; severity definitions; private-deployment status
 
 ---
 

@@ -1,0 +1,196 @@
+---
+title: Checkpoints
+description: The `client.checkpoints` namespace — capture, retrieve, list, and restore Checkpoints. Logical-context-first; KV cache export is the optional warm path.
+---
+
+The `client.checkpoints` namespace operates on [Checkpoints](/docs/concepts/recovery/checkpoints), the resumable snapshots that bind a Run's [ContextManifest](/docs/concepts/context/context-manifests), [ContextArtifacts](/docs/concepts/context/context-artifacts), and [CompactionRecords](/docs/concepts/context/compaction-records) — plus an optional KV cache export — so a long-running Run survives node failure, redeployment, or operator-initiated pause without losing its logical state.
+
+KovaServe's Checkpoint model is **logical-context-first**: the logical context (manifest + segment refs + artifact refs + compaction lineage) captures synchronously in milliseconds; the optional KV cache export runs asynchronously and attaches as a `kv_prefix` [StateHandle](/docs/concepts/recovery/state-handles) when complete. A Checkpoint is *valid the moment logical context lands* — KV restore is the bonus warm path, not a requirement.
+
+```python
+from kovaserve import KovaControlClient
+
+client = KovaControlClient()
+
+# Capture
+checkpoint = client.checkpoints.create(
+    run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    trigger="before_file_write",
+)
+print(checkpoint.id, checkpoint.status)        # 01J8X9...  CAPTURING
+
+# Later — restore
+restored = client.checkpoints.restore(checkpoint.id, restore_mode="warm-logical")
+print(restored.run_id, restored.status)         # 01J8X9...  RUNNING
+```
+
+## Methods
+
+| Method | Wire | What it does |
+|---|---|---|
+| [`create`](#create) | `POST /v1/ks/runs/{run_id}/checkpoints` | Capture a Checkpoint on a Run. |
+| [`get`](#get) | `GET /v1/ks/checkpoints/{id}` | Fetch a Checkpoint with its bound refs. |
+| [`list`](#list) | `GET /v1/ks/checkpoints` | Cursor-paginated list scoped to a Run or Project. |
+| [`restore`](#restore) | `POST /v1/ks/checkpoints/{id}/restore` | Restore a Run from a Checkpoint. |
+
+## The Checkpoint shape
+
+```python
+class Checkpoint(BaseModel):
+    id: str
+    run_id: str
+    step_id: str | None                  # the Step at which capture was requested
+    session_id: str | None
+
+    status: CheckpointStatus             # REQUESTED → CAPTURING → STORED → VALIDATED → RESTORING → RESTORED
+                                         # terminal failures: CAPTURE_FAILED, VALIDATION_FAILED, RESTORE_FAILED
+
+    context_manifest_id: str             # frozen snapshot — always populated, never null
+    manifest_uri: str                    # S3 / MinIO URI for the durable manifest blob
+
+    state_refs: list[CheckpointStateRef] # typed StateHandles attached to this checkpoint:
+                                         #   kv_prefix | context_manifest | artifact_bundle | runtime_state
+
+    compatibility: dict                  # {model_family, tokenizer_fingerprint, renderer_version,
+                                         #  quantization, tensor_parallel}
+
+    trigger: str | None                  # the trigger label (e.g. "before_file_write", "periodic")
+    size_bytes: int                      # total bytes occupied by manifest + artifacts + KV export
+    created_at: datetime
+    validated_at: datetime | None
+```
+
+`CheckpointStatus` follows the [Checkpoint state machine](/docs/concepts/recovery/checkpoint-state-machine): `REQUESTED → CAPTURING → STORED → VALIDATED → RESTORING → RESTORED`, with three terminal failure states.
+
+## `create`
+
+```python
+checkpoint = client.checkpoints.create(
+    run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1",       # required
+    step_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T7",       # optional — defaults to current Step
+    trigger="before_file_write",                # optional label, surfaces in events
+    mode="split-phase",                         # default — see below
+)
+```
+
+`mode` controls the synchronization contract:
+
+| Mode | Semantics |
+|---|---|
+| `split-phase` (default) | Logical context (manifest + segment refs + artifact refs + compaction lineage) captures synchronously in milliseconds. KV export runs asynchronously; the Checkpoint is valid the moment logical context lands. KV `state_ref` attaches when ready. |
+| `full` | Blocks until both logical context and KV export complete. Use before node teardown or when the next operation depends on a warm restore. |
+
+The Run transitions `RUNNING → CHECKPOINTING → RUNNING` for the duration of the capture. `step_id` defaults to the Step that is currently active on the Run; if no Step is active, the Checkpoint binds to the most recent terminal Step.
+
+The trigger label is a free-form identifier the runtime supplies. The canonical labels emitted by [`@kova.checkpoint`](/docs/sdk/decorators/checkpoint) — `before_file_write`, `before_shell_command`, `after_stable_analysis`, `on_budget_warning`, `periodic`, `manual` — are the recommended values, but any string is accepted and surfaces on `Checkpoint.trigger` and on the `ks.checkpoint.created` event payload.
+
+## `get`
+
+```python
+checkpoint = client.checkpoints.get("01J8X9Y2Z3K4M5N6P7Q8R9S0T9")
+
+print(checkpoint.context_manifest_id)     # the frozen manifest
+print(checkpoint.compatibility)           # model / tokenizer / renderer / quantization
+for ref in checkpoint.state_refs:
+    print(ref.ref_type, ref.state_handle_id, ref.location)
+    # ref_type ∈ {kv_prefix, context_manifest, artifact_bundle, runtime_state}
+```
+
+`state_refs` is the typed list of [StateHandles](/docs/concepts/recovery/state-handles) attached to the Checkpoint. Every Checkpoint has at least a `context_manifest` ref (the manifest is the audit anchor); a `kv_prefix` ref appears when KV export succeeded; an `artifact_bundle` ref points to the source-segment archive when [compaction](/docs/concepts/context/compaction-records) ran during this Run; a `runtime_state` ref appears for Layer 3 runtime Checkpoints carrying workspace / sandbox state.
+
+## `list`
+
+```python
+for checkpoint in client.checkpoints.list(run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1"):
+    print(checkpoint.step_id, checkpoint.trigger, checkpoint.status, checkpoint.size_bytes)
+```
+
+Filter and order:
+
+```python
+checkpoints = client.checkpoints.list(
+    run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1",         # most common — list for a Run
+    project_id="proj_review_bot",                 # alternatively, broader Project scope
+    status="VALIDATED",                           # only restorable checkpoints
+    trigger="before_file_write",                  # specific trigger label
+    limit=20,
+)
+```
+
+When `run_id` is supplied, results are sorted by `created_at` ascending — i.e., the oldest Checkpoint first, the most recent last. For just-the-latest queries, use `client.checkpoints.list(run_id=..., limit=1)` with the `order="desc"` kwarg.
+
+## `restore`
+
+```python
+run = client.checkpoints.restore(
+    "01J8X9Y2Z3K4M5N6P7Q8R9S0T9",
+    restore_mode="warm-logical",                  # default
+    target_node_id=None,                          # optional placement hint
+)
+print(run.status)                                 # RECOVERING → RESUMING → RUNNING
+```
+
+`restore_mode` selects between three behaviours, ordered by warmth:
+
+| Mode | What restores | When to use |
+|---|---|---|
+| `cold` | Logical context only — manifest reconstruction, no KV restore even if available. | Forcing a cold restart from logical state. Debugging restore correctness. |
+| `warm-logical` (default) | Logical context + KV restore if the `kv_prefix` StateHandle is still resident. Falls back to logical-only if KV restore fails. | The general-purpose path. KV is the optimization; the Run resumes either way. |
+| `warm-kv` | Logical context + KV restore — fails the restore if the `kv_prefix` StateHandle is unavailable. | The hard requirement path. Use when the next operation only makes sense against a warm cache. |
+
+The returned object is the Run row, transitioned through `RECOVERING → RESUMING → RUNNING`. If `restore_mode="warm-kv"` is requested and KV restore fails, the Run stays in the prior state and the call raises `PreconditionFailedError(error_code="kv_state_unavailable")`.
+
+`target_node_id` is an optional [PlacementHint](/docs/concepts/routing/placement-hints) — the Cache-Aware Router treats it as advisory. By default the router selects the warmest node that satisfies the [PolicyScope](/docs/concepts/policy/policy-scopes) and `context_share_scope` filter.
+
+## Resume order
+
+Internally, restore follows this order regardless of `restore_mode`:
+
+```
+1. Load Checkpoint manifest from S3 / MinIO
+2. Validate ContextManifest + referenced ContextArtifacts (existence, hash, scope)
+3. Validate compatibility: model_family, tokenizer_fingerprint, renderer_version
+4. (warm-* only) Plan KV restore from the kv_prefix StateHandle
+5. Reconstruct active context from manifest + artifacts if KV restore is unavailable
+6. Route based on resume_feasible, manifest reuse estimate, restore cost
+7. (warm-* only) Layer 1 imports KV state as feasible
+8. Run transitions through RECOVERING → RESUMING → RUNNING
+```
+
+Compatibility validation distinguishes two failure classes. Context incompatibility (renderer / tokenizer / model family change) is fatal — the Checkpoint cannot restore against the new model. KV incompatibility (quantization / tensor-parallel config change) downgrades the restore: logical context still loads, KV import is skipped. The SDK surfaces both as distinct error codes.
+
+## Async parallel
+
+Every method is mirrored on `AsyncKovaControlClient.checkpoints`:
+
+```python
+import asyncio
+from kovaserve import AsyncKovaControlClient
+
+async def main() -> None:
+    client = AsyncKovaControlClient()
+    checkpoint = await client.checkpoints.create(
+        run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+        trigger="before_shell_command",
+    )
+    run = await client.checkpoints.restore(checkpoint.id, restore_mode="warm-logical")
+
+asyncio.run(main())
+```
+
+## Where to go next
+
+<Cards>
+  <Card title="Handles" href="/docs/sdk/control/handles" description="Typed StateHandles — the building blocks attached to every Checkpoint." />
+  <Card title="`@kova.checkpoint` decorator" href="/docs/sdk/decorators/checkpoint" description="Open a Checkpoint context around a function body." />
+  <Card title="Context manifests" href="/docs/sdk/control/context-manifests" description="The frozen audit anchor every Checkpoint binds." />
+  <Card title="Runs" href="/docs/sdk/control/runs" description="The Runs that get checkpointed." />
+</Cards>
+
+## See also
+
+- [Checkpoint concept](/docs/concepts/recovery/checkpoints) — what a Checkpoint is
+- [Checkpoint state machine](/docs/concepts/recovery/checkpoint-state-machine) — the seven-state lifecycle
+- [Resume flow](/docs/concepts/recovery/resume-flow) — `RECOVERING → RESUMING → RUNNING`
+- [State handles](/docs/concepts/recovery/state-handles) — the typed refs attached to a Checkpoint
+- [API: Checkpoints](/docs/api/checkpoints/create) — the wire surface

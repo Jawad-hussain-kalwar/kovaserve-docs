@@ -1,0 +1,96 @@
+---
+title: "`kova context budgets`"
+description: Create, inspect, update, and preflight-admit ContextBudgets — per-request admission control over context size.
+---
+
+Manage [ContextBudgets](/docs/concepts/policy/context-budgets). Distinct from `kova budgets` — those are run-level (cost / tokens / steps / time / tools); ContextBudgets are per-request admission over context size.
+
+## Subcommands
+
+| Subcommand | What it does |
+|---|---|
+| `kova context budgets create` | Create a ContextBudget for a Run. |
+| `kova context budgets get <ID>` | Read state and dimensional consumption. |
+| `kova context budgets update <ID>` | Raise / lower limits and thresholds. |
+| `kova context budgets admit` | Preflight admission against an assembled manifest. |
+
+## `create` example
+
+```bash
+kova context budgets create --run-id 01J8X9Y2Z3K4M5N6P7Q8R9S0T1 \
+    --active-tokens 8000 \
+    --stable-tokens 5000 \
+    --volatile-tokens 3000 \
+    --tool-result-tokens 2000 \
+    --artifact-bytes $((10 * 1024 * 1024)) \
+    --compaction-threshold 0.90 \
+    --offload-threshold 0.80 \
+    --on-exceed hard_stop
+```
+
+| Option | Meaning |
+|---|---|
+| `--run-id <id>` | Required. |
+| `--active-tokens <n>` | Total tokens in the admitted manifest. |
+| `--stable-tokens <n>` | Tokens in the stable-prefix tiers. |
+| `--volatile-tokens <n>` | Tokens in the volatile tail. |
+| `--tool-result-tokens <n>` | Tokens in `tool_result` segments. |
+| `--artifact-bytes <n>` | Total bytes referenced via offloaded artifacts. |
+| `--compaction-threshold <fraction>` | Fraction triggering `COMPACT_REQUIRED`. Default 0.90. |
+| `--offload-threshold <fraction>` | Fraction triggering `OFFLOAD_REQUIRED`. Default 0.80. |
+| `--warning-threshold <fraction>` | Fraction triggering `WARN`. Default 0.70. |
+| `--on-exceed <action>` | `hard_stop` (default) or `degrade`. |
+
+At least one dimensional limit must be set.
+
+## `admit` example
+
+The preflight admission check evaluates an assembled manifest against the budget without dispatching:
+
+```bash
+kova context budgets admit \
+    --context-budget-id 01J8X9Y2Z3K4M5N6P7Q8R9CB04 \
+    --context-manifest-id 01J8X9Y2Z3K4M5N6P7Q8R9SCM07
+```
+
+Output:
+
+```
+Admission decision: COMPACT_REQUIRED
+Active tokens:      9 240   / 8 000   (115%)
+Stable tokens:      5 100   / 5 000
+Volatile tokens:    4 140   / 3 000
+Crossed thresholds: compaction_required_threshold
+
+Recommended transformations:
+  1. compact — target segments 01J...11, 01J...12  (token_savings ≈ 1 500)
+```
+
+`admit` never mutates state on the budget; it's purely informational. State transitions happen on real admission during inference.
+
+## `get` example
+
+```bash
+kova context budgets get 01J8X9Y2Z3K4M5N6P7Q8R9CB04
+```
+
+```
+ContextBudget 01J8X9Y2Z3K4M5N6P7Q8R9CB04  ACTIVE
+Run:                            01J8X9Y2Z3K4M5N6P7Q8R9S0T1
+─────────────────────────────────────────────────────────────────────
+DIMENSION              LIMIT          THRESHOLD (offload / compact)
+active_token_limit     8 000          80% / 90%
+stable_token_limit     5 000          —
+volatile_token_limit   3 000          —
+tool_result_limit      2 000          —
+artifact_byte_limit    10 485 760     —
+
+On exceed:  hard_stop
+```
+
+## See also
+
+- [`kova budgets`](/docs/cli/budgets/create) — the run-level (cost/tokens/steps/time/tools) Budget commands
+- [`client.context.budgets`](/docs/sdk/control/context-budgets) — the SDK equivalent
+- [`ContextBudgetClient`](/docs/sdk/primitives/context-budget-client) — the SDK primitive
+- [ContextBudget state machine](/docs/concepts/policy/context-budget-state-machine)

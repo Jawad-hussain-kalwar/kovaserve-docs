@@ -1,0 +1,26 @@
+{
+  "title": "SDK Reference",
+  "pages": [
+    "index",
+    "install",
+    "configuration",
+    "sync-vs-async",
+    "inference",
+    "control",
+    "decorators",
+    "hooks",
+    "primitives",
+    "adapters",
+    "streaming",
+    "errors",
+    "retries-and-idempotency",
+    "pagination",
+    "expand-parameter",
+    "logging-and-tracing",
+    "type-model",
+    "escape-hatches",
+    "previews",
+    "lifecycle",
+    "reference"
+  ]
+}

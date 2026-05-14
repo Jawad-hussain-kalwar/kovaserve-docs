@@ -1,0 +1,67 @@
+---
+title: "`kova nodes list`"
+description: List inference nodes with live health and load — model, queue depth, HBM pressure, KV cache occupancy. Operator-scope.
+---
+
+List inference nodes with live health and load. Requires operator-scope credentials; ordinary keys see `403 permission_denied`.
+
+## Synopsis
+
+```bash
+kova nodes list [OPTIONS]
+```
+
+This command is also accessible as `kova cluster nodes list` — both forms are equivalent.
+
+## Options
+
+| Option | Meaning |
+|---|---|
+| `--model <id>` | Filter to nodes serving a specific model. |
+| `--state <state>` | Filter by `NodeState`. Accept-multiple: `--state READY --state DRAINING`. |
+| `--placement-zone <zone>` | Operator-tagged zone filter. |
+| `--json` | Emit a JSON array. |
+
+## Examples
+
+```bash
+# Full fleet
+kova nodes list
+
+# Only healthy nodes for one model
+kova nodes list --model meta-llama/Llama-3-70B-Instruct --state READY
+
+# JSON for monitoring tooling
+kova nodes list --json | jq '.[] | {id: .id, qd: .queue_depth, hbm: .hbm_pressure}'
+```
+
+## Output
+
+```
+ID         MODEL                              STATE  QUEUE   HBM    KV     TTFT p50  TTFT p99
+node-1     meta-llama/Llama-3-70B-Instruct    READY    3     67%    42%    180ms     520ms
+node-2     meta-llama/Llama-3-70B-Instruct    READY   11     82%    61%    220ms     680ms
+node-3     qwen3-coder-30b                    READY    0     12%    20%    100ms     280ms
+node-4     meta-llama/Llama-3-70B-Instruct    DRAIN…   2     58%    40%    240ms     800ms
+```
+
+## What each column means
+
+| Column | Meaning |
+|---|---|
+| `STATE` | `READY` / `DRAINING` / `UNHEALTHY` / `OFFLINE`. |
+| `QUEUE` | Pending requests in the engine queue. |
+| `HBM` | HBM utilization fraction. High values indicate cache eviction pressure. |
+| `KV` | KV cache fill fraction. High values indicate routing should prefer this node for warm-prefix requests. |
+| `TTFT p50 / p99` | Rolling time-to-first-token percentiles. |
+
+For per-node detail, fetch one node:
+
+```bash
+kova cluster nodes get node-3 --json
+```
+
+## See also
+
+- [`kova cluster cache-lookup`](/docs/cli/cluster/cache-lookup) — find which nodes hold a given prefix
+- [`client.cluster.nodes`](/docs/sdk/control/cluster) — the SDK equivalent

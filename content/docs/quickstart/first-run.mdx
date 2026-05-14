@@ -1,0 +1,116 @@
+---
+title: Your first managed run
+description: One Python file, ten lines, one completed managed agent run. Durable execution, budget enforcement, completed-run economics in five minutes.
+---
+
+A managed agent run is the unit of value in KovaServe — the durable record of an agent completing useful work, with full audit, cost attribution, and recovery. This walkthrough takes you from zero to one completed managed run in under ten lines.
+
+## Step 1 — Open the SDK
+
+```python
+from kovaserve import OpenAI, KovaControlClient, kova
+```
+
+Three imports:
+
+- `OpenAI` — the drop-in OpenAI client, pre-configured for KovaServe. Use it for model calls.
+- `KovaControlClient` — the typed control-plane client.
+- `kova` — the decorator namespace. `@kova.run` wraps a function body in a managed run.
+
+## Step 2 — Decorate a function
+
+```python
+inference = OpenAI()
+ks = KovaControlClient()
+
+@kova.budget(cost_cents="50.0000", tokens=50_000)
+@kova.run(project="proj_review_bot", model="meta-llama/Llama-3-70B-Instruct")
+def review_pr(pr_url: str) -> str:
+    response = inference.chat.completions.create(
+        model="meta-llama/Llama-3-70B-Instruct",
+        messages=[{"role": "user", "content": f"Review {pr_url}"}],
+    )
+    return response.choices[0].message.content
+```
+
+The two decorators stack from outer to inner: a budget admits the call, a run binds it to a durable execution objective.
+
+## Step 3 — Run it
+
+```python
+result = review_pr("https://github.com/foo/bar/pull/42")
+print(result)
+```
+
+The decorator opens a run, the model call records a step, and the result returns. The run transitions to `COMPLETED` when the function exits cleanly.
+
+## Step 4 — Inspect the run
+
+```bash
+kova runs list --status COMPLETED --limit 1
+```
+
+```
+ID                                STATUS     PROJECT          MODEL                          STEPS  CREATED                  COST
+01J8X9Y2Z3K4M5N6P7Q8R9S0T1        COMPLETED  proj_review_bot  meta-llama/Llama-3-70B-Instruct   1   2026-05-15T11:42:01Z     $0.0420
+```
+
+Drill into it:
+
+```bash
+kova runs get 01J8X9Y2Z3K4M5N6P7Q8R9S0T1 --expand steps.model_calls
+```
+
+```
+Run 01J8X9Y2Z3K4M5N6P7Q8R9S0T1  COMPLETED
+Project:  proj_review_bot
+Model:    meta-llama/Llama-3-70B-Instruct
+Budget:   $0.0420 / $0.5000  CLOSED
+─────────────────────────────────────────────────────────────────────
+Steps
+└─ 1  MODEL_CALL  SUCCEEDED  890ms
+   └─ ModelCall  meta-llama/Llama-3-70B  cached=820/1303  $0.0420
+```
+
+You now have a **completed managed run** with full audit, cost attribution, and budget closure.
+
+## What just happened
+
+Behind the simple decorator stack, KovaServe:
+
+1. Opened a durable run bound to `proj_review_bot`.
+2. Attached a 50¢ (`"50.0000"` cents) budget with active admission control.
+3. Recorded the chat completion as a step inside the run.
+4. Recorded the underlying model call with real token counts and the model's cache hits.
+5. Computed cost per completed run using real metering (not estimates).
+6. Transitioned the run to `COMPLETED` and closed the budget.
+
+If your function had raised an exception, the run would transition to `FAILED` with the exception type recorded. If you'd cancelled mid-stream, it would transition to `CANCELED`. If the budget had hard-stopped on the way through, the call would reject with `429 budget_exceeded` and the run would record `HARD_STOP` on the budget state machine.
+
+## The same recipe with the CLI
+
+For a one-shot managed run from the terminal:
+
+```bash
+# Provision a run
+kova runs list --project-id proj_review_bot --limit 1
+# (or create one via the SDK first)
+
+# Live-tail the run
+kova runs tail 01J8X9Y2Z3K4M5N6P7Q8R9S0T1 --json | jq -r '.event_type'
+```
+
+## Next
+
+<Cards>
+  <Card title="Managed vs private" href="/docs/quickstart/managed-vs-private" description="Pick a deployment model." />
+  <Card title="Multi-step runs" href="/docs/guides/authoring-runs/multi-step-runs" description="Tool calls, branches, checkpoints." />
+  <Card title="OpenAI migration" href="/docs/guides/migration/migrating-from-openai" description="The two-line change." />
+  <Card title="Reading run timelines" href="/docs/guides/observability/reading-run-timelines" description="Make the timeline view your default." />
+</Cards>
+
+## See also
+
+- [Run hierarchy concepts](/docs/concepts/run-hierarchy/runs) — what a Run is
+- [`@kova.run` decorator](/docs/sdk/decorators/run) — full decorator reference
+- [Cost per completed run](/docs/concepts/cost/cost-per-completed-run) — the economic metric

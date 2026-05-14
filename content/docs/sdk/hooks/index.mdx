@@ -1,0 +1,247 @@
+---
+title: Hooks
+description: `RunHooks` is the canonical reactivity surface — subclass and override `on_step_start`, `on_budget_warning`, `on_compact_required`, and the other on_x methods to react to execution events as they happen on the SDK side.
+---
+
+`RunHooks` is the SDK's **reactivity surface**: a subclassable class with a fixed set of `on_x` methods. Override the methods you care about, attach an instance to a client / decorator / per-call kwarg, and the SDK invokes your method when the corresponding event happens. Hooks fire **after** the SDK commits the state to the server but **before** the next outgoing call, so they're the right place to alert, metric, or compute reactive side effects.
+
+```python
+from kovaserve import kova, RunHooks
+
+class AlertHooks(RunHooks):
+    def __init__(self):
+        self.warnings = 0
+
+    def on_budget_warning(self, decision):
+        self.warnings += 1
+        slack.send(f"Budget warning on {decision.run_id}: {decision.budget_remaining_pct:.0%}")
+
+    def on_compact_required(self, decision):
+        my_runtime.compact(decision.run_id)
+
+@kova.run(project="proj_review_bot", model="meta-llama/Llama-3-70B-Instruct", hooks=AlertHooks())
+def review_pr(...):
+    ...
+```
+
+## Why a class, not callbacks
+
+Inline `on_x=lambda` kwargs work for a single event:
+
+```python
+@kova.run(
+    project="proj_review_bot",
+    model="...",
+    on_budget_warning=lambda d: slack.send(f"Warning on {d.run_id}"),
+)
+def review_pr(...):
+    ...
+```
+
+That's fine for one-event cases. For three or more events, the kwarg list becomes line noise and prevents **stateful reactivity** — a hook counting warnings has nowhere to put the counter. `RunHooks` is the typed reactive surface that scales.
+
+Framework adapters also need a *type* to compose against. `KovaMiddleware`, `KovaRunHooks`, and `KovaInterceptor` are all `RunHooks` subclasses internally. The class shape is what makes adapter composition possible.
+
+## The hook surface
+
+```python
+class RunHooks:
+    inheritable: bool = True             # propagates to nested operations by default
+
+    def on_step_start(self, step): ...
+    def on_step_complete(self, step): ...
+    def on_model_call_start(self, call): ...     # sees the manifest
+    def on_model_call_complete(self, call): ...
+
+    def on_budget_warning(self, decision): ...
+    def on_degrade(self, decision): ...
+    def on_compact_required(self, decision): ...
+    def on_offload_required(self, decision): ...
+    def on_admission_rejected(self, rejection): ...
+
+    def on_checkpoint_created(self, checkpoint): ...
+    def on_checkpoint_restored(self, checkpoint): ...
+
+    def on_run_state_change(self, old, new): ...
+    def on_session_state_change(self, old, new): ...
+```
+
+All methods default to no-ops. Override only the ones you need.
+
+The `inheritable` class attribute controls whether the hooks instance propagates to nested operations — see [Inheritable propagation](#inheritable-propagation) below.
+
+## Firing contract
+
+Hooks fire on **transitions the SDK can observe**:
+
+| Event | Source | Fires when |
+|---|---|---|
+| `on_step_start` / `on_step_complete` | The runtime's [Step](/docs/sdk/control/runs) creation. | The Step row is created / reaches a terminal state. |
+| `on_model_call_start` | A chat completion is about to dispatch. | After the ContextManifest is admitted; before the substrate executes. The `call` carries the manifest. |
+| `on_model_call_complete` | A chat completion finishes. | After the response (or final SSE chunk) is processed. The `call` carries usage + cost. |
+| `on_budget_warning` / `on_degrade` / `on_admission_rejected` | The [Budget](/docs/sdk/control/budgets) admission service. | Decision returned with the corresponding result. |
+| `on_compact_required` / `on_offload_required` | The [ContextBudget](/docs/sdk/control/context-budgets) admission service. | Decision returned with the corresponding result. |
+| `on_checkpoint_created` | `@kova.checkpoint` or `client.checkpoints.create`. | Phase 1 of the Checkpoint capture commits. |
+| `on_checkpoint_restored` | `client.checkpoints.restore`. | The Run reaches `RUNNING` after the restore plan executes. |
+| `on_run_state_change` / `on_session_state_change` | The Run / Session FSM. | Any transition. The handler receives `old` and `new` states. |
+
+Hooks fire **sync** on the calling thread for sync clients, **async** on the calling task for async clients. There is no implicit thread bridging.
+
+## Exception handling
+
+By default, exceptions raised inside a hook method are **logged and swallowed** — the SDK does not let a hook's failure abort the surrounding operation. The rationale: a hook is reactive instrumentation; instrumentation should not crash the work it's observing.
+
+For cases where a hook failure *should* abort the operation, set `strict=True`:
+
+```python
+class StrictHooks(RunHooks):
+    strict = True
+
+    def on_admission_rejected(self, rejection):
+        if rejection.reason == "context_budget_exceeded":
+            raise RuntimeError("never accept this")     # in strict mode, this aborts
+```
+
+Strict mode is rarely the right choice. The common reason to reach for it is testing — a test's hook should fail loudly when the SDK does something unexpected. In production code, prefer logging the failure and letting work continue.
+
+## Composition order
+
+Hooks **compose** in registration order. Three layers stack, all fire on every event:
+
+```python
+client = KovaControlClient(default_hooks=DefaultHooks())          # layer 1 — client default
+
+@kova.run(project="...", hooks=DecoratorHooks())                  # layer 2 — decorator
+def review_pr(...):
+    ...
+```
+
+For a per-call escape valve:
+
+```python
+response = inference.chat.completions.create(
+    model="...",
+    messages=[...],
+    extra_body={"kovaserve": {"run_id": run_id}},
+    hooks=PerCallHooks(),                                          # layer 3 — per-call
+)
+```
+
+All three layers fire on every event in registration order:
+
+1. Client default hooks (broadest scope).
+2. Decorator-scoped hooks.
+3. Per-call hooks (narrowest scope).
+
+This matches Temporal's interceptor-chain shape and LangChain's `CallbackManager` semantics — multiple registered handlers all fire, none short-circuits the others. The alternative — override semantics where one hooks instance replaces another — was rejected because `KovaMiddleware` is a hooks instance internally, and per-call debug hooks would silently lose the adapter's behaviour.
+
+## Inheritable propagation
+
+Hooks have an `inheritable` class attribute that controls whether they propagate to nested operations:
+
+| Layer | Default | Effect |
+|---|---|---|
+| Client default | `inheritable = True` | Propagates to every Run / Step / ModelCall under the client. |
+| Decorator-scoped | `inheritable = True` | Propagates to every nested decorator and inference call. |
+| Per-call | `inheritable = False` | Fires only for this one call; not inherited by nested operations. |
+
+Set `inheritable = False` on a subclass to scope a hooks instance to exactly one layer:
+
+```python
+class OneShotHooks(RunHooks):
+    inheritable = False        # do not propagate to nested @kova.step or model calls
+
+    def on_run_state_change(self, old, new):
+        print(f"run state: {old} → {new}")
+```
+
+The flag is most useful for debug-style hooks that you want active for *one* operation without affecting child operations.
+
+## `RunHooks.compose`
+
+To combine multiple hooks instances explicitly without registering them at different layers, use `RunHooks.compose`:
+
+```python
+combined = RunHooks.compose(MetricsHooks(), DebugHooks(), AlertHooks())
+
+@kova.run(project="...", hooks=combined)
+def review_pr(...):
+    ...
+```
+
+`compose` returns a meta-hooks that fans every event to its constituents in order. Composed hooks behave as a single instance for `inheritable` propagation — set `combined.inheritable = False` to scope the whole bundle.
+
+## Common patterns
+
+### Metrics
+
+```python
+class PrometheusHooks(RunHooks):
+    def on_model_call_complete(self, call):
+        TOKENS.labels(model=call.model_id).inc(call.completion_tokens)
+        COST_CENTS.labels(model=call.model_id).inc(float(call.cost_cents))
+
+    def on_budget_warning(self, decision):
+        BUDGET_WARNINGS.labels(project=decision.project_id).inc()
+```
+
+### Conditional Checkpoint
+
+```python
+class AutoCheckpointHooks(RunHooks):
+    def __init__(self, client):
+        self.client = client
+
+    def on_budget_warning(self, decision):
+        # capture a Checkpoint right at the warning boundary
+        self.client.checkpoints.create(
+            run_id=decision.run_id,
+            trigger="on_budget_warning",
+        )
+```
+
+### Adapter-internal hooks
+
+Every framework adapter ships a `RunHooks` subclass internally. For example:
+
+```python
+from kovaserve.adapters.openai_agents import KovaRunHooks
+
+# KovaRunHooks subclasses RunHooks; OpenAI Agents SDK calls into the SDK protocol,
+# the hook fans out to KovaServe state on each on_x event.
+agent = openai_agents.Agent(..., hooks=KovaRunHooks(client=ks_client))
+```
+
+Adapters are described in [framework adapters](/docs/sdk/adapters).
+
+## Async parallel
+
+```python
+import asyncio
+from kovaserve import AsyncKovaControlClient, kova, RunHooks
+
+class AsyncMetricsHooks(RunHooks):
+    async def on_model_call_complete(self, call):
+        await tokens_counter.aincr(call.completion_tokens)
+
+@kova.run(project="proj_review_bot", model="...", hooks=AsyncMetricsHooks())
+async def review_pr(...):
+    ...
+```
+
+The SDK detects sync vs async hook methods at call time. A sync method on an async client fires on the executor; an async method on a sync client raises `RunHooksError` at registration time.
+
+## Where to go next
+
+<Cards>
+  <Card title="Decorators" href="/docs/sdk/decorators" description="The contexts that pass `hooks=` through to the SDK." />
+  <Card title="Framework adapters" href="/docs/sdk/adapters" description="Every adapter is a `RunHooks` subclass internally." />
+  <Card title="Events" href="/docs/sdk/control/events" description="The on-the-wire alternative — server-side event streams." />
+  <Card title="Decorators composition" href="/docs/sdk/decorators/composition" description="How hooks fold into the decorator stack." />
+</Cards>
+
+## See also
+
+- [`@kova.run`](/docs/sdk/decorators/run) · [`@kova.budget`](/docs/sdk/decorators/budget) · [`@kova.step`](/docs/sdk/decorators/step) · [`@kova.checkpoint`](/docs/sdk/decorators/checkpoint)
+- [LangGraph adapter](/docs/sdk/adapters/langgraph) — `KovaMiddleware` is a `RunHooks` subclass
+- [OpenAI Agents SDK adapter](/docs/sdk/adapters/openai-agents) — `KovaRunHooks` directly implements the OpenAI Agents shape

@@ -1,0 +1,126 @@
+---
+title: Multi-step runs
+description: Compose tool calls, reasoning steps, and model calls into one durable run with full attribution. Use `@kova.tool`, `@kova.think`, `@kova.observe` to mark step types.
+---
+
+A multi-step Run is the canonical shape for non-trivial agents — a sequence of tool calls, reasoning steps, and model calls bound to one durable execution objective. KovaServe records each step explicitly so the timeline, cost attribution, and audit trail reflect the agent's actual work.
+
+```python
+from kovaserve import OpenAI, kova
+
+inference = OpenAI()
+
+@kova.run(project="proj_review_bot", model="meta-llama/Llama-3-70B-Instruct")
+def review_pr(pr_url: str) -> str:
+    @kova.tool(name="fetch_pr")
+    def fetch():
+        return github.get_pr(pr_url)
+
+    @kova.tool(name="run_tests")
+    def test(branch):
+        return ci.run_tests(branch)
+
+    @kova.think(name="plan_review")
+    def plan(pr, tests):
+        response = inference.chat.completions.create(
+            model="meta-llama/Llama-3-70B-Instruct",
+            messages=[{"role": "user", "content": f"Plan a review of {pr} with tests {tests}"}],
+        )
+        return response.choices[0].message.content
+
+    pr = fetch()
+    tests = test(pr.head)
+    plan_text = plan(pr, tests)
+
+    final = inference.chat.completions.create(
+        model="meta-llama/Llama-3-70B-Instruct",
+        messages=[{"role": "user", "content": f"Following this plan:\n{plan_text}\nWrite the review."}],
+    )
+    return final.choices[0].message.content
+```
+
+## The step decorator aliases
+
+| Alias | Step type | When to use |
+|---|---|---|
+| `@kova.tool` | `TOOL_EXECUTE` | Wrapping a function that executes an external action. |
+| `@kova.observe` | `OBSERVE` | Wrapping a function that records state without executing. |
+| `@kova.think` | `THINK` | Wrapping a function that does internal reasoning (with or without a model call). |
+| `@kova.compact` | `COMPACT` | Wrapping a function that compacts context — typically paired with the [CompactionClient](/docs/sdk/primitives/compaction-client). |
+
+For step types outside the four aliases — `FILE_READ`, `FILE_WRITE`, `PROCESS_START`, etc. — use the explicit `@kova.step(type="FILE_WRITE", name=...)` form. Auto-detection from function name fails silently on rename; the explicit form is the safe default.
+
+## Step nesting
+
+The decorator maintains a step stack via `contextvars`. Any chat completion issued from inside a `@kova.tool` / `@kova.think` body reads the top of the stack and writes `parent_step_id` on the resulting `MODEL_CALL` step:
+
+```python
+@kova.think(name="reason_about_diff")
+def reason(diff):
+    response = inference.chat.completions.create(
+        model="meta-llama/Llama-3-70B-Instruct",
+        messages=[{"role": "user", "content": f"Analyze {diff}"}],
+    )
+    # The MODEL_CALL step that wraps this completion has parent_step_id = the THINK step.
+    return response.choices[0].message.content
+```
+
+The timeline reconstructs the tree:
+
+```
+Run 01J...
+├─ Step 1  TOOL_EXECUTE  SUCCEEDED  (fetch_pr)
+├─ Step 2  TOOL_EXECUTE  SUCCEEDED  (run_tests)
+├─ Step 3  THINK          SUCCEEDED  (plan_review)
+│  └─ Step 4  MODEL_CALL   SUCCEEDED  $0.0420   ← nested under THINK
+└─ Step 5  MODEL_CALL     SUCCEEDED  $0.0510   ← top-level, not under any tool
+```
+
+## Parallel steps under one parent
+
+For agents that fan out work — e.g., a `TOOL_PLAN` that dispatches multiple `TOOL_EXECUTE` siblings — wrap the parent and let children run inside `asyncio.gather`:
+
+```python
+@kova.step(type="TOOL_PLAN", name="parallel_analysis")
+async def plan(pr):
+    @kova.tool(name="analyze_security")
+    async def security(): ...
+
+    @kova.tool(name="analyze_perf")
+    async def perf(): ...
+
+    @kova.tool(name="analyze_style")
+    async def style(): ...
+
+    results = await asyncio.gather(security(), perf(), style())
+    return results
+```
+
+Each task's `contextvars` are independent, so the three child `TOOL_EXECUTE` steps all see the `TOOL_PLAN` as their parent without cross-talk.
+
+## Reading the timeline
+
+```bash
+kova runs get 01J8X9Y2Z3K4M5N6P7Q8R9S0T1 --expand steps.model_calls
+```
+
+The timeline renders the full tree, with model-call costs nested under their tool/think parents. Use the run-explorer view in the portal for an interactive tree.
+
+## When to mark steps explicitly
+
+Mark a step when:
+
+- You want it visible in the timeline as its own row.
+- You want cost attributed to a specific tool / phase, not lumped under the surrounding model call.
+- You want `parent_step_id` to populate on nested model calls for richer trace shape.
+
+You **don't** need to mark every function — top-level model calls inside a `@kova.run` body get a default `MODEL_CALL` step automatically. Explicit step marking is for the boundaries the timeline should highlight.
+
+## Where to go next
+
+<Cards>
+  <Card title="Branching from a checkpoint" href="/docs/guides/authoring-runs/branching-from-checkpoint" description="Try a different prompt from the same state." />
+  <Card title="Resuming after failure" href="/docs/guides/authoring-runs/resuming-after-failure" description="Failure-resilient agents." />
+  <Card title="Reading run timelines" href="/docs/guides/observability/reading-run-timelines" description="The timeline is your default observability surface." />
+  <Card title="`@kova.step`" href="/docs/sdk/decorators/step" description="Full decorator reference." />
+</Cards>

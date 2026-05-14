@@ -1,0 +1,214 @@
+---
+title: Tenancy
+description: The `client.tenancy` namespace — manage Tenants, Projects, Environments, and Bearer Keys. The hierarchy is `Tenant → Project → Environment → Deployment`; Keys are an orthogonal credential surface.
+---
+
+The `client.tenancy` namespace operates on the four-level hierarchy that scopes every resource in KovaServe: **Tenant → Project → Environment → Deployment**. Bearer Keys are the orthogonal credential surface — every key binds to a `(tenant, project, environment)` triple, and every API call resolves through that binding. Keys are not a level in the hierarchy; they are the way callers prove which level they are operating in.
+
+```python
+from kovaserve import KovaControlClient
+
+client = KovaControlClient()
+
+# Read the Tenant the API key belongs to
+tenant = client.tenancy.tenants.get()
+print(tenant.id, tenant.name)
+
+# Create a Project under that Tenant
+project = client.tenancy.projects.create(name="proj_review_bot")
+
+# Add an Environment to the Project
+env = client.tenancy.environments.create(project_id=project.id, name="prod")
+
+# Issue a Bearer Key bound to (tenant, project, environment)
+key = client.tenancy.keys.create(
+    project_id=project.id,
+    environment_id=env.id,
+    name="ci-runner",
+)
+print(key.raw)        # displayed exactly once; never recoverable
+```
+
+## Sub-namespaces
+
+The namespace fans out into four sub-namespaces, one per hierarchy level (plus Keys):
+
+| Sub-namespace | Operations |
+|---|---|
+| [`client.tenancy.tenants`](#tenants) | `get`, `update` |
+| [`client.tenancy.projects`](#projects) | `create`, `get`, `list`, `update`, `archive` |
+| [`client.tenancy.environments`](#environments) | `create`, `get`, `list` |
+| [`client.tenancy.keys`](#keys) | `create`, `get`, `list`, `rotate`, `revoke` |
+
+Deployment is a fourth level on the hierarchy but is owned by operators, not application code — Deployment binding happens at cluster provision time, surfaces through `client.cluster.nodes`, and is not directly mutable via the tenancy namespace.
+
+## Tenants
+
+The Tenant is the billing root. Every resource — Project, Environment, Run, Session, Budget, Checkpoint, ContextManifest, ContextArtifact — chains back to exactly one Tenant. A single API key always resolves to exactly one Tenant; cross-Tenant operations are not possible from one key.
+
+```python
+tenant = client.tenancy.tenants.get()
+print(tenant.id, tenant.name, tenant.created_at)
+```
+
+`get` returns the Tenant the API key belongs to. Passing a different Tenant ID requires operator privileges and returns `403` for ordinary keys. Updating a Tenant (display name, contact, default retention policy) requires admin scope:
+
+```python
+tenant = client.tenancy.tenants.update(name="Acme Co")
+```
+
+## Projects
+
+The Project is the logical app boundary. Independent Projects have independent keys, members, limits, usage, and cache scope. Most usage is bounded by `(tenant, project)`.
+
+```python
+project = client.tenancy.projects.create(
+    name="proj_review_bot",
+    display_name="Review Bot",
+    default_budget={"cost_limit_cents": "100.0000", "token_limit": 1_000_000},
+    default_context_budget={"active_token_limit": 8000, "offload_required_threshold": 0.80},
+    default_policy={"context_share_scope": "project", "data_boundary": "default"},
+)
+
+print(project.id, project.created_at)
+```
+
+`default_budget`, `default_context_budget`, and `default_policy` set the templates inherited by Runs created in the Project. They can be overridden per Run via the inference extension envelope or by explicit `client.budgets.create(...)` calls.
+
+Fetch, list, update, archive:
+
+```python
+project = client.tenancy.projects.get("proj_review_bot")
+
+for p in client.tenancy.projects.list():
+    print(p.id, p.display_name, p.created_at)
+
+project = client.tenancy.projects.update("proj_review_bot", display_name="Review Bot 2.0")
+
+client.tenancy.projects.archive("proj_review_bot")   # soft archive; rows preserved for audit
+```
+
+Archiving a Project prevents new Runs from being created but does not delete the historical data — usage records, manifests, checkpoints, and events stay queryable.
+
+## Environments
+
+An Environment is metadata distinguishing prod / staging / dev (or any other axis). It binds Bearer Keys to a subset of a Project so a key intended for staging cannot accidentally execute against production resources.
+
+```python
+env = client.tenancy.environments.create(
+    project_id="proj_review_bot",
+    name="prod",                                  # human-readable identifier within the Project
+    description="Production traffic",
+    deployment_id="01J8X9Y2Z3K4M5N6P7Q8R9DP02",   # optional — bind to a specific fleet
+)
+
+print(env.id, env.name)
+```
+
+`deployment_id` ties the Environment to a substrate placement / fleet binding when the cluster has multiple Deployments. For a single-Deployment cluster, leave it unset and the SDK resolves to the cluster's default Deployment.
+
+Fetch and list:
+
+```python
+env = client.tenancy.environments.get("01J8X9Y2Z3K4M5N6P7Q8R9EN03")
+
+for e in client.tenancy.environments.list(project_id="proj_review_bot"):
+    print(e.name, e.deployment_id)
+```
+
+Environments are not archived in the same way Projects are — they have no independent lifecycle. To retire an Environment, revoke all keys bound to it; future calls with no matching key cannot reach it.
+
+## Bearer Keys
+
+Bearer Keys are the orthogonal credential surface. A Key binds to a `(tenant, project, environment)` triple and authenticates every request. Keys are **not** a hierarchy level — a single Project can have many Keys, and a Key cannot span Projects.
+
+```python
+key = client.tenancy.keys.create(
+    project_id="proj_review_bot",
+    environment_id="01J8X9Y2Z3K4M5N6P7Q8R9EN03",
+    name="ci-runner",                            # human-readable identifier
+    role="write",                                 # "admin" | "write" | "read" | "inference"
+    rate_limit_rpm=600,                          # optional per-key rate ceiling
+    rate_limit_tpm=60_000,                       # optional per-key token-per-minute ceiling
+    expires_at="2027-01-01T00:00:00Z",            # optional explicit expiry
+)
+
+print(key.id, key.fingerprint, key.raw)
+# IMPORTANT: key.raw is displayed exactly once. Store it now.
+```
+
+The `raw` field — the actual bearer token — is **displayed once, on the create response**, and never returned again. The SDK does not cache it. Subsequent reads via `get` or `list` return only the metadata (id, name, fingerprint, scope, role, dates, last-used timestamp), never the raw key.
+
+If you lose the raw value, rotate the key:
+
+```python
+new = client.tenancy.keys.rotate("01J8X9Y2Z3K4M5N6P7Q8R9KY04")
+print(new.raw)               # new bearer; the old one is revoked
+```
+
+Rotation atomically issues a new key and revokes the old one. Callers using the old key receive `401 invalid_api_key` on their next request.
+
+Revoke explicitly to invalidate a key without issuing a replacement:
+
+```python
+client.tenancy.keys.revoke("01J8X9Y2Z3K4M5N6P7Q8R9KY04")
+```
+
+Fetch and list:
+
+```python
+key = client.tenancy.keys.get("01J8X9Y2Z3K4M5N6P7Q8R9KY04")
+
+for k in client.tenancy.keys.list(project_id="proj_review_bot"):
+    print(k.id, k.name, k.role, k.last_used_at, k.expires_at)
+```
+
+### Roles
+
+A Key carries one of four roles. The role controls which operations the Key can perform:
+
+| Role | Can do |
+|---|---|
+| `admin` | All operations, including Tenant updates, Project create/archive, Key issuance, operator-scope cluster reads. |
+| `write` | Create / update / cancel Runs, Sessions, Budgets, Checkpoints, Handles. Read everything in scope. |
+| `read` | Read-only across the scope. Cannot create or modify resources. |
+| `inference` | Issue chat completions and create the implicit Runs/Sessions they imply. Cannot read or modify other resources. |
+
+The `inference` role is the right key to hand to an application that needs to call the model but should not introspect the control plane. The `write` role is the right key for a CI runner or an orchestrator that creates Runs explicitly. The `admin` role should be scoped narrowly — typically held by automation that provisions Projects and Keys, not by application code.
+
+### The credential file separation
+
+The CLI reads `~/.config/kova/credentials` (a TOML file with `[default]`, `[staging]`, etc. profiles). The Python SDK does **not** read this file — the SDK reads `KOVASERVE_API_KEY` from the environment, or accepts an explicit `api_key=...` kwarg. The separation keeps tests reproducible: a Python test process always passes its key explicitly or has the env var set; it does not pick up a developer's CLI credentials accidentally.
+
+## Async parallel
+
+```python
+import asyncio
+from kovaserve import AsyncKovaControlClient
+
+async def main() -> None:
+    client = AsyncKovaControlClient()
+    project = await client.tenancy.projects.create(name="proj_review_bot")
+    key = await client.tenancy.keys.create(
+        project_id=project.id,
+        environment_id=None,
+        name="ci-runner",
+        role="write",
+    )
+
+asyncio.run(main())
+```
+
+## Where to go next
+
+<Cards>
+  <Card title="Configuration" href="/docs/sdk/configuration" description="Where the SDK reads `KOVASERVE_API_KEY` and how to override it." />
+  <Card title="Authentication" href="/docs/api/using-the-api/authentication" description="The wire-level bearer-key contract." />
+  <Card title="Tenancy concept" href="/docs/concepts/tenancy" description="The hierarchy in depth." />
+  <Card title="PolicyScope" href="/docs/concepts/policy/policy-scopes" description="How `(tenant, project, environment)` resolves to a governance binding." />
+</Cards>
+
+## See also
+
+- [Tenants](/docs/concepts/tenancy/tenants) · [Projects](/docs/concepts/tenancy/projects) · [Environments](/docs/concepts/tenancy/environments) · [Keys](/docs/concepts/tenancy/keys)
+- [API: Tenancy](/docs/api/tenancy/projects/create) — the wire surface

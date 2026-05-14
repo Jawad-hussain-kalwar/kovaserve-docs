@@ -1,0 +1,118 @@
+---
+title: Managed vs private
+description: Managed cloud and private / sovereign deployments share one semantic model. Same canonical entities, same SDK, same API surface — only the operations differ.
+---
+
+KovaServe runs in two modes: **managed cloud** (`api.kovaserve.com`) and **private / sovereign deployment** (your own infrastructure). The two share exactly one semantic model — a managed run means the same thing in both, every canonical entity has the same shape, and the SDK and CLI work identically.
+
+## At a glance
+
+| Aspect | Managed cloud | Private deployment |
+|---|---|---|
+| Where it runs | `api.kovaserve.com` | Your Kubernetes cluster, neocloud, or sovereign infrastructure. |
+| Who operates it | KovaServe. | You (or your platform team). |
+| Multi-tenant | Yes — logical isolation between tenants. | Single-tenant or multi-tenant; you choose. |
+| Object storage | Bundled MinIO. | Customer-supplied S3-compatible service. |
+| Configuration | None — sign up and start. | Helm chart + your infrastructure. |
+| Customer data | Stays within KovaServe's regions per your `data_boundary` setting. | Stays inside your perimeter. |
+
+The semantics — runs, sessions, budgets, checkpoints, context manifests, state handles, policies — are **identical**. Code written against managed cloud runs against a private deployment without modification.
+
+## Managed cloud
+
+Best fit when:
+
+- You're an **AI-native SaaS team** building agentic products and want the execution foundation without operating it yourself.
+- You're piloting KovaServe before committing to a deployment.
+- You don't have a strict data-residency requirement.
+
+Set up:
+
+```bash
+# Sign up at https://kovaserve.com
+# Create your first project in the portal
+# Issue a key
+export KOVASERVE_API_KEY=ks_live_...
+pip install kovaserve
+```
+
+From here every command in the docs works against managed cloud. You're done.
+
+## Private / sovereign deployment
+
+Best fit when:
+
+- You're a **neocloud or sovereign AI platform** packaging managed-agent SKUs (CodeRuns, OpsRuns, DocRuns) on top of your GPU capacity.
+- You're a **regulated enterprise** deploying agents on private infrastructure with policy, audit, and data-residency requirements.
+- Your customers require execution inside their controlled infrastructure.
+
+Set up uses Helm:
+
+```bash
+helm repo add kovaserve https://charts.kovaserve.com
+helm install kovaserve kovaserve/kovaserve \
+    --namespace kovaserve \
+    --create-namespace \
+    --set objectStorage.endpoint=https://s3.your-org.internal \
+    --set objectStorage.bucket=ks-context-artifacts \
+    --values ./your-values.yaml
+```
+
+See [self-hosting on Kubernetes](/docs/guides/deployment/self-hosting-kubernetes) for the full install guide, including:
+
+- vLLM-backed GPU nodes
+- Customer-supplied S3-compatible storage
+- TLS termination
+- Tenant provisioning
+- Operator-scope key issuance
+
+## What's the same
+
+Every aspect of the developer surface:
+
+- **Same canonical entities.** Run, Session, Step, ModelCall, ContextManifest, Checkpoint, StateHandle, Budget, ContextBudget, PolicyScope. Every entity has the same shape.
+- **Same SDK.** `from kovaserve import OpenAI, KovaControlClient, kova` works identically.
+- **Same CLI.** Every `kova` subcommand works identically.
+- **Same API.** Both `/v1/chat/completions` and `/v1/ks/*` are wire-identical.
+- **Same OpenTelemetry shape.** Spans, events, and traces flow the same way.
+- **Same cost identity.** `gross - savings = net` holds exactly in both.
+
+## What differs
+
+Only the **operations**:
+
+- Backups, scaling, and disaster recovery are operated by KovaServe in managed cloud; by you in private.
+- Capacity decisions (more GPUs, more nodes, larger fleets) are KovaServe-managed in cloud; you provision in private.
+- Failure recovery and on-call rotation are KovaServe-managed in cloud; your platform team in private.
+
+Code does not change. SDK does not change. CLI does not change. Concepts do not change.
+
+## Migrating between them
+
+You can run the same agent against managed cloud during development and switch to private deployment for production by changing one environment variable:
+
+```bash
+# Development — managed cloud
+export KOVASERVE_BASE_URL=https://api.kovaserve.com/v1
+export KOVASERVE_API_KEY=ks_test_...
+
+# Production — private deployment
+export KOVASERVE_BASE_URL=https://kovaserve.internal/v1
+export KOVASERVE_API_KEY=ks_live_...
+```
+
+Application code does not change. Run history does not migrate automatically — but every Run's canonical shape is identical on both sides, so a replay of an export-imported `usage_records` JSONL is a 1:1 audit even across deployment modes.
+
+## Where to go next
+
+<Cards>
+  <Card title="Your first managed run" href="/docs/quickstart/first-run" description="Run something end-to-end now." />
+  <Card title="Self-hosting on Kubernetes" href="/docs/guides/deployment/self-hosting-kubernetes" description="Private deployment install." />
+  <Card title="Sovereign deployment" href="/docs/guides/deployment/sovereign-deployment" description="Data boundaries and regional setup." />
+  <Card title="Tenancy" href="/docs/concepts/tenancy" description="Tenant / Project / Environment / Deployment hierarchy." />
+</Cards>
+
+## See also
+
+- [Managed cloud concept](/docs/concepts/deployment/managed-cloud)
+- [Private deployment concept](/docs/concepts/deployment/private-deployment)

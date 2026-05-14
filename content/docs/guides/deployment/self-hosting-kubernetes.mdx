@@ -1,0 +1,155 @@
+---
+title: Self-hosting on Kubernetes
+description: Install KovaServe on your own Kubernetes cluster with Helm. Run the control plane alongside vLLM-backed GPU nodes; use your own S3-compatible storage; identical semantics to managed cloud.
+---
+
+KovaServe self-hosts on Kubernetes with the official Helm chart. The control plane runs alongside vLLM-backed GPU nodes; object storage is customer-supplied; semantics are identical to managed cloud. This is the deployment path for neoclouds, sovereign AI platforms, and enterprises that need execution inside their own perimeter.
+
+## Prerequisites
+
+- A Kubernetes cluster (k3s, EKS, GKE, OpenShift, anything ≥ 1.28).
+- GPU nodes with NVIDIA drivers + the device plugin.
+- An S3-compatible object store — bundled MinIO works for evaluation; bring your own for production.
+- A managed PostgreSQL instance (or run the bundled chart for dev).
+- TLS certs for the gateway.
+
+## Install
+
+```bash
+helm repo add kovaserve https://charts.kovaserve.com
+helm repo update
+
+helm install kovaserve kovaserve/kovaserve \
+    --namespace kovaserve \
+    --create-namespace \
+    --values ./values.yaml
+```
+
+A minimal `values.yaml`:
+
+```yaml
+gateway:
+  hostname: kovaserve.your-org.internal
+  tls:
+    secretName: kovaserve-tls
+
+postgres:
+  host: postgres.your-org.internal
+  database: kovaserve
+  username: kovaserve
+  passwordSecretName: kovaserve-postgres
+
+objectStorage:
+  endpoint: https://s3.your-org.internal
+  bucket: ks-context-artifacts
+  region: eu-west-1
+  accessKeySecretName: kovaserve-s3
+
+inference:
+  nodes:
+    - name: node-1
+      model: meta-llama/Llama-3-70B-Instruct
+      gpu: A100-80GB
+      quantization: fp8
+      tensor_parallel: 2
+
+cluster:
+  fleets:
+    - name: prod-fleet
+      nodes: [node-1, node-2, node-3]
+    - name: staging-fleet
+      nodes: [node-4]
+```
+
+The chart installs:
+
+- Gateway (FastAPI / control plane).
+- Node Agent (one per GPU node).
+- PostgreSQL (or external).
+- NATS JetStream.
+- MinIO (or external S3).
+- Prometheus + Grafana for observability.
+
+## Verify
+
+```bash
+kubectl -n kovaserve get pods
+# All pods Running, gateway accepting traffic
+
+kubectl -n kovaserve port-forward svc/kovaserve-gateway 8080:80
+
+curl http://localhost:8080/health
+# {"status": "ok"}
+```
+
+## Bootstrap a tenant
+
+Bootstrap the first Tenant by setting `KOVASERVE_BOOTSTRAP_KEY` in the Helm values. The gateway provisions an initial Tenant and an admin-scope key on first startup:
+
+```yaml
+# values.yaml
+bootstrap:
+  enabled: true
+  apiKey: ks_live_...             # generate a fresh value; this is the admin key
+  tenantName: "Acme Co"
+  projectName: "Default"
+  environmentName: "prod"
+```
+
+`helm upgrade` to re-apply, then use the key for `kova auth login`. The bootstrap key is the only admin-scope key issued automatically — provision narrower keys for application traffic via [`kova keys create`](/docs/cli/keys/create).
+
+## Multi-region buckets
+
+For data-residency:
+
+```yaml
+objectStorage:
+  buckets:
+    default: ks-context-artifacts
+    eu_only: ks-context-artifacts-eu
+    us_only: ks-context-artifacts-us
+```
+
+The PolicyScope `data_boundary` field selects which bucket artifacts route to. See [policy scopes](/docs/guides/policy/policy-scopes).
+
+## Hot-patch deploys
+
+```bash
+helm upgrade kovaserve kovaserve/kovaserve \
+    --namespace kovaserve \
+    --reuse-values \
+    --set image.tag=<new-version>
+
+kubectl -n kovaserve rollout restart deployment kovaserve-gateway
+```
+
+The chart supports zero-downtime rolling updates of the gateway. Node Agents update independently per fleet.
+
+## Upgrade path
+
+Each KovaServe release ships with a `helm upgrade` path:
+
+```bash
+helm repo update
+helm upgrade kovaserve kovaserve/kovaserve -n kovaserve
+```
+
+Database migrations apply automatically on first gateway pod startup after the upgrade. The migration is idempotent; partial rollouts during the apply window are safe.
+
+## Observability
+
+Grafana dashboards ship with the chart:
+
+```bash
+kubectl -n kovaserve port-forward svc/kovaserve-grafana 3000:80
+```
+
+Default dashboards cover run rate, cost per completed run, cache hit ratio, queue depth, HBM pressure, KV occupancy, p50/p99 latency.
+
+## Where to go next
+
+<Cards>
+  <Card title="Sovereign deployment" href="/docs/guides/deployment/sovereign-deployment" description="Data boundaries and regional setup." />
+  <Card title="BYO runtime integration" href="/docs/guides/deployment/byo-runtime-integration" description="Run LangGraph / Temporal / custom under your self-hosted cluster." />
+  <Card title="Managed vs private" href="/docs/quickstart/managed-vs-private" description="When to self-host vs use managed cloud." />
+</Cards>

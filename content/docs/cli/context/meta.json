@@ -1,0 +1,9 @@
+{
+  "title": "context",
+  "pages": [
+    "manifests",
+    "segments",
+    "artifacts",
+    "budgets"
+  ]
+}

@@ -1,0 +1,65 @@
+---
+title: "`kova context segments`"
+description: Fetch individual ContextSegments — the typed fragments that compose a ContextManifest.
+---
+
+Fetch individual [ContextSegments](/docs/concepts/context/context-segments). Segments are immutable artifacts of manifest assembly; this command is read-only.
+
+## Subcommand
+
+| Subcommand | What it does |
+|---|---|
+| `kova context segments get <ID>` | Fetch one segment with its body (inline) or artifact reference (offloaded). |
+
+To list segments belonging to a manifest, use `kova context manifests get <ID> --expand segments` — segments are most usefully addressed through the parent manifest.
+
+## Options
+
+| Option | Meaning |
+|---|---|
+| `--json` | Emit the segment as one JSON document. |
+| `--show-body` | For inline segments, print the full body. Default truncates at 2 KB. |
+
+## Examples
+
+```bash
+kova context segments get 01J8X9Y2Z3K4M5N6P7Q8R9SSG12
+
+# Full body for inline segment
+kova context segments get 01J... --show-body
+
+# JSON
+kova context segments get 01J... --json | jq '{type: .context_type, class: .memory_class}'
+```
+
+## Output
+
+```
+Segment 01J8X9Y2Z3K4M5N6P7Q8R9SSG12
+Context type:        session_history
+Memory class:        durable
+Source:              ContextBuilder
+Digest:              sha256:b3f7a9c...
+Token count:         1500
+Byte count:          5829
+Stable prefix part:  yes
+Checkpoint relevant: yes
+Scope:               proj_review_bot
+Created:             2026-05-15T11:42:01Z
+
+Content (truncated; use --show-body for full)
+─────────────────────────────────────────────────────────────────────
+User: Review PR #42
+Assistant: I'll examine the diff first. The PR makes three changes:
+1. Adds a new utility function in src/utils.py
+2. Refactors the existing authentication middleware
+... (1419 more characters; use --show-body)
+```
+
+For offloaded segments (`artifact_ref_id` populated), only the `preview` text is included — the body lives in object storage and is fetched separately via `kova context artifacts get <ID>`.
+
+## See also
+
+- [`kova context manifests get`](/docs/cli/context/manifests) — list segments through their parent
+- [`kova context artifacts get`](/docs/cli/context/artifacts) — resolve offloaded segment bodies
+- [`client.context.segments.get`](/docs/sdk/control/context-segments) — the SDK equivalent

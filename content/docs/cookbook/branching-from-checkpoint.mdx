@@ -1,0 +1,131 @@
+---
+title: Branching from a checkpoint
+description: Capture a checkpoint at a known decision point, branch into multiple child runs with different prompts, and compare outcomes. The pattern for what-if analysis on a managed agent.
+---
+
+A checkpoint plus a branch is the cleanest way to do **what-if analysis** on a managed agent. Capture the state at the decision point you want to explore, then issue N branches with different inputs. The original run stays untouched; each branch produces a comparable outcome from identical starting context.
+
+```python
+from kovaserve import OpenAI, KovaControlClient, kova
+from kovaserve.context import ContextBuilder
+
+inference = OpenAI()
+ks = KovaControlClient()
+
+@kova.run(project="proj_research", model="meta-llama/Llama-3-70B-Instruct")
+def explore_design():
+    @kova.checkpoint(trigger="after_stable_analysis", capture_on_entry=False, capture_on_exit=True)
+    def reach_decision_point():
+        # Long analysis phase — once complete, checkpoint
+        ctx = build_research_context()
+        return ctx
+
+    decision_state = reach_decision_point()
+    print("Reached decision point; checkpoint captured.")
+    return decision_state
+
+# Run the parent — produces one checkpoint at the decision point
+parent_run = ks.runs.create(project_id="proj_research", model="meta-llama/Llama-3-70B-Instruct")
+explore_design()
+
+# Find the captured checkpoint
+checkpoint = list(ks.checkpoints.list(
+    run_id=parent_run.id,
+    trigger="after_stable_analysis",
+    order="desc",
+    limit=1,
+))[0]
+
+# Branch into three alternatives
+strategies = [
+    "Optimize for cost",
+    "Optimize for latency",
+    "Optimize for quality",
+]
+children = []
+for strategy in strategies:
+    child = ks.runs.branch(
+        parent_run.id,
+        from_checkpoint_id=checkpoint.id,
+        project_id="proj_research",
+        task_override=strategy,
+    )
+    children.append(child)
+    # Each child inherits the parent's logical context — same starting state, different task
+```
+
+## What the branches inherit
+
+Every child run starts with:
+
+- The parent's frozen ContextManifest at checkpoint time.
+- The same segments, the same scope, the same model identity.
+- The same artifact references.
+- A `kv_prefix` StateHandle when KV export is available (warm restart).
+- A fresh Budget (use `--budget-from-parent` on the CLI or `budget_inherit_parent=True` in the SDK to inherit a bounded copy of the parent's budget).
+
+Each child has its own `branch_from` lineage object linking back to the parent and the checkpoint:
+
+```python
+print(children[0].branch_from)
+# {'run_id': '01J8X9Y2Z3K4M5N6P7Q8R9S0T1', 'checkpoint_id': '01J...T7', 'branch_step_id': '01J...T6'}
+```
+
+## Compare the outcomes
+
+After all branches complete, compare their cost, output, and intermediate states:
+
+```python
+for child in children:
+    full = ks.runs.get(child.id, expand=["steps.model_calls"])
+    print(f"Branch '{full.metadata['task_override']}': cost=${full.total_cost_cents} steps={full.step_count}")
+```
+
+CLI:
+
+```bash
+kova runs list --branch-from 01J8X9Y2Z3K4M5N6P7Q8R9S0T1 --json | jq '.[] | {task: .metadata.task_override, cost: .total_cost_cents}'
+```
+
+## When to branch instead of resume
+
+| Goal | Tool |
+|---|---|
+| **Continue** the run from where it left off after a failure. | [`client.checkpoints.restore`](/docs/sdk/control/checkpoints) — modifies the parent. |
+| **Explore alternatives** from the same starting state. | `client.runs.branch` — creates child runs; parent unchanged. |
+
+Resume modifies the parent run. Branch creates child runs. The two are complementary; pick by intent.
+
+## Branch lineage as a tree
+
+For multi-level exploration — branch from a branch — the lineage forms a tree:
+
+```
+parent_run
+├─ branch_a (from checkpoint_a)
+├─ branch_b (from checkpoint_a)
+│   ├─ branch_b_1 (from checkpoint_b_1)
+│   └─ branch_b_2 (from checkpoint_b_1)
+└─ branch_c (from checkpoint_a)
+```
+
+Walk the tree with repeated `--branch-from` queries — the tree is finite and bounded by your checkpoint discipline.
+
+## When *not* to branch
+
+Branching has small but real cost — every branch is a new run with its own metadata, steps, and metering. Don't branch for:
+
+- Single-shot decisions where the runtime can simply re-prompt the model.
+- Cases where the alternatives don't share enough context to make starting from the same checkpoint useful.
+- Cheap A/B testing — use the same run with two separate model calls if the cost difference is negligible.
+
+Branch for: what-if analysis on a non-trivial agent run, multi-strategy exploration, scenario comparison, deliberate fanout where the lineage matters.
+
+## Where to go next
+
+<Cards>
+  <Card title="Resuming after failure" href="/docs/guides/authoring-runs/resuming-after-failure" description="The other direction — continue the parent." />
+  <Card title="Branching from a checkpoint (guide)" href="/docs/guides/authoring-runs/branching-from-checkpoint" description="Full guide." />
+  <Card title="`@kova.checkpoint`" href="/docs/sdk/decorators/checkpoint" description="The decorator that captures the checkpoint." />
+  <Card title="`client.runs.branch`" href="/docs/sdk/control/runs" description="The SDK method." />
+</Cards>

@@ -1,0 +1,62 @@
+---
+title: Quickstart
+description: Launch your first managed agent run in under ten lines. KovaServe — the Agentic Execution Cloud — turns model calls into durable, governed, cost-controlled runs.
+---
+
+**KovaServe is the Agentic Execution Cloud.** It helps neoclouds, sovereign AI platforms, and enterprises launch managed agents that run durably, recover from failure, operate under governance, and control cost across private infrastructure. The unit of value is a **completed agent run** — not a token, not a request.
+
+This Quickstart walks you from a fresh machine to a completed managed agent run in five minutes.
+
+## Pick your starting point
+
+<Cards>
+  <Card title="Install the SDK" href="/docs/quickstart/install-sdk" description="`pip install kovaserve` — the Python SDK plus the `kova` CLI." />
+  <Card title="Install the CLI" href="/docs/quickstart/install-cli" description="Same package, command-line surface." />
+  <Card title="Set your API key" href="/docs/quickstart/environment" description="`KOVASERVE_API_KEY` and base-URL configuration." />
+  <Card title="Your first managed run" href="/docs/quickstart/first-run" description="Run a managed agent end-to-end. ~10 lines of code." />
+  <Card title="Managed vs private" href="/docs/quickstart/managed-vs-private" description="Choose between managed cloud and private deployment." />
+</Cards>
+
+## What you'll have after this Quickstart
+
+- One completed managed agent run, with a full timeline of steps, model calls, and tool actions.
+- A clear view of cost per completed run — the metric that matters.
+- A budget attached to the run, with warning and hard-stop thresholds enforced.
+- An execution audit trail you can replay end-to-end.
+
+## What KovaServe does
+
+KovaServe gives production agents:
+
+- **Durable execution** — agent runs survive interruptions, failures, pauses, and resumes.
+- **Context and state control** — bounded, recoverable, governed context across long-running runs.
+- **Checkpoint recovery** — important execution points saved so failures don't restart from zero.
+- **Budget enforcement** — runs constrained by cost, time, steps, or tool count with active admission control.
+- **Tool governance** — actions allowed, restricted, or forced through policy before execution.
+- **Execution audit** — every model call, tool call, policy decision, and outcome recorded.
+- **Cost per completed run** — economics that match the business outcome.
+
+What KovaServe is **not**: an inference layer (it works with vLLM, llm-d, and managed model APIs), an agent framework (it sits beneath LangGraph, Pydantic AI, OpenAI Agents SDK, Temporal, and custom runtimes), or a context engineering platform (the runtime decides what goes in the prompt; KovaServe decides what survives, what compacts, what restores, and what counts against budget).
+
+## What this is for
+
+| You are | KovaServe gives you |
+|---|---|
+| A neocloud or sovereign AI platform | A productized way to launch managed-agent SKUs — CodeRuns, OpsRuns, DocRuns — on top of your GPU infrastructure. |
+| A regulated enterprise | A governed execution cloud for deploying agents on private infrastructure with policy, audit, and cost control. |
+| An AI-native SaaS team | The execution foundation for agentic products that need durability, governance, and cost control without rebuilding it yourself. |
+
+## Where this Quickstart leads
+
+Once you've completed a first managed run, the next steps depend on what you're building:
+
+- For **multi-step agent workflows**, read the [authoring runs](/docs/guides/authoring-runs/multi-step-runs) guide.
+- For **migrating from OpenAI**, follow the [two-line migration](/docs/guides/migration/migrating-from-openai) guide.
+- For **a private deployment**, read [self-hosting on Kubernetes](/docs/guides/deployment/self-hosting-kubernetes).
+- For **launching a managed-agent SKU on neocloud infrastructure**, see the [CodeRuns cookbook](/docs/cookbook/coding-agent).
+
+## See also
+
+- [Concepts](/docs/concepts) — the canonical entities behind managed runs
+- [SDK reference](/docs/sdk) — full client-library surface
+- [CLI reference](/docs/cli) — every subcommand

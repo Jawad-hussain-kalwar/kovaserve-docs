@@ -1,0 +1,114 @@
+---
+title: Migrating from OpenAI
+description: Change two lines. Every OpenAI feature works on KovaServe unchanged; the control plane unlocks managed agent runs, durable execution, and cost-per-completed-run economics without rewriting your application.
+---
+
+Migrating from OpenAI to KovaServe is a two-line change. Every OpenAI feature works unchanged. You add the control plane — durable runs, budget enforcement, recovery, cost per completed run — by attaching metadata to existing calls, not by rewriting them.
+
+## The two lines
+
+```python
+# Before
+from openai import OpenAI
+client = OpenAI()
+
+# After
+from kovaserve import OpenAI
+client = OpenAI()
+```
+
+Set `KOVASERVE_API_KEY` (or rely on the OpenAI key fallback). That's the entire migration. Every chat completion, streaming response, tool call, structured output, and async pattern continues to work.
+
+## What you get for free
+
+The instant you make the swap:
+
+- **Anonymous mode preserved.** Any request without a `kovaserve` extension uses the stateless inference path — wire-identical to OpenAI behaviour. Your existing code keeps working byte-for-byte.
+- **Every OpenAI feature pass-through.** Streaming, tool calls, structured outputs, async clients, file uploads, the beta namespace — the SDK is a re-export, not a fork.
+- **OpenAI exceptions preserved.** Existing `except openai.RateLimitError:` blocks continue to fire.
+
+## What you opt into next
+
+Attach a `kovaserve` extension to opt into the Agentic Execution Cloud:
+
+```python
+response = client.chat.completions.create(
+    model="meta-llama/Llama-3-70B-Instruct",
+    messages=[{"role": "user", "content": "Review PR #42"}],
+    extra_body={"kovaserve": {}},      # ← anything (even {}) opts in
+)
+```
+
+You now have:
+
+- A managed agent run with full audit.
+- Cost per completed run in response headers.
+- An execution timeline you can query, replay, and budget against.
+- Optional checkpoint and resume.
+
+## Common migration patterns
+
+### Add a budget to existing OpenAI calls
+
+```python
+response = client.chat.completions.create(
+    model="meta-llama/Llama-3-70B-Instruct",
+    messages=[...],
+    extra_body={"kovaserve": {
+        "budget_context": {"cost_limit_cents": "500.0000", "on_exceed": "hard_stop"},
+    }},
+)
+```
+
+The first call creates an auto-allocated run with the budget attached. Subsequent calls bind to the same run.
+
+### Multi-turn conversations with a Session
+
+```python
+response = client.chat.completions.create(
+    model="meta-llama/Llama-3-70B-Instruct",
+    messages=[...],
+    extra_body={"kovaserve": {
+        "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",   # carry across turns
+    }},
+)
+```
+
+The Session accumulates turn history server-side. Subsequent calls inherit cache warmth on the bound node.
+
+### Wrap a function with decorators
+
+```python
+from kovaserve import kova
+
+@kova.budget(cost_cents="500.0000")    # 500 cents = $5 hard cap
+@kova.run(project="proj_review_bot", model="meta-llama/Llama-3-70B-Instruct")
+def review_pr(pr_url: str) -> str:
+    response = client.chat.completions.create(
+        model="meta-llama/Llama-3-70B-Instruct",
+        messages=[{"role": "user", "content": f"Review {pr_url}"}],
+    )
+    return response.choices[0].message.content
+```
+
+The decorators handle run / budget lifecycle and inject the right metadata on every nested chat completion. No `extra_body` boilerplate.
+
+## What you do *not* migrate
+
+- **Application logic.** Every code path you have keeps working.
+- **OpenAI exception handling.** Existing `except openai.*` blocks remain valid.
+- **Streaming consumption code.** `for chunk in stream:` works unchanged.
+- **Tool definitions.** Function calling, tool calls, and tool-result handling are pure OpenAI shape.
+
+## Errors and edge cases
+
+`KOVASERVE_API_KEY` falls back to `OPENAI_API_KEY` on the re-export but **not** on `KovaControlClient`. If your environment has only `OPENAI_API_KEY` set, your existing OpenAI code keeps working but `KovaControlClient()` constructor fails fast — set `KOVASERVE_API_KEY` explicitly when you adopt the native client.
+
+## Where to go next
+
+<Cards>
+  <Card title="Multi-step runs" href="/docs/guides/authoring-runs/multi-step-runs" description="Add tool calls and reasoning steps with full attribution." />
+  <Card title="Reading run timelines" href="/docs/guides/observability/reading-run-timelines" description="Make the timeline view your default observability surface." />
+  <Card title="Per-run budgets" href="/docs/guides/policy/per-run-budgets" description="Active budget enforcement across cost, tokens, steps, time." />
+  <Card title="Cost per completed run" href="/docs/concepts/cost/cost-per-completed-run" description="Why this economic metric matters." />
+</Cards>

@@ -1,0 +1,8 @@
+{
+  "title": "Deployment",
+  "pages": [
+    "self-hosting-kubernetes",
+    "sovereign-deployment",
+    "byo-runtime-integration"
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "title": "CLI Reference",
+  "pages": [
+    "index",
+    "install",
+    "auth",
+    "configuration",
+    "output",
+    "runs",
+    "sessions",
+    "checkpoints",
+    "budgets",
+    "context",
+    "usage",
+    "keys",
+    "events",
+    "cluster"
+  ]
+}

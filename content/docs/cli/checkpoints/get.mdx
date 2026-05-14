@@ -1,0 +1,66 @@
+---
+title: "`kova checkpoints get`"
+description: Fetch one Checkpoint by ID. Renders the bound ContextManifest, the typed StateHandles, and the compatibility vector.
+---
+
+Fetch one [Checkpoint](/docs/concepts/recovery/checkpoints) by ID with its bound [ContextManifest](/docs/concepts/context/context-manifests), typed [StateHandles](/docs/concepts/recovery/state-handles), and compatibility vector.
+
+## Synopsis
+
+```bash
+kova checkpoints get <CHECKPOINT_ID> [OPTIONS]
+```
+
+## Options
+
+| Option | Meaning |
+|---|---|
+| `--expand <path>` | Hydrate nested resources. Valid: `context_manifest`, `context_manifest.segments`. |
+| `--json` | Emit the Checkpoint as one JSON document. |
+
+## Examples
+
+```bash
+kova checkpoints get 01J8X9Y2Z3K4M5N6P7Q8R9S0T7
+
+kova checkpoints get 01J... --expand context_manifest.segments
+
+kova checkpoints get 01J... --json | jq '.state_refs[] | {type: .ref_type, location: .location}'
+```
+
+## Output
+
+```
+Checkpoint 01J8X9Y2Z3K4M5N6P7Q8R9S0T7  VALIDATED
+Run:         01J8X9Y2Z3K4M5N6P7Q8R9S0T1
+Step:        01J8X9Y2Z3K4M5N6P7Q8R9S0T6  (TOOL_EXECUTE — write_review)
+Session:     ses_a7f3c2b8d4e1f0925a1b6c3d
+Trigger:     before_file_write
+Created:     2026-05-15T11:42:18Z
+Validated:   2026-05-15T11:42:19Z
+Size:        12.4 MB
+─────────────────────────────────────────────────────────────────────
+ContextManifest:  01J8X9Y2Z3K4M5N6P7Q8R9SCM07
+  stable_prefix_id:  sha256:9a1c…
+  stable_context_id: sha256:7e44…
+  active_tokens:     2152
+  artifact_bytes:    3 145 728
+
+State refs:
+  context_manifest  →  s3://ks-checkpoints/01J8X.../manifest.json
+  kv_prefix         →  node-3  (export complete; warm restart available)
+  artifact_bundle   →  s3://ks-checkpoints/01J8X.../artifacts.bundle
+
+Compatibility:
+  model_family:          qwen3-coder
+  tokenizer_fingerprint: sha256:9f2c…
+  renderer_version:      v3
+  quantization:          fp8
+  tensor_parallel:       2
+```
+
+## See also
+
+- [`kova checkpoints list`](/docs/cli/checkpoints/list) — list Checkpoints
+- [`kova checkpoints restore`](/docs/cli/checkpoints/restore) — restore from this Checkpoint
+- [`client.checkpoints.get`](/docs/sdk/control/checkpoints) — the SDK equivalent

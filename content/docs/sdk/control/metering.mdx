@@ -1,0 +1,237 @@
+---
+title: Metering
+description: The `client.metering` namespace — query per-Run, per-Project, and per-Tenant usage aggregates with cost and cache-savings breakdowns; export raw usage records as JSONL.
+---
+
+The `client.metering` namespace operates on usage and cost data. Every ModelCall that opts into the control plane produces a `usage_records` row attributed to the Run, Project, and Tenant — with real vLLM token counts, real `cached_tokens` accounting, and per-row pricing snapshots so historical replays return identical numbers even after a price change. The metering namespace surfaces two operations: a typed `usage` aggregate query and a streaming `export` for downstream warehousing.
+
+```python
+from kovaserve import KovaControlClient
+
+client = KovaControlClient()
+
+# Per-Run cost breakdown
+run_usage = client.metering.usage(scope="run", id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1")
+print(run_usage.total_cost_cents)
+print(run_usage.cache_savings_cents)
+print(run_usage.prompt_tokens, run_usage.completion_tokens, run_usage.cached_tokens)
+```
+
+## Methods
+
+| Method | Wire | What it does |
+|---|---|---|
+| [`usage`](#usage) | `GET /v1/ks/metering/usage` | Typed aggregate query over usage records, scoped to a Run, Project, or Tenant. |
+| [`export`](#export) | `GET /v1/ks/metering/export` | Streaming JSONL export of raw usage records for warehousing or audit. |
+
+## `usage`
+
+The `usage` method accepts a `scope` discriminator. The shape of the returned object differs by scope, and the **error semantics differ on a missing target**:
+
+| Scope | What it aggregates over | Missing-target error |
+|---|---|---|
+| `scope="run"` | One Run's ModelCalls. | Returns `404 run_not_found` when the Run ID is unknown to the caller's tenant. |
+| `scope="project"` | All Runs in a Project. | Returns `200 OK` with zeros — the Project may simply have no traffic. |
+| `scope="tenant"` | All Projects in a Tenant. | Returns `200 OK` with zeros. |
+
+The distinction matters: a `run` scope query for a Run that doesn't exist is a programming error (you have a stale or wrong ID); a `project` or `tenant` scope query for an empty target is a legitimate "no traffic yet" answer.
+
+### Per-Run usage
+
+```python
+usage = client.metering.usage(
+    scope="run",
+    id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+)
+
+print(usage.total_cost_cents)               # net cost
+print(usage.gross_cost_cents)               # gross cost before cache discount
+print(usage.cache_savings_cents)            # gross - net (identity holds exactly)
+print(usage.prompt_tokens, usage.completion_tokens, usage.cached_tokens)
+print(usage.model_call_count)
+```
+
+The returned shape:
+
+```python
+class RunUsageResponse(BaseModel):
+    run_id: str
+    project_id: str
+    tenant_id: str
+
+    # Token counts (real vLLM totals)
+    prompt_tokens: int
+    completion_tokens: int
+    cached_tokens: int
+
+    # Cost (decimal string, four fractional digits)
+    total_cost_cents: str               # net
+    gross_cost_cents: str               # before cache discount
+    cache_savings_cents: str            # gross - net
+
+    # ModelCall accounting
+    model_call_count: int
+
+    # Per-model breakdown
+    by_model: list[ModelUsage]          # [{model_id, prompt_tokens, completion_tokens, cost_cents, ...}]
+```
+
+### Per-Project usage
+
+```python
+usage = client.metering.usage(
+    scope="project",
+    id="proj_review_bot",
+    start="2026-05-01T00:00:00Z",
+    end="2026-05-15T00:00:00Z",
+)
+
+print(usage.total_cost_cents)
+print(usage.run_count)
+print(usage.cache_savings_cents)
+```
+
+A Project-scope query accepts time-window filters (`start` / `end`, ISO 8601). Without them, the query covers the Project's full lifetime — which can be expensive on heavily-trafficked Projects and is usually not what you want. Bound the window.
+
+The returned shape adds `run_count` and `by_run` breakdowns:
+
+```python
+class ProjectUsageResponse(BaseModel):
+    project_id: str
+    tenant_id: str
+    start: datetime | None
+    end: datetime | None
+
+    prompt_tokens: int
+    completion_tokens: int
+    cached_tokens: int
+    total_cost_cents: str
+    gross_cost_cents: str
+    cache_savings_cents: str
+
+    run_count: int
+    model_call_count: int
+
+    by_run: list[RunUsage]               # top N Runs by cost (N=20 default; configurable via top=)
+    by_model: list[ModelUsage]
+```
+
+### Per-Tenant usage
+
+```python
+usage = client.metering.usage(
+    scope="tenant",
+    id=None,                            # null → the caller's Tenant (resolved from API key)
+    start="2026-05-01T00:00:00Z",
+    end="2026-05-15T00:00:00Z",
+)
+```
+
+The Tenant scope accepts `id=None` and uses the API key's resolved Tenant. Cross-Tenant queries (passing a different Tenant ID) require operator privileges and return `403` for ordinary keys. The returned shape adds `project_count` and `by_project`:
+
+```python
+class TenantUsageResponse(BaseModel):
+    tenant_id: str
+    start: datetime | None
+    end: datetime | None
+
+    prompt_tokens: int
+    completion_tokens: int
+    cached_tokens: int
+    total_cost_cents: str
+    gross_cost_cents: str
+    cache_savings_cents: str
+
+    project_count: int
+    run_count: int
+    model_call_count: int
+
+    by_project: list[ProjectUsage]
+    by_model: list[ModelUsage]
+```
+
+## `export`
+
+```python
+with client.metering.export(
+    format="jsonl",
+    start="2026-05-01T00:00:00Z",
+    end="2026-05-15T00:00:00Z",
+) as stream:
+    for line in stream:
+        record = json.loads(line)
+        # one record per usage_records row
+        print(record["run_id"], record["model_id"], record["cost_cents"])
+```
+
+`export` returns a streaming JSONL response — one JSON object per `usage_records` row, with the four pricing-snapshot columns (`input_price_snapshot`, `output_price_snapshot`, `discount_snapshot`, `gross_cost_cents`) populated so each row is self-contained for audit.
+
+The export is the right path for:
+
+- **Warehousing.** Pipe the JSONL into BigQuery, Snowflake, or your usage database. Every row has the data needed to reconstruct cost without joining against the live `model_pricing` table.
+- **Audit.** Each row records the exact prices applied at call time, so historical cost remains stable across price changes.
+- **Cost analytics.** Filter and aggregate the JSONL in your own tooling.
+
+Filter and shape:
+
+```python
+with client.metering.export(
+    format="jsonl",
+    project_id="proj_review_bot",
+    run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    model_id="meta-llama/Llama-3-70B-Instruct",
+    start="2026-05-01T00:00:00Z",
+    end="2026-05-15T00:00:00Z",
+    include_anonymous=True,             # include anonymous-mode traffic (no Run binding)
+) as stream:
+    ...
+```
+
+`include_anonymous=True` is the default — anonymous-mode calls that hit the gateway without a `kovaserve` extension still produce usage records (attributed at the Tenant + Project + model level, with null `run_id`). Set to `False` to exclude them when you only want control-plane-attributed traffic.
+
+The export streams from the server with cursor pagination internally; the SDK transparently follows the cursor and yields lines until the stream ends. For large windows, prefer narrower time bounds to limit memory pressure on the consuming side.
+
+## The cost identity
+
+Every row in the export and every aggregate in the typed responses honors the **gross / net / cache savings identity**:
+
+```
+gross_cost_cents  = (prompt_tokens * input_price + completion_tokens * output_price) / 1000
+cache_savings_cents = cached_tokens * input_price * discount / 1000
+total_cost_cents (net) = gross - savings
+```
+
+The identity holds **exactly** because all three values are rounded to four fractional digits and stored as decimal strings. `gross_cost_cents - cache_savings_cents` always equals `total_cost_cents` to the last fractional digit. See [cost model](/docs/concepts/cost/cost-model) for the audit semantics.
+
+## Async parallel
+
+```python
+import asyncio
+from kovaserve import AsyncKovaControlClient
+
+async def main() -> None:
+    client = AsyncKovaControlClient()
+    usage = await client.metering.usage(scope="run", id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1")
+    print(usage.total_cost_cents)
+
+    async with client.metering.export(format="jsonl", start="2026-05-01T00:00:00Z") as stream:
+        async for line in stream:
+            ...
+
+asyncio.run(main())
+```
+
+## Where to go next
+
+<Cards>
+  <Card title="Cost and streaming" href="/docs/sdk/inference/cost-and-streaming" description="Per-call cost from headers and the final SSE chunk — the source of metering data." />
+  <Card title="Budgets" href="/docs/sdk/control/budgets" description="Active enforcement built on top of metering." />
+  <Card title="Cost model" href="/docs/concepts/cost/cost-model" description="The gross / net / cache-savings identity." />
+  <Card title="Cost per completed run" href="/docs/concepts/cost/cost-per-completed-run" description="The unit-of-value framing." />
+</Cards>
+
+## See also
+
+- [Pricing snapshots](/docs/concepts/cost/pricing-snapshots) — the per-row audit columns
+- [`cached_tokens`](/docs/concepts/routing/cached-tokens) — the canonical accounting field
+- [API: Metering usage](/docs/api/metering/usage) · [API: Metering export](/docs/api/metering/export)

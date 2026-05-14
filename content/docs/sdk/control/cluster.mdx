@@ -1,0 +1,208 @@
+---
+title: Cluster
+description: The `client.cluster` operator namespace — list nodes, look up cached prefixes in the KV Index, and inspect the Router's placement plan for a given manifest.
+---
+
+The `client.cluster` namespace is the operator surface. It exposes three read-only operations against the cluster's live state: enumerate the inference nodes, look up where a stable prefix or context identity is cached, and ask the Cache-Aware Router how it would place a hypothetical request. These operations require operator-scope API keys; ordinary keys see `403 permission_denied`.
+
+```python
+from kovaserve import KovaControlClient
+
+client = KovaControlClient()
+
+# Fleet inventory
+for node in client.cluster.nodes():
+    print(node.id, node.model_id, node.queue_depth, node.hbm_pressure)
+```
+
+## Methods
+
+| Method | Wire | What it does |
+|---|---|---|
+| [`nodes`](#nodes) | `GET /v1/ks/nodes` | List inference nodes with live health and load. |
+| [`cache_lookup`](#cache_lookup) | `GET /v1/ks/cache/lookup` | Find which nodes hold a given prefix or context identity. |
+| [`routing_plan`](#routing_plan) | `GET /v1/ks/routing/plan` | Ask the Router for the placement plan for a manifest. |
+
+## When to use this namespace
+
+The cluster namespace is for **operators and SREs**, not for application code. Application code routes through the gateway and consumes the router's output indirectly via response headers. The cluster namespace exists for the cases where an operator needs ground truth:
+
+- **Capacity planning.** Which nodes are saturated? Which have spare KV cache headroom?
+- **Cache-hit investigation.** Why is the warm path not landing where I expect? Where is this prefix actually cached?
+- **Routing audit.** Why did the router pick that node? What were the candidate scores?
+- **Incident response.** A node is misbehaving — what's resident on it? What runs depend on it?
+
+For the **same data filtered to a specific Run**, prefer the [run timeline](/docs/sdk/control/runs) and the [routing event stream](/docs/sdk/control/events) — they're tenant-scoped, don't require operator privileges, and join cleanly to execution context.
+
+## `nodes`
+
+```python
+nodes = list(client.cluster.nodes())
+for node in nodes:
+    print(f"{node.id}: model={node.model_id} qd={node.queue_depth} "
+          f"hbm={node.hbm_pressure:.0%} kv={node.kv_occupancy:.0%}")
+```
+
+The returned shape:
+
+```python
+class Node(BaseModel):
+    id: str                              # node identifier (stable across restarts)
+    model_id: str                        # which model is loaded
+    model_family: str
+    quantization: str
+    tensor_parallel: int
+
+    # Live health
+    state: NodeState                     # READY | DRAINING | UNHEALTHY | OFFLINE
+    last_heartbeat_at: datetime
+
+    # Live load
+    queue_depth: int                     # pending requests in the engine queue
+    in_flight: int                       # currently-executing requests
+    hbm_pressure: float                  # 0.0..1.0, HBM utilization
+    kv_occupancy: float                  # 0.0..1.0, KV cache fill
+    ttft_p50_ms: float                   # rolling p50 time-to-first-token
+    ttft_p99_ms: float
+
+    # Capabilities
+    placement_zone: str | None           # operator-tagged grouping
+    compatibility_vector: dict           # tokenizer fingerprint, renderer version, etc.
+```
+
+Filter and order:
+
+```python
+nodes = client.cluster.nodes(
+    model_id="meta-llama/Llama-3-70B-Instruct",   # narrow to a model
+    state="READY",                                 # only healthy nodes
+    placement_zone="us-east-1a",                   # operator-tagged zone
+)
+```
+
+`nodes` returns the full list as a paginated iterator by default. The fleet is small relative to API response size — the iterator typically completes in one or two pages.
+
+## `cache_lookup`
+
+```python
+results = client.cluster.cache_lookup(
+    stable_prefix_id="sha256:9a1c...",
+)
+for hit in results.matches:
+    print(hit.node_id, hit.tier, hit.warmness, hit.last_accessed_at)
+```
+
+Find which nodes hold a given prefix or context identity. The returned shape:
+
+```python
+class CacheLookupResponse(BaseModel):
+    query: dict                          # echo of the input
+    matches: list[CacheMatch]            # ordered by warmness, descending
+
+class CacheMatch(BaseModel):
+    node_id: str
+    tier: str                            # "hbm" | "host_ram" | "nvme" | "s3"
+    warmness: str                        # "hot" | "warm" | "cool" | "cold" | "partial"
+    match_kind: str                      # "exact" | "partial"
+    last_accessed_at: datetime
+    expected_prefill_savings_tokens: int
+    rehydrate_cost_ms: int
+```
+
+Lookup by either identity:
+
+```python
+# By legacy stable_prefix_id (matches the KV cache prefix layer)
+results = client.cluster.cache_lookup(stable_prefix_id="sha256:9a1c...")
+
+# By compatibility-aware stable_context_id (matches the full manifest identity)
+results = client.cluster.cache_lookup(stable_context_id="sha256:7e44...")
+
+# Combined — only matches that satisfy both
+results = client.cluster.cache_lookup(
+    stable_prefix_id="sha256:9a1c...",
+    stable_context_id="sha256:7e44...",
+)
+```
+
+Scope filters apply. The lookup respects the caller's PolicyScope `context_share_scope` — a cross-tenant cache entry is invisible regardless of operator privilege.
+
+## `routing_plan`
+
+```python
+plan = client.cluster.routing_plan(
+    context_manifest_id="01J8X9Y2Z3K4M5N6P7Q8R9SCM07",
+    placement_hint={"prefer_warm": True},
+)
+
+print(plan.selected.node_id, plan.selected.score)
+for fallback in plan.fallbacks:
+    print("  fallback:", fallback.node_id, fallback.score)
+print(plan.rationale)
+```
+
+Ask the Router for the placement plan it would produce for a given manifest. The plan is read-only — it does not dispatch a call or affect routing state. The returned shape:
+
+```python
+class RoutingPlan(BaseModel):
+    selected: RouteCandidate             # the chosen route
+    fallbacks: list[RouteCandidate]      # ranked alternates
+    warmness: str                        # "hot" | "warm" | "cool" | "cold" | "partial"
+    resume_feasible: bool
+    rationale: dict                      # the route.rationale payload —
+                                         # cache_hit_score, manifest_reuse_estimate,
+                                         # restore_cost, scope_filter_applied, ...
+
+class RouteCandidate(BaseModel):
+    node_id: str
+    score: float                          # aggregate routing score
+    score_breakdown: dict                 # per-component breakdown
+    expected_prefill_savings_tokens: int
+    rehydrate_cost_ms: int
+    queue_cost_ms: int
+```
+
+The `rationale` payload is the operator's-eye view of the routing decision: which scoring components contributed, what scope filters applied, whether the run is degraded, whether a session affinity was respected. Every routing-related production decision should be traceable through this payload.
+
+Plan inputs accept the same fields as the actual router contract:
+
+```python
+plan = client.cluster.routing_plan(
+    context_manifest_id="01J8X9Y2Z3K4M5N6P7Q8R9SCM07",
+    run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    session_id="ses_a7f3c2b8d4e1f0925a1b6c3d",
+    policy_scope_id="01J8X9Y2Z3K4M5N6P7Q8R9PS01",
+    context_scope_id="proj_review_bot",
+    placement_hint={"prefer_warm": True, "target_node_id": "node-3"},
+    budget_context={"on_exceed": "degrade"},
+)
+```
+
+## Async parallel
+
+```python
+import asyncio
+from kovaserve import AsyncKovaControlClient
+
+async def main() -> None:
+    client = AsyncKovaControlClient()
+    async for node in client.cluster.nodes():
+        print(node.id, node.queue_depth)
+
+asyncio.run(main())
+```
+
+## Where to go next
+
+<Cards>
+  <Card title="Run timeline" href="/docs/sdk/control/runs" description="The tenant-scoped path for the same data, filtered to one Run." />
+  <Card title="Events: routing" href="/docs/sdk/control/events" description="Live-tail `ks.route.*` events for ongoing routing decisions." />
+  <Card title="KV cache" href="/docs/concepts/routing/kv-cache" description="What `cache_lookup` reaches into." />
+  <Card title="Manifest-aware routing" href="/docs/concepts/routing/manifest-aware-routing" description="The scoring model that produces `routing_plan` output." />
+</Cards>
+
+## See also
+
+- [Placement hints](/docs/concepts/routing/placement-hints) — `placement_hint` input
+- [KV Index](/docs/concepts/routing/kv-index) — the service `cache_lookup` queries
+- [API: Cluster](/docs/api/cluster/nodes) — the wire surface

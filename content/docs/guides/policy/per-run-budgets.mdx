@@ -1,0 +1,145 @@
+---
+title: Per-run budgets
+description: Attach a multi-dimensional Budget to a Run — cost, tokens, steps, time, tools. Admission applies on every model call; transitions through `ACTIVE → WARNING → DEGRADED_ALLOWED | HARD_STOP → CLOSED`.
+---
+
+A run-level [Budget](/docs/concepts/policy/budgets) attaches to a Run and enforces five dimensions: cost, tokens, steps, time, and tool calls. Admission runs in the gateway hot path on every model call. When the strictest dimension crosses the hard-stop threshold, the next call rejects with `429 budget_exceeded`.
+
+## The decorator pattern
+
+```python
+from kovaserve import kova
+
+@kova.budget(cost_cents="500.0000", tokens=100_000, on_exceed="hard_stop")   # 500 cents = $5
+@kova.run(project="proj_review_bot", model="meta-llama/Llama-3-70B-Instruct")
+def review_pr(pr_url: str) -> str:
+    ...
+```
+
+`@kova.budget` is the **outermost** decorator. The reason is admission ordering — Budget admission must run before Run allocation so a hard-stop at admission doesn't orphan a `RUNNING` Run.
+
+## The inline pattern
+
+For an inference call where the run already exists:
+
+```python
+response = client.chat.completions.create(
+    model="meta-llama/Llama-3-70B-Instruct",
+    messages=[...],
+    extra_body={"kovaserve": {
+        "run_id": run.id,
+        "budget_context": {
+            "cost_limit_cents": "500.0000",     # 500 cents = $5
+            "token_limit": 100_000,
+            "on_exceed": "hard_stop",
+        },
+    }},
+)
+```
+
+The first call creates the Budget; subsequent calls bind to it.
+
+## The control-client pattern
+
+For when you want the Budget provisioned before any inference:
+
+```python
+budget = client.budgets.create(
+    run_id=run.id,
+    cost_limit_cents="500.0000",    # 500 cents = $5
+    token_limit=100_000,
+    on_exceed="hard_stop",
+)
+```
+
+## The CLI pattern
+
+```bash
+kova budgets create --run-id 01J... --cost-cents 500.0000 --tokens 100000 --on-exceed hard_stop
+```
+
+## Five dimensions, priority order
+
+| Dimension | What it bounds |
+|---|---|
+| `cost_cents` | Net cost in cents, decimal string with four fractional digits. |
+| `tokens` | Total tokens (prompt + completion across all model calls). |
+| `steps` | Step count. |
+| `time_seconds` | Wall-clock seconds since the Run started. |
+| `tools` | Tool-invocation count. |
+
+When multiple dimensions trip simultaneously, priority order is `cost > tokens > steps > time > tools` — the dimension with the highest cardinal cost gets reported first.
+
+## State machine
+
+```
+ACTIVE
+  ├─ crosses warning_threshold (default 70%) → WARNING
+  │     │
+  │     ├─ hits 100% with on_exceed=degrade → DEGRADED_ALLOWED
+  │     │
+  │     └─ hits 100% with on_exceed=hard_stop → HARD_STOP
+  │
+  └─ Run reaches terminal state → CLOSED
+```
+
+`WARNING` is informational — inference continues. `DEGRADED_ALLOWED` applies an active degradation (reduced `max_tokens`, dropped optional segments, model downgrade). `HARD_STOP` rejects further calls with `429 budget_exceeded`.
+
+## React to budget events
+
+Subclass `RunHooks` to react:
+
+```python
+from kovaserve import kova, RunHooks
+
+class BudgetAlerts(RunHooks):
+    def on_budget_warning(self, decision):
+        slack.send(f"Budget warning at {decision.budget_remaining_pct:.0%} on run {decision.run_id}")
+
+    def on_degrade(self, decision):
+        slack.send(f"Run {decision.run_id} entering DEGRADED_ALLOWED")
+
+    def on_admission_rejected(self, rejection):
+        if rejection.reason == "budget_exceeded":
+            # Capture a checkpoint and notify
+            ...
+
+@kova.budget(cost_cents="500.0000", hooks=BudgetAlerts())
+@kova.run(project="proj_review_bot", model="...")
+def review_pr(...):
+    ...
+```
+
+See [hooks](/docs/sdk/hooks) for composition rules.
+
+## Inspect a live budget
+
+Response headers carry budget state on every non-streaming v2 response:
+
+```
+X-KS-Budget-State:          ACTIVE | WARNING | DEGRADED_ALLOWED
+X-KS-Budget-Remaining-Pct:  0.4200    (strictest dimension)
+```
+
+CLI:
+
+```bash
+kova budgets get 01J... --json | jq '{state: .state, used: .cost_used_cents, limit: .cost_limit_cents}'
+```
+
+## Raise / lower limits while a Run runs
+
+```python
+client.budgets.update("01J...", cost_limit_cents="10.0000")
+```
+
+Raising a limit clears `WARNING` if the budget falls back under the threshold. `HARD_STOP` is sticky — once hard-stopped, only an explicit `update` with a higher limit returns the budget to `ACTIVE`.
+
+## Where to go next
+
+<Cards>
+  <Card title="Context budgets" href="/docs/guides/policy/context-budgets" description="The per-request admission control distinct from per-run." />
+  <Card title="Policy scopes" href="/docs/guides/policy/policy-scopes" description="Governance binding for share-scope, data-boundary, tool policy." />
+  <Card title="`@kova.budget`" href="/docs/sdk/decorators/budget" description="Decorator reference." />
+  <Card title="Cost per completed run" href="/docs/concepts/cost/cost-per-completed-run" description="Why per-run budgets are the right unit." />
+</Cards>

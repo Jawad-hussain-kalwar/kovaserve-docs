@@ -1,0 +1,114 @@
+---
+title: Resuming after failure
+description: Capture checkpoints at risky boundaries; restore the run from the most recent checkpoint after a failure. Logical-context-first means resume succeeds even when KV restore is unavailable.
+---
+
+A managed agent run survives failure when checkpoints are captured at the right boundaries. KovaServe's checkpoint model is **logical-context-first**: the durable record (manifest + segments + artifacts + compaction lineage) is committed synchronously in milliseconds; KV cache export is the bonus warm-restart path layered on top. A checkpoint is valid the moment logical context lands — resume works even when KV restore is unavailable.
+
+## The recipe
+
+Decorate risky boundaries with `@kova.checkpoint`:
+
+```python
+from kovaserve import kova
+from pathlib import Path
+
+@kova.run(project="proj_review_bot", model="meta-llama/Llama-3-70B-Instruct")
+def review_pr(pr_url: str):
+    @kova.checkpoint(trigger="before_file_write")
+    def write_review(content: str):
+        Path("review.md").write_text(content)
+
+    @kova.checkpoint(trigger="before_shell_command")
+    def deploy():
+        shell.run("deploy.sh")
+
+    review = generate_review(pr_url)
+    write_review(review)        # checkpoint captures before this risky write
+    deploy()                     # checkpoint captures before this destructive command
+```
+
+If `deploy()` fails — or the worker crashes mid-deploy — the run's most recent checkpoint is the state just before the failure.
+
+## Restore from the CLI
+
+```bash
+# Find the most recent checkpoint
+kova checkpoints list --run-id 01J8X9Y2Z3K4M5N6P7Q8R9S0T1 --order desc --limit 1
+
+# Restore
+kova checkpoints restore 01J8X9Y2Z3K4M5N6P7Q8R9S0T9
+```
+
+The run transitions through `PAUSED → RECOVERING → RESUMING → RUNNING`. The runtime picks up from the checkpoint's logical state and re-executes the steps that followed the checkpoint.
+
+## Restore from Python
+
+```python
+from kovaserve import KovaControlClient
+
+ks = KovaControlClient()
+
+# List recent checkpoints for the failed run
+checkpoints = list(ks.checkpoints.list(
+    run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    status="VALIDATED",
+    order="desc",
+    limit=1,
+))
+
+if checkpoints:
+    run = ks.checkpoints.restore(checkpoints[0].id, restore_mode="warm-logical")
+    print(run.status)        # → RUNNING (resumed)
+```
+
+## Three restore modes
+
+| Mode | What restores | When to use |
+|---|---|---|
+| `cold` | Logical context only — no KV restore. | Force a fresh model run; debugging restore correctness. |
+| `warm-logical` (default) | Logical context + KV restore if the `kv_prefix` StateHandle is resident; falls back if not. | The general-purpose path. |
+| `warm-kv` | Logical context + KV restore — fails if KV is unavailable. | Hard requirement on a warm restart; next operation only makes sense against a warm cache. |
+
+Most resume operations use the default `warm-logical` — KovaServe restores the cache when it can and falls back to a cold continuation when it can't, without your code branching.
+
+## When to capture checkpoints
+
+The six canonical triggers correspond to the typical agent boundaries:
+
+- **`before_file_write`** — irreversible file mutations.
+- **`before_shell_command`** — destructive or expensive shell actions.
+- **`after_stable_analysis`** — checkpointed completion of a long analysis phase that you don't want to redo on failure.
+- **`on_budget_warning`** — capture state at the budget warning so a subsequent hard-stop doesn't lose progress. Typically paired with a `RunHooks.on_budget_warning` handler that calls `client.checkpoints.create(trigger="on_budget_warning")`.
+- **`periodic`** — rolling checkpoints every N minutes for very long-running runs.
+- **`manual`** — explicit, operator-driven captures.
+
+What you *don't* want:
+
+- Checkpoints on every step. Phase 2 (KV export) amortization breaks down.
+- Checkpoints in tight loops. Phase 1 is cheap but not free.
+- Checkpoints that aren't paired with a restorable runtime entry point.
+
+## Compatibility validation on restore
+
+Restore validates the checkpoint's compatibility vector against the available models:
+
+| Compatibility class | What it covers |
+|---|---|
+| **Context compatibility** | `model_family`, `tokenizer_fingerprint`, `renderer_version`. Mismatch is fatal — the checkpoint cannot restore. |
+| **KV compatibility** | `quantization`, `tensor_parallel`. Mismatch downgrades the restore: logical context still loads, KV import is skipped. |
+
+The two failure classes surface as distinct error codes — `400 model_incompatible` and `400 kv_incompatible`. The first you can't recover from; the second falls through to `warm-logical` cleanly.
+
+## When the parent run still exists
+
+If you want to **continue** the parent run (resume), use `client.checkpoints.restore(...)`. If you want a **new** run from the same state (try-an-alternative), use [`client.runs.branch(...)`](/docs/guides/authoring-runs/branching-from-checkpoint). Resume modifies the parent; branch creates a child.
+
+## Where to go next
+
+<Cards>
+  <Card title="Branching from a checkpoint" href="/docs/guides/authoring-runs/branching-from-checkpoint" description="The other direction: a new Run from the same state." />
+  <Card title="Multi-step runs" href="/docs/guides/authoring-runs/multi-step-runs" description="Where to put `@kova.checkpoint` in a real agent." />
+  <Card title="`@kova.checkpoint`" href="/docs/sdk/decorators/checkpoint" description="Full decorator reference." />
+  <Card title="Resume flow" href="/docs/concepts/recovery/resume-flow" description="`RECOVERING → RESUMING → RUNNING`." />
+</Cards>

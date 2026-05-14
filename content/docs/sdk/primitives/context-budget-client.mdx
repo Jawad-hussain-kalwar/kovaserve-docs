@@ -1,0 +1,183 @@
+---
+title: ContextBudgetClient
+description: The ergonomic wrapper around `client.context.budgets` — preflight admission for an assembled manifest with a typed `AdmissionDecision` response.
+---
+
+`ContextBudgetClient` is the ergonomic primitive for working with [ContextBudgets](/docs/sdk/control/context-budgets) — the admission-control objects that evaluate context size before GPU dispatch. The wrapper adds one capability the raw client doesn't ship as ergonomically: a one-call **preflight** API that accepts a [`ContextBuilder`](/docs/sdk/primitives/context-builder) and returns a typed `AdmissionDecision`.
+
+```python
+from kovaserve import KovaControlClient
+from kovaserve.context import ContextBuilder, ContextBudgetClient
+
+client = KovaControlClient()
+budgets = ContextBudgetClient(client)
+
+ctx = ContextBuilder()
+ctx.add_tools([...])
+ctx.add_system("You are a code-review agent.")
+ctx.add_project_context(big_repo_summary, stable=True)
+ctx.add_user_message("Review PR #42")
+
+decision = budgets.admit(
+    run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    builder=ctx,
+)
+
+if decision.decision == "COMPACT_REQUIRED":
+    print(f"Compact before dispatch — active tokens {decision.active_tokens}")
+```
+
+## Construction
+
+```python
+budgets = ContextBudgetClient(client)
+```
+
+The wrapper holds a reference to a `KovaControlClient`. Both the sync `ContextBudgetClient` and the async `AsyncContextBudgetClient` live in `kovaserve.context`.
+
+## `admit` — the preflight call
+
+```python
+decision = budgets.admit(
+    run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1",            # required — the Run whose ContextBudget to evaluate against
+    builder=ctx,                                     # builder-form (preferred)
+    # OR
+    context_manifest_id="01J8X9Y2Z3K4M5N6P7Q8R9SCM07",   # manifest-form
+)
+```
+
+`admit` accepts either a `ContextBuilder` (the preferred path; the wrapper assembles the manifest internally) or an existing `context_manifest_id` (for manifests already persisted server-side). Pass exactly one.
+
+The returned shape:
+
+```python
+class AdmissionDecision(BaseModel):
+    decision: ContextBudgetDecision      # ALLOW | WARN | OFFLOAD_REQUIRED |
+                                         # COMPACT_REQUIRED | DEGRADE | HARD_STOP
+
+    # The dimensional values the decision was based on
+    active_tokens: int
+    stable_tokens: int
+    volatile_tokens: int
+    tool_result_tokens: int
+    artifact_bytes: int
+
+    # The thresholds that decided the outcome
+    crossed_thresholds: list[str]        # e.g. ["compaction_required_threshold"]
+
+    # Recommended transformations (when not ALLOW)
+    transformations: list[Transformation]
+
+    timestamp: datetime
+```
+
+`Transformation` describes what the runtime should do to bring the manifest under threshold:
+
+```python
+class Transformation(BaseModel):
+    type: str                            # "offload" | "compact" | "degrade"
+    target_segments: list[str] | None    # segment IDs to act on
+    new_max_tokens: int | None           # for degrade
+    artifact_byte_savings: int | None    # for offload
+    token_savings: int | None            # for compact
+```
+
+The preflight call **never changes state** on the ContextBudget. State transitions happen on real admission during inference; preflight is purely informational.
+
+## When to use preflight
+
+Preflight is the right call when the runtime wants to know what the budget would say *before* committing to a dispatch:
+
+```python
+ctx = build_context_for(user_input)
+decision = budgets.admit(run_id=run.id, builder=ctx)
+
+if decision.decision == "COMPACT_REQUIRED":
+    # Compact before dispatch instead of letting admission reject the call
+    summary = my_runtime.compact(decision.transformations[0].target_segments)
+    client.context.compaction.compact(
+        run_id=run.id,
+        source_segment_ids=summary.source_ids,
+        output_segments=[summary.output_segment],
+        method="runtime_reported",
+    )
+    # Re-assemble after compaction
+    ctx = build_context_for(user_input)
+
+# Now dispatch — admission will return ALLOW because the manifest is reduced
+response = inference.chat.completions.create(...)
+```
+
+Without preflight, the same flow can be driven reactively from a `RunHooks.on_compact_required` handler — but preflight gives the runtime a *deterministic* check before any inference call lands, which is helpful for budget-fragile workloads where rejection-and-retry is too expensive.
+
+## Lifecycle methods
+
+The wrapper also exposes the lifecycle operations of `client.context.budgets`:
+
+```python
+budgets.create(
+    run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    active_token_limit=8000,
+    artifact_byte_limit=10 * 1024 * 1024,
+    compaction_required_threshold=0.90,
+    offload_required_threshold=0.80,
+)
+
+budget = budgets.get("01J8X9Y2Z3K4M5N6P7Q8R9CB04")
+
+budgets.update(
+    "01J8X9Y2Z3K4M5N6P7Q8R9CB04",
+    active_token_limit=16000,
+)
+```
+
+These are pass-throughs to the underlying client. Use them when the rest of your runtime already uses the `ContextBudgetClient` for `admit` and you want one place to manage the budget.
+
+## Composing with `ContextBuilder.count_tokens`
+
+For a fast estimate that doesn't round-trip to the server, use the builder's `count_tokens` first:
+
+```python
+counts = ctx.count_tokens(model="meta-llama/Llama-3-70B-Instruct")
+if counts.total > 6500:                              # rough check
+    decision = budgets.admit(run_id=run.id, builder=ctx)
+    # Only the round-trip cost on the budget call when we're near a threshold
+```
+
+`count_tokens` is microsecond-fast (CPU-bound, tokenizer-only). `admit` is millisecond-fast (one HTTP round trip). Pair them for budget-aware workloads where most calls are well under threshold and only the suspicious ones need server-side admission.
+
+## Async parallel
+
+```python
+import asyncio
+from kovaserve import AsyncKovaControlClient
+from kovaserve.context import ContextBuilder, AsyncContextBudgetClient
+
+async def main() -> None:
+    client = AsyncKovaControlClient()
+    budgets = AsyncContextBudgetClient(client)
+
+    ctx = ContextBuilder()
+    ctx.add_tools([...])
+    ctx.add_user_message("Review PR #42")
+
+    decision = await budgets.admit(run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1", builder=ctx)
+    print(decision.decision)
+
+asyncio.run(main())
+```
+
+## Where to go next
+
+<Cards>
+  <Card title="ContextBuilder" href="/docs/sdk/primitives/context-builder" description="The builder this wrapper admits against." />
+  <Card title="`client.context.budgets`" href="/docs/sdk/control/context-budgets" description="The raw control-client surface." />
+  <Card title="CompactionClient" href="/docs/sdk/primitives/compaction-client" description="What `COMPACT_REQUIRED` typically triggers next." />
+  <Card title="Hooks" href="/docs/sdk/hooks" description="`on_compact_required` / `on_offload_required` reactive alternative." />
+</Cards>
+
+## See also
+
+- [ContextBudget concept](/docs/concepts/policy/context-budgets) — six dimensions, six decisions
+- [Context-budget state machine](/docs/concepts/policy/context-budget-state-machine) — the FSM `admit` evaluates against
+- [Admission](/docs/concepts/policy/admission) — the full hot-path admission flow

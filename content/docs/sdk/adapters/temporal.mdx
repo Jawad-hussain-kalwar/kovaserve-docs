@@ -1,0 +1,177 @@
+---
+title: Temporal adapter
+description: `@kova_activity` Activity wrapper and `KovaInterceptor` for the worker chain. The Workflow stays deterministic; Activities record ModelCalls inside KovaServe.
+---
+
+The **Temporal adapter** integrates KovaServe under an existing Temporal application via two extension points: an `@kova_activity` decorator that wraps Activity bodies, and a `KovaInterceptor` that propagates KovaServe identity through the worker's interceptor chain. The Workflow stays deterministic — every interaction with KovaServe happens inside Activities. Install with `pip install "kovaserve[temporal]"`.
+
+```python
+from temporalio import workflow, activity
+from temporalio.client import Client
+from temporalio.worker import Worker
+from kovaserve.adapters.temporal import kova_activity, KovaInterceptor
+
+@workflow.defn
+class ReviewPRWorkflow:
+    @workflow.run
+    async def run(self, pr_url: str) -> str:
+        pr = await workflow.execute_activity(fetch_pr, pr_url, start_to_close_timeout=timedelta(seconds=60))
+        review = await workflow.execute_activity(generate_review, pr, start_to_close_timeout=timedelta(seconds=600))
+        return review
+
+@kova_activity(project_id="proj_review_bot", step_type="TOOL_EXECUTE")
+@activity.defn
+async def fetch_pr(url: str) -> str:
+    return await github.get_pr(url)
+
+@kova_activity(project_id="proj_review_bot", step_type="MODEL_CALL")
+@activity.defn
+async def generate_review(pr: str) -> str:
+    response = await async_inference.chat.completions.create(
+        model="meta-llama/Llama-3-70B-Instruct",
+        messages=[{"role": "user", "content": f"Review {pr}"}],
+    )
+    return response.choices[0].message.content
+
+client = await Client.connect("localhost:7233")
+worker = Worker(
+    client,
+    task_queue="review-bot",
+    workflows=[ReviewPRWorkflow],
+    activities=[fetch_pr, generate_review],
+    interceptors=[KovaInterceptor(client=ks_client, project_id="proj_review_bot")],
+)
+await worker.run()
+```
+
+## The two components
+
+| Component | What it does |
+|---|---|
+| `@kova_activity` | Wraps an Activity body with Run / Step recording. Opens a Run (or binds to one passed in via headers) on Activity start; records a Step of the chosen type; closes the Step on Activity completion. |
+| `KovaInterceptor(WorkerInterceptor)` | Injects KovaServe context propagation across Workflow → Activity boundaries via Temporal headers. Reads the active Run/Session/Budget on the Workflow side; writes them onto Activity headers; reconstitutes them in the Activity worker. |
+
+The two are designed to work together — `@kova_activity` reads identity from the Activity headers `KovaInterceptor` populates. Using one without the other is supported but loses Workflow → Activity identity continuity.
+
+## Why deterministic Workflow
+
+Temporal Workflows must be deterministic — they replay from event history on resume, so any non-deterministic operation (HTTP call, random number, time read) is forbidden inside Workflow code. KovaServe's `KovaControlClient` makes HTTP calls; therefore **KovaServe operations happen only inside Activities**, never directly in Workflow code.
+
+The Workflow expresses *what* should happen — the sequence of Activities, their inputs, their retry policies. Each Activity, when it runs, talks to KovaServe to record its own Run / Step / ModelCall lifecycle. On Workflow resume, only the Workflow events are replayed; the Activities are not re-executed.
+
+## `@kova_activity`
+
+```python
+from kovaserve.adapters.temporal import kova_activity
+
+@kova_activity(
+    project_id="proj_review_bot",                  # required — Project all Runs belong to
+    step_type="TOOL_EXECUTE",                      # default — override per Activity
+    record_model_call=True,                        # whether to record a ModelCall inside this Step
+    default_budget=None,                            # optional inline Budget config
+    default_context_budget=None,
+)
+@activity.defn
+async def fetch_pr(url: str) -> str:
+    ...
+```
+
+On Activity start:
+
+1. The Activity reads the `KovaInterceptor`-populated headers for an active Run ID.
+2. If found, binds to that Run; otherwise opens a new Run.
+3. Creates a Step of `step_type` with metadata derived from the Activity name and arguments.
+4. The body executes.
+
+On Activity completion:
+
+- Normal return → Step transitions to `SUCCEEDED`; the Activity result is recorded.
+- Exception → Step transitions to `FAILED`; the exception propagates to Temporal's retry logic.
+
+Temporal's Activity retry semantics interact cleanly: each retry attempt creates a new Step inside the same Run. The Run sees the full retry lineage; the Workflow sees a single Activity result after retries are exhausted.
+
+## `KovaInterceptor`
+
+```python
+from kovaserve.adapters.temporal import KovaInterceptor
+
+worker = Worker(
+    client,
+    task_queue="review-bot",
+    workflows=[...],
+    activities=[...],
+    interceptors=[KovaInterceptor(client=ks_client, project_id="proj_review_bot")],
+)
+```
+
+`KovaInterceptor` extends Temporal's `WorkerInterceptor` chain. It:
+
+1. **On Workflow start** — reads any `kovaserve.*` initialization args; opens or binds the Run; records the Workflow run ID as `external_run_id` on the KovaServe Run.
+2. **On Workflow → Activity dispatch** — writes the active Run / Session / Budget IDs onto the Activity headers as `kovaserve-run-id`, `kovaserve-session-id`, `kovaserve-budget-id`.
+3. **On Activity worker entry** — reads the headers and populates the ContextVar so `@kova_activity` and any nested KovaServe calls see the right identity.
+4. **On Workflow completion / failure** — transitions the Run to its terminal state.
+
+The interceptor is what makes the Workflow → Activity → ModelCall chain attribute correctly to one Run. Without it, each Activity would open its own Run and the parent-child relationship would be lost.
+
+## Mapping Temporal entities
+
+| Temporal | KovaServe |
+|---|---|
+| Workflow Run | KovaServe Run (the durable execution objective). `external_run_id` carries the Temporal Workflow run ID. |
+| Activity | KovaServe Step. Default `step_type` is `TOOL_EXECUTE`; override via `@kova_activity(step_type=...)`. |
+| Activity retry | A new Step inside the same Run. The Run sees the full retry history. |
+| Workflow → Activity heartbeat | Surfaces as an `OBSERVE` Step when `KovaInterceptor.record_heartbeats=True` (default `False` to avoid noise). |
+| Workflow timer | Not recorded as a Step. KovaServe is the execution control plane, not the Workflow event log. |
+
+The Temporal event log remains Temporal's own. KovaServe records the *execution outcome* — the cost, the cache savings, the ContextManifest, the Budget state — and references the Temporal Workflow run via `external_run_id`.
+
+## Mixing with decorators
+
+`@kova.step` *can* nest inside a `@kova_activity` body — the contextvar carries the active Step over. The two decorators do not conflict; the inner `@kova.step` records a child Step under the Activity-bound parent.
+
+```python
+@kova_activity(project_id="proj_review_bot", step_type="TOOL_PLAN")
+@activity.defn
+async def plan_review(pr: str) -> dict:
+    @kova.tool(name="enumerate_files")
+    async def enumerate():
+        return await git.list_files(pr)
+
+    @kova.tool(name="prioritize_files")
+    async def prioritize(files):
+        return rank(files)
+
+    files = await enumerate()
+    return await prioritize(files)
+```
+
+Both `enumerate` and `prioritize` become child Steps under the Activity's `TOOL_PLAN` parent.
+
+## Configuration
+
+| Kwarg | Default | Meaning |
+|---|---|---|
+| `client` | required | The `KovaControlClient` to use (typically an async client for Temporal). |
+| `project_id` | required | The Project all Runs belong to. |
+| `step_type` | `"TOOL_EXECUTE"` | Default step_type for `@kova_activity`. |
+| `record_heartbeats` | `False` | Whether `KovaInterceptor` records Activity heartbeats as `OBSERVE` Steps. |
+| `default_budget` | `None` | Inline Budget config applied on Run creation. |
+| `default_context_budget` | `None` | Inline ContextBudget config applied on Run creation. |
+
+## Sync vs async
+
+The Temporal Python SDK is async-only. The adapter ships only async implementations — `@kova_activity` works with `async def` Activity functions; `KovaInterceptor` operates on the async worker chain.
+
+## Where to go next
+
+<Cards>
+  <Card title="Adapters overview" href="/docs/sdk/adapters" description="Which adapter to pick." />
+  <Card title="Hooks" href="/docs/sdk/hooks" description="`KovaInterceptor` is a `RunHooks` subclass internally." />
+  <Card title="Decorators composition" href="/docs/sdk/decorators/composition" description="How `@kova.step` nests inside `@kova_activity`." />
+  <Card title="Runs" href="/docs/sdk/control/runs" description="The `external_run_id` field carries the Temporal Workflow run ID." />
+</Cards>
+
+## See also
+
+- [BYO runtime mode](/docs/concepts/deployment/byo-runtime) — the broader pattern Temporal adapts to
+- [Step types](/docs/concepts/run-hierarchy/step-types) — the values `step_type=` accepts

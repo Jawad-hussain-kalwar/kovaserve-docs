@@ -1,0 +1,129 @@
+---
+title: OpenTelemetry export
+description: KovaServe emits W3C `traceparent` end-to-end and works with the standard `opentelemetry-instrumentation-httpx`. Opt-in GenAI semantic conventions add LLM-call attributes when your stack supports them.
+---
+
+KovaServe joins cleanly to OpenTelemetry tracing through two mechanisms: standard `httpx` instrumentation that the SDK rides on, and an opt-in [GenAI semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/) layer that adds LLM-specific span attributes.
+
+## Auto-instrumentation via `httpx`
+
+Install the standard OTel `httpx` instrumentation:
+
+```bash
+pip install opentelemetry-instrumentation-httpx
+```
+
+Enable it once at process start:
+
+```python
+from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+
+HTTPXClientInstrumentor().instrument()
+```
+
+From this point every `KovaControlClient` and `OpenAI` re-export call emits OTel spans. The SDK doesn't bundle the instrumentation — your application probably already has OTel for HTTP, and the SDK riding on the standard instrumentation inherits your configuration.
+
+## W3C `traceparent` propagation
+
+The SDK reads the active span's `traceparent` and writes it as an HTTP header on every outgoing request. The KovaServe gateway extracts it and stamps it on every event the request produces:
+
+```
+[your trace] → SDK call → gateway → ContextManifest assembly → admission → router → ModelCall
+       └─────── all stamped with the same traceparent ────────┘
+```
+
+The `trace_id` field on every KovaServe event matches the W3C trace. Join the two systems on `trace_id`:
+
+```python
+for event in client.runs.timeline(run_id):
+    print(event.trace_id, event.event_type)
+# 01J8X9Y2Z3K4M5N6P7Q8R9... ks.model_call.completed
+# Same trace_id appears in your Datadog / Honeycomb / Tempo trace.
+```
+
+## Opt-in GenAI semantic conventions
+
+For LLM-call-specific span attributes following the OTel GenAI spec:
+
+```bash
+export KOVASERVE_OTEL_GENAI=1
+```
+
+Or programmatically:
+
+```python
+from kovaserve.observability import enable_otel_genai
+enable_otel_genai()
+```
+
+Every model call now emits a span with standard GenAI attributes:
+
+| Attribute | Source |
+|---|---|
+| `gen_ai.operation.name` | `chat` |
+| `gen_ai.system` | `kovaserve` |
+| `gen_ai.request.model` | the requested model |
+| `gen_ai.response.model` | the model that served (after fallback) |
+| `gen_ai.usage.input_tokens` | real prompt tokens |
+| `gen_ai.usage.output_tokens` | real completion tokens |
+| `gen_ai.usage.cached_tokens` | real KV-cache hits (cross-vendor convergent) |
+| `gen_ai.request.max_tokens` | request `max_tokens` |
+| `gen_ai.request.temperature` | request `temperature` |
+| `gen_ai.response.finish_reasons` | finish reasons |
+
+KovaServe-specific attributes layer on under the `kovaserve.*` prefix:
+
+```
+kovaserve.run.id
+kovaserve.step.id
+kovaserve.model_call.id
+kovaserve.session.id
+kovaserve.context_manifest.id
+kovaserve.cost.cents
+kovaserve.cache_savings.cents
+kovaserve.tenant.id
+kovaserve.project.id
+```
+
+Spans nest under the contextvar step-stack — model-call spans nest under the active Step span which nests under the Run span.
+
+## When to enable GenAI conventions
+
+| Enable when | Skip when |
+|---|---|
+| You don't have framework-native tracing (LangSmith / OpenAI Agents tracing). | You're tracing through LangSmith / Helicone / Langfuse already. |
+| You're comparing across providers using the OTel convention vocabulary. | You only want HTTP-level instrumentation. |
+| Your observability stack supports GenAI conventions natively (Datadog v1.37+ does). | Double-spans from multiple LLM instrumentation layers would noise up your dashboards. |
+
+## Per-resource log levels
+
+The SDK's logger tree is hierarchical:
+
+```python
+import logging
+logging.getLogger("kovaserve").setLevel(logging.INFO)
+logging.getLogger("kovaserve.http").setLevel(logging.DEBUG)    # verbose HTTP for debugging
+```
+
+| Logger | What it carries |
+|---|---|
+| `kovaserve` | Root — set this to capture everything. |
+| `kovaserve.http` | Request / response timing; retry events. Most useful for integration debugging. |
+| `kovaserve.streaming` | SSE iterator events, reconnection. |
+| `kovaserve.adapters.<framework>` | Adapter-specific lifecycle. |
+
+Env-var form:
+
+```bash
+export KOVASERVE_LOG=info     # off | warn | info | debug
+```
+
+API keys are **always** redacted from log output regardless of level — non-configurable.
+
+## Where to go next
+
+<Cards>
+  <Card title="Reading run timelines" href="/docs/guides/observability/reading-run-timelines" description="The view OTel traces complement." />
+  <Card title="Consuming events" href="/docs/guides/observability/consuming-events" description="Pull events into your pipeline." />
+  <Card title="Logging and tracing" href="/docs/sdk/logging-and-tracing" description="Full reference." />
+</Cards>

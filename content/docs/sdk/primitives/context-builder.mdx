@@ -1,0 +1,225 @@
+---
+title: ContextBuilder
+description: The four-tier prompt builder. Snaps inputs to the canonical `tools → system → history-prefix → summary` order, refuses dynamic content in early slots, and produces the manifest envelope the gateway consumes.
+---
+
+`ContextBuilder` is the SDK's highest-leverage primitive. It shapes the request to maximise cache reuse and audit fidelity — it does not decide *what to put in the prompt*. The runtime supplies the content; the builder enforces the canonical order, computes deterministic identity inputs, and produces the `kovaserve` extension envelope the gateway consumes.
+
+```python
+from kovaserve import OpenAI
+from kovaserve.context import ContextBuilder
+
+client = OpenAI()
+ctx = ContextBuilder()
+
+ctx.add_tools([...])                                # tier 0 — tool definitions
+ctx.add_system("You are a code-review agent.")      # tier 1 — system prompt
+ctx.add_project_context(repo_summary, stable=True)  # tier 2 — history prefix
+ctx.add_session_summary(summary_segment)            # tier 3 — summary
+ctx.add_user_message("Review PR #42")               # dynamic tail
+
+response = client.chat.completions.create(
+    model="meta-llama/Llama-3-70B-Instruct",
+    messages=ctx.messages(),
+    extra_body={"kovaserve": ctx.build()},
+)
+```
+
+## The four-tier model
+
+Every cache-aware inference surface converges on the same prompt structure. The builder snaps inputs to **the canonical four-tier order**:
+
+```
+tier 0       tier 1        tier 2              tier 3            dynamic tail
+[ tools ][ system ][ history_prefix ][ summary ][ agent_state + user_message + tool_result ]
+   ▲         ▲          ▲                ▲           ▲
+   │         │          │                │           │
+   tool      system     verbatim turn    bounded     fresh per-call state and
+   defs      prompt     history          summary     the latest user message / tool output
+```
+
+The order is binding. The builder enforces it on output regardless of the order in which you called the `add_*` methods. Two builders that consumed the same inputs in different orders produce the same canonical output and the same `stable_context_id`.
+
+## Refusal of dynamic content in early slots
+
+A templated string in tier 0–3 is a cache breaker — it changes per-call and invalidates every node's prefix cache. The builder refuses dynamic-looking content in early tiers:
+
+```python
+ctx.add_system(f"You are an agent. Now: {datetime.now()}")
+# ❌ DynamicContentError: tier 1 content contains a dynamic value.
+#    A templated value or timestamp in early slots invalidates the cache.
+#    Move dynamic content to add_user_message() or set allow_dynamic=True.
+```
+
+The check is heuristic — it catches `{...}` and `f"..."`-style interpolation, ISO 8601 timestamps, and other common cache-breaker patterns. Override the check with `allow_dynamic=True` when you genuinely want dynamic content in an early slot (for example, a system prompt that includes a per-request user ID and you have a reason not to put that in the user message).
+
+## Deterministic serialisation
+
+The builder serialises every input deterministically:
+
+- JSON keys are sorted (`sort_keys=True` everywhere).
+- LoRA adapter is pinned for the builder's lifetime.
+- Whitespace is canonicalised.
+- Numeric values use a single canonical representation.
+
+Two builders that consumed equivalent inputs produce **byte-identical** output. This is what makes `stable_context_id` reproducible across runs and across machines.
+
+## Methods
+
+### Tier convenience methods
+
+| Method | Tier | What it accepts |
+|---|---|---|
+| `add_tools(tool_defs)` | 0 | List of tool definition dicts (OpenAI tool-call shape). |
+| `add_system(text)` | 1 | The runtime-supplied system prompt. |
+| `add_project_context(text, stable=True)` | 2 | Long-lived project-scope context. `stable=True` declares the segment contributes to `stable_context_id`. |
+| `add_session_summary(segment)` | 3 | A compacted summary segment, typically produced by [compaction](/docs/sdk/control/compaction). |
+| `add_user_message(text)` | dynamic tail | A user turn. |
+| `add_tool_result(content_preview, artifact_ref=None)` | dynamic tail | A tool result; pass `artifact_ref` for large outputs. |
+| `add_agent_state(text)` | dynamic tail | Runtime scratchpad / planner state. |
+
+The convenience methods cover the canonical placements. For full control over every segment field, use `add_segment`:
+
+```python
+ctx.add_segment(
+    content="...",
+    tier="history_prefix",                # 0=tools | 1=system | 2=history_prefix | 3=summary | None=dynamic
+    context_type="project_context",       # canonical context_type
+    memory_class="durable",               # ephemeral | volatile | session | durable | archival
+    checkpoint_relevant=True,             # included in any future Checkpoint snapshot
+    stable=True,                          # contributes to stable_context_id
+    cache_breakpoint=False,               # explicit Anthropic-style marker (default: inferred at tier boundaries)
+    artifact_ref=None,                    # ContextArtifactRef — segment renders preview only
+    retention_policy=None,                # expire_with_run | expire_with_session | keep_until_compacted
+)
+```
+
+### Output methods
+
+| Method | Returns |
+|---|---|
+| `messages()` | The OpenAI-shape `messages` list — pass as `messages=` to `chat.completions.create`. |
+| `build()` | The `kovaserve` extension envelope — pass as `extra_body={"kovaserve": ctx.build()}`. |
+| `count_tokens(model=None)` | A typed token-count breakdown by tier. Uses the model's tokenizer; cached after first call. |
+
+`build()` returns a dict with the typed envelope shape. It includes the `context_blocks` list (the typed segments), the `memory_class_hints` list, and any other extension fields the builder set (e.g., `cache_salt`).
+
+### Identity methods
+
+| Method | What it does |
+|---|---|
+| `compute_stable_context_id()` | Returns the `stable_context_id` the builder *would* produce. Useful for pre-call cache-hit prediction. |
+| `declare_stable_context_id(label)` | Adds an explicit label to the digest cascade. See below. |
+
+## Multi-tenant `cache_salt`
+
+The builder stamps `cache_salt = sha256(tenant_id)` invisibly from the auth context. The user never sees it; the salt rides on the wire to provide cross-tenant data isolation and timing-side-channel protection at zero perf cost inside the tenant.
+
+This is the default for every builder. To override (test isolation, benchmark reproducibility) use `client.cache.salt(...)` — see [client.cache](/docs/sdk/control/cache). For per-request overrides, set `extra_body["kovaserve"]["cache_salt"]` directly; the builder's salt is the per-client default.
+
+## `declare_stable_context_id` — explicit identity grouping
+
+By default `stable_context_id = sha256(seg_1.digest || seg_2.digest || ...)` over the stable-marked segments. For an explicit grouping — a fixed prefix reused across unrelated Runs that don't share segments — declare a label:
+
+```python
+ctx.declare_stable_context_id("repo_review_v3")
+```
+
+The label and the segment digests **compose**, not replace:
+
+```
+stable_context_id = sha256((label or "") || segment_1.digest || segment_2.digest || ...)
+```
+
+Composition is what users intuitively expect:
+
+- Same label + same content → same identity (cache hit)
+- Same label + different content → different identity (no pollution)
+- Same content + different labels → different identities (label scopes cache groups)
+
+If the label *replaced* the cascade, two callers with the same label and different content would produce the same identity and pollute each other's cache.
+
+## Pre-call token counts
+
+`count_tokens(model=...)` loads the model's tokenizer lazily and produces a typed breakdown:
+
+```python
+counts = ctx.count_tokens(model="meta-llama/Llama-3-70B-Instruct")
+print(counts.total)             # total tokens in the assembled prompt
+print(counts.by_tier)           # {tools: 240, system: 80, history_prefix: 1500, ...}
+print(counts.cache_eligible)    # tokens in the four cache-prefix tiers
+```
+
+The breakdown is the **runtime's pre-call cost preview**. Pair it with the [ContextBudget](/docs/sdk/control/context-budgets) admission `admit` endpoint to know whether the assembled shape will be `ALLOWED` before dispatching.
+
+## What the builder does *not* do
+
+The builder is intentionally **not a prompt composer**:
+
+- It does not decide what content to retrieve.
+- It does not select which tools to expose for a given turn.
+- It does not choose which past turns to keep in `session_history`.
+- It does not decide whether to compact, when to compact, or what to summarise.
+- It does not pick `memory_class` values for the runtime.
+
+Those decisions live in the runtime. The builder takes the runtime's choices and produces the right wire shape — bounded, ordered, identity-stable, cache-aware. **The runtime decides *what* goes in the prompt; the builder enforces *how* it gets sent.**
+
+## Composition with the OpenAI re-export
+
+The builder is the natural pair to the [OpenAI re-export](/docs/sdk/inference/openai-compat):
+
+```python
+from kovaserve import OpenAI, kova
+from kovaserve.context import ContextBuilder
+
+client = OpenAI()
+
+@kova.run(project="proj_review_bot", model="meta-llama/Llama-3-70B-Instruct")
+def review_pr(pr_url: str) -> str:
+    ctx = ContextBuilder()
+    ctx.add_tools(REVIEW_TOOLS)
+    ctx.add_system(REVIEW_PROMPT)
+    ctx.add_project_context(load_repo_summary(), stable=True)
+    ctx.add_user_message(f"Review {pr_url}")
+
+    response = client.chat.completions.create(
+        model="meta-llama/Llama-3-70B-Instruct",
+        messages=ctx.messages(),
+        extra_body={"kovaserve": ctx.build()},
+    )
+    return response.choices[0].message.content
+```
+
+The `@kova.run` decorator injects `run_id`; the builder produces every other extension field. Together they cover the full envelope without manual dict assembly.
+
+## Async parallel
+
+The builder is sync-only — assembly is a CPU-bound operation that completes in microseconds. The resulting `messages()` and `build()` outputs work identically against `OpenAI` and `AsyncOpenAI`:
+
+```python
+async def main() -> None:
+    async_client = AsyncOpenAI()
+    ctx = ContextBuilder()
+    ctx.add_system("...")
+    ctx.add_user_message("...")
+    response = await async_client.chat.completions.create(
+        model="...",
+        messages=ctx.messages(),
+        extra_body={"kovaserve": ctx.build()},
+    )
+```
+
+## Where to go next
+
+<Cards>
+  <Card title="ArtifactClient" href="/docs/sdk/primitives/artifact-client" description="The companion primitive for offloading large content." />
+  <Card title="ContextBudgetClient" href="/docs/sdk/primitives/context-budget-client" description="Preflight admission against the builder output." />
+  <Card title="`client.cache`" href="/docs/sdk/control/cache" description="`prewarm` against `ctx.build()` to fill the cache before the first real call." />
+  <Card title="Extension envelope" href="/docs/sdk/inference/extension-envelope" description="The wire shape `ctx.build()` produces." />
+</Cards>
+
+## See also
+
+- [ContextManifest concept](/docs/concepts/context/context-manifests) — what the builder's output becomes server-side
+- [Context segments](/docs/concepts/context/context-segments) — the typed fragments the builder produces
+- [`@kova.compact`](/docs/sdk/decorators/step) — the canonical compaction-step alias

@@ -1,0 +1,160 @@
+---
+title: Escape hatches
+description: `with_raw_response`, `with_streaming_response`, `extra_body`, `extra_headers`, `extra_query`. The documented mechanisms for reaching past the typed surface when you need to.
+---
+
+The SDK gives you a typed Python surface for every documented endpoint. Sometimes you need to reach past it — to read a header the model doesn't expose, to send a body field that's part of a preview the SDK doesn't ship typed support for, to debug a wire-level issue. The five **escape hatches** are the documented mechanisms.
+
+```python
+# Raw response — read headers and the underlying httpx.Response
+resp = client.runs.with_raw_response.get("01J8X9Y2Z3K4M5N6P7Q8R9S0T1")
+print(resp.headers["X-Request-Id"])
+print(resp.headers["X-KS-Cost-Cents"])
+run = resp.parse()                         # → Run, the typed model
+
+# Extra body / headers / query — augment any call
+run = client.runs.create(
+    project_id="proj_review_bot",
+    extra_body={"experimental_field": "value"},
+    extra_headers={"X-My-Trace": "abc123"},
+    extra_query={"debug": "1"},
+)
+
+# Streaming response — low-level iteration over a non-SSE stream
+with client.metering.with_streaming_response.export(format="jsonl") as resp:
+    for line in resp.iter_lines():
+        ...
+```
+
+## `with_raw_response`
+
+Every namespace has a `.with_raw_response` accessor that returns the underlying response wrapped in a typed `RawResponse[T]`:
+
+```python
+resp = client.runs.with_raw_response.get("01J8X9Y2Z3K4M5N6P7Q8R9S0T1")
+
+# Headers, status, raw response
+print(resp.status_code)                    # → 200
+print(resp.headers["X-Request-Id"])
+print(resp.http_response)                  # → httpx.Response (debug only — may change)
+
+# Parse into the typed model when ready
+run = resp.parse()                          # → Run
+
+# Or read the raw body
+data = resp.http_response.content
+```
+
+The raw response is the right path when:
+
+- You need a header the typed `Run` shape doesn't expose.
+- You're debugging a wire-level issue.
+- You want the request ID for logging.
+
+The underlying `httpx.Response` is **debug-only** — its shape is not part of the SDK's public API and may change between minor versions. The `RawResponse[T]` wrapper (status, headers, parse) is stable.
+
+## `with_streaming_response`
+
+For low-level iteration over a streamed body that isn't an SSE event stream:
+
+```python
+with client.metering.with_streaming_response.export(format="jsonl") as resp:
+    for line in resp.iter_lines():
+        record = json.loads(line)
+        ...
+```
+
+The streaming-response context manager keeps the connection open and lets you iterate chunks or lines. Used internally by `client.metering.export(...)` — the bare `export(...)` is sugar on top. Reach for `with_streaming_response.export(...)` when you need control over the chunking (e.g., reading bytes instead of lines).
+
+## `extra_body`
+
+Add arbitrary keys to the request body:
+
+```python
+run = client.runs.create(
+    project_id="proj_review_bot",
+    model="meta-llama/Llama-3-70B-Instruct",
+    extra_body={"_experimental": {"feature_x": True}},
+)
+```
+
+The SDK merges `extra_body` into the canonical body before sending. Used commonly to opt into preview server features that the typed surface doesn't expose yet, or to pass through fields that the SDK has not yet caught up to.
+
+`extra_body` is also how the OpenAI re-export's KovaServe envelope flows — `extra_body={"kovaserve": {...}}` is `extra_body` doing its job. See [extension envelope](/docs/sdk/inference/extension-envelope).
+
+## `extra_headers`
+
+Add arbitrary headers:
+
+```python
+run = client.runs.create(
+    project_id="proj_review_bot",
+    extra_headers={"X-My-Trace": "abc123", "X-Caller-Service": "review-bot"},
+)
+```
+
+Common uses:
+
+- Custom tracing headers your tooling expects.
+- Service-attribution headers for operator dashboards.
+- Per-call overrides of headers the client sets globally.
+
+The SDK does **not** let `extra_headers` override `Authorization` — the bearer key resolution flows through the client construction path, not through `extra_headers`.
+
+## `extra_query`
+
+Add arbitrary query parameters:
+
+```python
+runs = client.runs.list(project_id="proj_review_bot", extra_query={"debug": "1"})
+```
+
+Less common than `extra_body` and `extra_headers` because most query parameters are typed (pagination cursors, filters, `expand`). Reach for `extra_query` to opt into a server-side debug mode or to test a preview-tier filter the SDK doesn't ship.
+
+## Per-client defaults
+
+`extra_headers` and `extra_query` also have per-client default forms:
+
+```python
+client = KovaControlClient(
+    default_headers={"X-Caller-Service": "review-bot"},
+    default_query={},
+)
+```
+
+Every request from this client gets the default headers / query merged. Per-call `extra_headers` adds on top.
+
+## What escape hatches do not bypass
+
+- **Retry logic.** A call through `with_raw_response` is still retried per the client's retry policy. The escape hatch lets you see the response; it doesn't change which responses you see.
+- **Idempotency.** A POST through `with_raw_response` still gets an idempotency key auto-generated unless you override via `extra_headers`.
+- **Authentication.** `extra_headers` cannot replace `Authorization`. The bearer key is set by client construction, not per call.
+- **API key redaction.** Logs from `with_raw_response` calls still redact the bearer key.
+
+## When *not* to reach for an escape hatch
+
+The escape hatches exist for legitimate cases the typed surface doesn't yet cover. If you find yourself reaching for them on every call, the SDK's typed surface is missing something — file an issue. The escape hatch is the bridge while the typed surface catches up; it shouldn't be the durable interface.
+
+## Async parallels
+
+Every escape hatch works identically on `AsyncKovaControlClient`:
+
+```python
+resp = await async_client.runs.with_raw_response.get("01J...")
+async with async_client.metering.with_streaming_response.export(...) as resp:
+    async for line in resp.iter_lines():
+        ...
+```
+
+## Where to go next
+
+<Cards>
+  <Card title="Type model" href="/docs/sdk/type-model" description="The typed surface escape hatches reach past." />
+  <Card title="Configuration" href="/docs/sdk/configuration" description="`default_headers`, `default_query` for client-wide overrides." />
+  <Card title="Previews" href="/docs/sdk/previews" description="The cleaner path for in-flight server features." />
+</Cards>
+
+## See also
+
+- [Errors](/docs/sdk/errors) — every escape-hatch path still raises typed errors
+- [Streaming](/docs/sdk/streaming) — `with_streaming_response` vs SSE iteration

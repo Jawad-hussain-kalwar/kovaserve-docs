@@ -1,0 +1,68 @@
+---
+title: Models
+description: Deployable models, capability matrix, context windows, and tokenizers. The model list reflects what's available on managed cloud; private deployments configure their own set.
+---
+
+KovaServe routes inference to a configurable set of models. On managed cloud the list reflects what's available on `api.kovaserve.com`; on private deployments the list reflects what's loaded on your fleet.
+
+Query the live list:
+
+```bash
+curl -H "Authorization: Bearer ks_..." https://api.kovaserve.com/v1/models
+```
+
+Or via the SDK:
+
+```python
+from kovaserve import OpenAI
+client = OpenAI()
+for model in client.models.list():
+    print(model.id)
+```
+
+## Capability matrix (managed cloud)
+
+| Model | Context window | Tokenizer | Use case | Cache support |
+|---|---|---|---|---|
+| `meta-llama/Llama-3-70B-Instruct` | 128K | Llama-3 (BPE) | General-purpose instruction following | ✅ |
+| `meta-llama/Llama-3-8B-Instruct` | 128K | Llama-3 (BPE) | Latency-sensitive general use | ✅ |
+| `qwen3-coder-30b` | 32K | Qwen-3 (BPE) | Code generation, repo analysis | ✅ |
+| `mistralai/Mixtral-8x7B-Instruct-v0.1` | 32K | Mistral (BPE) | Multilingual, structured outputs | ✅ |
+| `anthropic/claude-3-5-sonnet` | 200K | Anthropic (Tiktoken family) | Long-context reasoning, document analysis | ✅ (Anthropic cache) |
+| `openai/gpt-4o` | 128K | Tiktoken o200k_base | Multimodal, structured outputs | ✅ (OpenAI cache) |
+
+Cache support means the model participates in KovaServe's [warm-prefix routing](/docs/concepts/routing/manifest-aware-routing) and the `cached_tokens` field in usage records reflects real cache hits.
+
+## Picking a model
+
+| Workload | Recommended |
+|---|---|
+| **General-purpose agents** with long context | `meta-llama/Llama-3-70B-Instruct` (open-weight, self-hostable, 128K window) |
+| **Coding agents** (CodeRuns SKU) | `qwen3-coder-30b` — purpose-built for code; cheaper per token than Llama-3-70B |
+| **Long-context document analysis** (DocRuns SKU) | `anthropic/claude-3-5-sonnet` — 200K window, strong document grounding |
+| **Latency-sensitive interactive agents** | `meta-llama/Llama-3-8B-Instruct` — smaller, faster, still high-quality |
+| **Multimodal** (text + image) | `openai/gpt-4o` |
+
+## Model identity and routing
+
+Each model in the list has a stable identifier. KovaServe's Cache-Aware Router uses the identifier as part of the [`stable_context_id`](/docs/concepts/context/context-manifests) — switching models invalidates the cache prefix, which is correct (different tokenizers, different identity).
+
+For private deployments adding new models, see [self-hosting on Kubernetes](/docs/guides/deployment/self-hosting-kubernetes) — register the model in the chart `values.yaml` and the gateway picks it up on the next deploy.
+
+## What KovaServe is not
+
+KovaServe is **not** an inference layer. It works *with* vLLM, llm-d, managed model APIs, and other inference backends; it does not run the models itself. The models above are routed to substrates configured at deployment time.
+
+For more on the layering, see [the three-layer architecture](/docs/concepts/layers).
+
+## Tokenizer fingerprints
+
+Every ContextManifest records the `tokenizer_fingerprint` used to count tokens for that manifest. Tokenizer updates produce new fingerprints; the router treats manifests with different fingerprints as distinct identities. This protects against subtle drift from tokenizer changes between model versions.
+
+## Where to go next
+
+<Cards>
+  <Card title="Manifest-aware routing" href="/docs/concepts/routing/manifest-aware-routing" description="How model identity flows into routing decisions." />
+  <Card title="Self-hosting on Kubernetes" href="/docs/guides/deployment/self-hosting-kubernetes" description="Register your own models." />
+  <Card title="Pricing" href="/docs/pricing" description="Per-model token prices and cost-per-completed-run examples." />
+</Cards>

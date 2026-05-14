@@ -1,0 +1,69 @@
+---
+title: Install the CLI
+description: The `kova` CLI ships in the same package as the Python SDK. One `pip install kovaserve` is all you need.
+---
+
+The `kova` CLI lets you manage your managed agent runs from the terminal. It ships with the Python SDK:
+
+```bash
+pip install kovaserve
+kova --version
+```
+
+## Authenticate
+
+Once installed, log in interactively:
+
+```bash
+kova auth login
+# KovaServe API key: ********
+```
+
+Or non-interactively, useful in CI:
+
+```bash
+kova auth login --api-key ks_live_...
+```
+
+The CLI stores credentials in `~/.config/kova/credentials` (or `%APPDATA%\kova\credentials` on Windows). For more details see [`kova auth`](/docs/cli/auth).
+
+## Verify the auth
+
+```bash
+kova auth status
+# Active profile: default
+# Tenant:         01J8X9Y2Z3K4M5N6P7Q8R9S0T2  (Acme Co)
+# Project:        proj_review_bot              (Review Bot)
+# Role:           write
+```
+
+## Try a no-op command
+
+```bash
+kova runs list --status RUNNING --limit 5
+```
+
+If nothing has run yet, the result is empty — no error, just an empty list. The CLI is talking to the gateway successfully.
+
+## Output modes
+
+Every list and get command supports `--json`:
+
+```bash
+kova runs list --json | jq '.[] | {id: .id, status: .status}'
+```
+
+See [output](/docs/cli/output) for the rendering rules and `--max-depth` tree controls.
+
+## Next
+
+<Cards>
+  <Card title="Set your API key" href="/docs/quickstart/environment" description="Env var convention and profile precedence." />
+  <Card title="Your first managed run" href="/docs/quickstart/first-run" description="Launch end-to-end." />
+  <Card title="CLI overview" href="/docs/cli" description="Every subcommand at a glance." />
+</Cards>
+
+## See also
+
+- [CLI install](/docs/cli/install) — full installation reference
+- [`kova auth`](/docs/cli/auth) — login, logout, status

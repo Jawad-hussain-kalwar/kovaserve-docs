@@ -1,0 +1,99 @@
+---
+title: "`kova usage query`"
+description: Per-Run / per-Project / per-Tenant cost and token aggregates with cache-savings breakdown. Scope-dependent error semantics.
+---
+
+Query usage aggregates with real token counts, real `cached_tokens` accounting, and per-row pricing snapshots.
+
+## Synopsis
+
+```bash
+kova usage query --scope <SCOPE> [--id <ID>] [OPTIONS]
+```
+
+## Options
+
+| Option | Meaning |
+|---|---|
+| `--scope <scope>` | Required. One of `run`, `project`, `tenant`. |
+| `--id <id>` | The Run / Project / Tenant ID. `--scope tenant --id` is omittable (defaults to the API key's Tenant). |
+| `--start <iso8601>` / `--end <iso8601>` | Time window. Required for `project` / `tenant` scopes. |
+| `--model <id>` | Filter to a specific model. |
+| `--top <n>` | Number of top entries in `by_run` / `by_model` breakdowns. Default 20. |
+| `--json` | Emit the aggregate as one JSON document. |
+
+## Scope-dependent error semantics
+
+| Scope | Missing target |
+|---|---|
+| `run` | Returns `404 run_not_found`. A missing Run ID is a programming error. |
+| `project` | Returns `200` with zeros. A Project with no traffic is a legitimate empty state. |
+| `tenant` | Returns `200` with zeros. |
+
+## Examples
+
+```bash
+# Per-Run cost breakdown
+kova usage query --scope run --id 01J8X9Y2Z3K4M5N6P7Q8R9S0T1
+
+# Per-Project, May only
+kova usage query --scope project --id proj_review_bot \
+    --start 2026-05-01T00:00:00Z --end 2026-06-01T00:00:00Z
+
+# Per-Tenant, scoped to one model
+kova usage query --scope tenant \
+    --start 2026-05-01T00:00:00Z --end 2026-06-01T00:00:00Z \
+    --model meta-llama/Llama-3-70B-Instruct
+
+# JSON for scripting
+kova usage query --scope run --id 01J... --json | jq '.total_cost_cents'
+```
+
+## Output — per-Run
+
+```
+Run 01J8X9Y2Z3K4M5N6P7Q8R9S0T1   3 ModelCalls
+Prompt tokens:    3 821
+Completion tokens: 1 144
+Cached tokens:    2 700
+─────────────────────────────────────────────────────────────────────
+Gross cost:        $0.0680
+Cache savings:    -$0.0180
+Net cost:          $0.0500
+
+By model:
+  meta-llama/Llama-3-70B-Instruct   3 calls    $0.0500   (cached=2 700)
+```
+
+## Output — per-Project
+
+```
+Project proj_review_bot   2026-05-01 → 2026-05-31
+Runs:               142
+ModelCalls:         1 247
+Prompt tokens:      1 248 320
+Completion tokens:  342 100
+Cached tokens:      830 184
+─────────────────────────────────────────────────────────────────────
+Gross cost:         $48.20
+Cache savings:     -$18.10
+Net cost:           $30.10
+
+Top runs by cost:
+  01J8X9Y2Z3K4M5N6P7Q8R9S0T1   $4.20
+  01J8X9Y2Z3K4M5N6P7Q8R9S0T4   $3.80
+  ...
+
+By model:
+  meta-llama/Llama-3-70B-Instruct   1 100 calls   $25.40
+  qwen3-coder-30b                     147 calls   $4.70
+```
+
+## The cost identity
+
+Every aggregate honours `gross_cost_cents - cache_savings_cents = total_cost_cents` exactly. Decimal-string precision (four fractional digits) makes the identity hold without floating-point drift. See [cost model](/docs/concepts/cost/cost-model).
+
+## See also
+
+- [`kova usage export`](/docs/cli/usage/export) — raw `usage_records` rows as JSONL
+- [`client.metering.usage`](/docs/sdk/control/metering) — the SDK equivalent

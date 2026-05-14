@@ -1,0 +1,129 @@
+---
+title: Coding agent (CodeRuns)
+description: A reference recipe for a managed coding agent — bug fix, test repair, repo analysis. End-to-end: durable runs, checkpoint recovery, budget enforcement, audit-ready execution.
+---
+
+**CodeRuns** is the managed-agent SKU for software-engineering workflows. This recipe walks through a complete CodeRuns agent — receive a repository task, read code, run tests, make file changes, checkpoint before risky actions, recover from failures, stay within budget, and produce a final diff with a full execution timeline.
+
+CodeRuns is one of three managed-agent SKUs KovaServe ships, alongside [OpsRuns](/docs/cookbook/ops-automation) (IT, cloud, security operations) and [DocRuns](/docs/cookbook/document-review) (document-heavy workflows). The shared execution foundation is identical; the SKUs differ in which tools they ship with and which patterns they default to.
+
+## The recipe
+
+```python
+from pathlib import Path
+from kovaserve import OpenAI, KovaControlClient, kova, RunHooks
+
+inference = OpenAI()
+ks = KovaControlClient()
+
+class CodeRunsHooks(RunHooks):
+    def on_budget_warning(self, decision):
+        print(f"Budget warning at {decision.budget_remaining_pct:.0%}")
+    def on_compact_required(self, decision):
+        # Let the runtime compact older turns before next call
+        ...
+
+@kova.budget(cost_cents="50.0000", tokens=2_000_000, time_seconds=3600)
+@kova.run(project="proj_coderuns", model="qwen3-coder-30b", hooks=CodeRunsHooks())
+def fix_bug(repo_url: str, issue_id: int) -> str:
+    @kova.tool(name="clone_repo")
+    def clone():
+        return git.clone(repo_url, depth=1)
+
+    @kova.tool(name="read_issue")
+    def read_issue():
+        return github.get_issue(repo_url, issue_id)
+
+    @kova.tool(name="search_repo")
+    def search(query):
+        return code_search(query)
+
+    @kova.tool(name="run_tests")
+    def test():
+        return shell.run("pytest -x")
+
+    @kova.checkpoint(trigger="before_file_write")
+    def write_patch(path, content):
+        Path(path).write_text(content)
+
+    @kova.checkpoint(trigger="before_shell_command")
+    def open_pr():
+        return shell.run("gh pr create --fill")
+
+    # 1. Read context
+    workspace = clone()
+    issue = read_issue()
+
+    # 2. Reason
+    plan = inference.chat.completions.create(
+        model="qwen3-coder-30b",
+        messages=[{"role": "user", "content": f"Issue:\n{issue}\nPlan a fix."}],
+    ).choices[0].message.content
+
+    # 3. Edit
+    patch = inference.chat.completions.create(
+        model="qwen3-coder-30b",
+        messages=[{"role": "user", "content": f"Following plan:\n{plan}\nProduce the patch."}],
+    ).choices[0].message.content
+
+    # 4. Apply (with checkpoint)
+    write_patch(f"{workspace}/src/foo.py", patch)
+
+    # 5. Verify
+    test_result = test()
+
+    # 6. Open the PR (with checkpoint)
+    pr_url = open_pr()
+
+    return pr_url
+```
+
+## What the recipe demonstrates
+
+- **Durable runs.** The function body is the run; the `@kova.run` decorator opens it on entry and closes it on return.
+- **Budget enforcement.** `@kova.budget` admits every model call. Cost / tokens / time ceilings; the run hard-stops if any dimension exhausts.
+- **Tool actions.** Each `@kova.tool` records a `TOOL_EXECUTE` step with full attribution. The model calls inside / between tools nest under them.
+- **Checkpoint recovery.** Before destructive operations (file write, PR creation), `@kova.checkpoint` captures the recoverable state. A failure mid-action restores from the most recent checkpoint.
+- **Reactive hooks.** `RunHooks` reacts to budget warnings, compaction requirements, and admission rejections.
+- **Audit-ready timeline.** Every step, model call, tool call, file write, and checkpoint shows up in the run timeline. Operators see the full execution after the fact.
+
+## Inspect a completed run
+
+```bash
+kova runs get 01J8X9Y2Z3K4M5N6P7Q8R9S0T1 --expand steps.model_calls.context_manifest
+```
+
+The timeline shows every action the agent took, with cost attributed to each model call and budget closure at the end.
+
+## Resume after a failure
+
+If the worker crashes during the PR-creation step, restore from the most recent checkpoint:
+
+```bash
+kova checkpoints list --run-id 01J... --status VALIDATED --order desc --limit 1
+kova checkpoints restore 01J...
+```
+
+The run picks up from the state just before the PR creation — workspace intact, patch applied, tests passing, ready to retry the final step.
+
+## SKU summary
+
+CodeRuns ships with default toolchain access for:
+
+- Git operations (clone, branch, commit, push, PR creation).
+- Shell execution with workspace isolation.
+- File read / write with diff tracking.
+- Test runners (pytest, npm test, go test, etc.).
+- Code search (ripgrep, AST grep).
+- HTTP / API calls.
+
+The toolset is configurable per Project. The exact composition depends on the deployment.
+
+## Where to go next
+
+<Cards>
+  <Card title="OpsRuns" href="/docs/cookbook/ops-automation" description="The IT / cloud / security counterpart." />
+  <Card title="DocRuns" href="/docs/cookbook/document-review" description="The document-review counterpart." />
+  <Card title="Tool loops with budget kill" href="/docs/cookbook/tool-loops-with-budget-kill" description="Runaway agent protection." />
+  <Card title="Branching from a checkpoint" href="/docs/cookbook/branching-from-checkpoint" description="Try an alternative from the same state." />
+</Cards>

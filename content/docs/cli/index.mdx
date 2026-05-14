@@ -1,0 +1,95 @@
+---
+title: CLI reference
+description: The `kova` command-line interface — ships with the `kovaserve` Python package. Every resource namespace mirrored 1:1 as a subcommand. Same auth, same retries, same code path as the SDK.
+---
+
+The **`kova`** CLI is the command-line surface for KovaServe. It is installed by the `kovaserve` Python package — there is no separate binary — and mirrors the SDK's [resource namespaces](/docs/sdk/control) 1:1: `kova runs list` calls `client.runs.list()` under the hood. Same auth, same retries, same idempotency, same error hierarchy.
+
+```bash
+pip install kovaserve
+kova auth login
+kova runs list --status RUNNING --limit 10
+kova runs tail 01J8X9Y2Z3K4M5N6P7Q8R9S0T1
+```
+
+## What ships in `kova`
+
+| Topic | Subcommand | What it does |
+|---|---|---|
+| [Auth](/docs/cli/auth) | `kova auth login / logout / status` | Authenticate the CLI; manage `~/.config/kova/credentials`. |
+| [Runs](/docs/cli/runs/list) | `kova runs {list, get, tail, cancel, branch}` | The most-used namespace. |
+| [Sessions](/docs/cli/sessions/list) | `kova sessions {list, get, archive}` | Continuity containers. |
+| [Checkpoints](/docs/cli/checkpoints/list) | `kova checkpoints {list, get, restore}` | Capture and restore. |
+| [Budgets](/docs/cli/budgets/create) | `kova budgets {create, get}` | Run-level admission control. |
+| [Context](/docs/cli/context/manifests) | `kova context {manifests, segments, artifacts, budgets}` | Context engineering primitives. |
+| [Usage](/docs/cli/usage/query) | `kova usage {query, export}` | Per-Run / Project / Tenant aggregates and JSONL export. |
+| [Keys](/docs/cli/keys/create) | `kova keys {create, rotate, revoke}` | Bearer key lifecycle. |
+| [Events](/docs/cli/events/tail) | `kova events tail` | Live-tail event streams. |
+| [Cluster (operator)](/docs/cli/cluster/nodes) | `kova nodes list`, `kova cluster cache-lookup` | Operator-scope cluster introspection. |
+
+Every subcommand mirrors the SDK shape exactly. If `client.runs.list(project_id="...", status="RUNNING", limit=10)` is the SDK call, `kova runs list --project-id ... --status RUNNING --limit 10` is the CLI call.
+
+## Global flags
+
+Every subcommand accepts these flags:
+
+| Flag | Effect |
+|---|---|
+| `--profile <name>` | Use a non-default credential profile from `~/.config/kova/credentials`. |
+| `--api-key <key>` | Override the resolved bearer key for this command. |
+| `--base-url <url>` | Override the resolved gateway URL. |
+| `--json` | Emit one JSON document (or one JSON-line per item for `tail`-shaped commands). |
+| `--no-color` | Disable ANSI colour in table output. Also honours `NO_COLOR`. |
+| `--quiet` / `-q` | Suppress non-essential output. |
+| `--verbose` / `-v` | Verbose log output. Multiple `-v` raises verbosity (`-v` info, `-vv` debug). |
+| `--help` / `-h` | Subcommand help. |
+
+## Same code path as the SDK
+
+The CLI is not a separate HTTP layer. `kova runs list` constructs a `KovaControlClient` from the resolved credentials, calls `client.runs.list(...)`, and renders the response. Everything you configured for the SDK — timeouts, retries, idempotency, previews, escape hatches — applies to the CLI verbatim.
+
+This means:
+
+- Changes to the SDK propagate to the CLI for free.
+- Types, error classes, idempotency keys, and retry behaviour are shared.
+- Bug fixes in one help the other.
+
+The decision to ship the CLI in the same package — not as a separate Go or Rust binary — is a deliberate one. Separate-language CLIs (the `firectl` pattern) duplicate authentication, retries, idempotency, and type definitions; every drift is a bug surface. Shipping the CLI in `kovaserve` keeps it honest.
+
+## Output
+
+The CLI defaults to **table output** for `list` and `get` commands, and **streaming-line output** for `tail`. Every command supports `--json` for machine consumption:
+
+```bash
+kova runs list --status RUNNING --json | jq '.[] | {id: .id, cost: .total_cost_cents}'
+```
+
+For tree-shaped output (Steps under a Run, branch lineage), the table format caps depth at 5 by default. Override with `--max-depth N` or set `KOVA_MAX_TREE_DEPTH`. See [output](/docs/cli/output) for the rendering rules.
+
+## Configuration precedence
+
+The CLI resolves each setting through this chain (first non-null wins):
+
+```
+1. Explicit flag on the subcommand (--api-key, --base-url, --profile)
+2. KOVASERVE_API_KEY / KOVASERVE_BASE_URL env vars
+3. The active profile in ~/.config/kova/credentials
+4. CLI defaults
+```
+
+See [configuration](/docs/cli/configuration) for the full precedence rules and the profile file format.
+
+## Where to go next
+
+<Cards>
+  <Card title="Install" href="/docs/cli/install" description="`pip install kovaserve` ships SDK + CLI." />
+  <Card title="`kova auth login`" href="/docs/cli/auth" description="First-time setup." />
+  <Card title="Runs commands" href="/docs/cli/runs/list" description="The most-used resource namespace." />
+  <Card title="Configuration" href="/docs/cli/configuration" description="Profiles, env vars, global flags." />
+  <Card title="Output" href="/docs/cli/output" description="`--json` vs table; tree rendering." />
+</Cards>
+
+## See also
+
+- [SDK overview](/docs/sdk) — every subcommand reaches into the SDK
+- [Configuration](/docs/sdk/configuration) — the SDK-side env vars the CLI also reads

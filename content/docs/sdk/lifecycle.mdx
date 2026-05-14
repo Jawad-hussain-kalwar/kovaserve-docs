@@ -1,0 +1,111 @@
+---
+title: SDK lifecycle
+description: Semantic Versioning for the Python API. Major breaks are preceded by at least one minor with `DeprecationWarning`. Previews follow the same deprecation window — no surprises.
+---
+
+The SDK follows **Semantic Versioning** for the Python API surface, decoupled from the gateway wire version. The SDK can ship 1.x for a long time against wire versions that bump independently. Breaking changes always pass through a `DeprecationWarning` window first; previews follow the same rule.
+
+## SemVer applied to the Python surface
+
+| Bump | When |
+|---|---|
+| MAJOR (`2.x.y`) | Incompatible wire changes the server has rolled out, or breaking SDK-API changes (removed method, renamed parameter, dropped error class). |
+| MINOR (`1.x.0`) | Additive — new namespaces, methods, kwargs, decorators, previews, hooks methods, error subclasses, or typed fields. |
+| PATCH (`1.0.x`) | Bug fixes, internal refactors. |
+
+A new typed field on an existing response is a MINOR bump because Pydantic responses forward-extra by default — old code reads the field via `response.model_extra`, new code reads it as a typed attribute. Neither breaks.
+
+A removed method is a MAJOR bump because old code crashes immediately on the missing name. Removals are preceded by a deprecation window.
+
+## The deprecation window
+
+Every breaking change is preceded by **at least one minor release** that emits a `DeprecationWarning` from the call site, naming:
+
+1. The version in which removal will happen.
+2. The migration target.
+
+```python
+import warnings
+warnings.simplefilter("always", DeprecationWarning)
+
+client.runs.old_method()
+# DeprecationWarning: KovaControlClient.runs.old_method() is deprecated and will be
+# removed in 2.0. Use KovaControlClient.runs.new_method() instead.
+```
+
+The warning is shown from the **call site** so the line in your code that needs updating is what the warning identifies. The SDK does not silently remove APIs; if you've upgraded the SDK and the call still works, it's not removed.
+
+`DeprecationWarning` filters in CPython default to ignored — explicit filter set with `warnings.simplefilter("always", DeprecationWarning)` or your test framework's strict-warning mode surfaces them. The recommended path is to enable strict warnings in CI so deprecations are visible before they become breaks.
+
+## What MAJOR bumps include
+
+A MAJOR release is not common — it's the path the SDK takes when forward-compatibility is no longer possible. Examples:
+
+- A wire field's type changes incompatibly (e.g., a field that was always `str` becomes `int`).
+- A method is removed (after the deprecation window).
+- A parameter is renamed or its semantics change.
+- An error class is dropped from the hierarchy.
+
+The deprecation window is the warning shot — when a MAJOR ships, every removed API has been warning for at least one minor.
+
+## What MINOR bumps include
+
+The most common bump. Examples:
+
+- A new resource (`client.new_namespace`).
+- A new method on an existing namespace.
+- A new typed field on an existing response.
+- A new error subclass.
+- A new preview identifier accepted.
+- A new framework adapter.
+- A graduated preview (now stable).
+
+MINOR bumps **never** break working code. New code can use new fields; old code keeps working.
+
+## What PATCH bumps include
+
+Bug fixes only. No API changes, no new functionality. Safe to apply continuously in production.
+
+## Previews follow the same window
+
+[Previews](/docs/sdk/previews) carry the same deprecation contract:
+
+- An abandoned preview emits `DeprecationWarning` for one minor release before becoming `400 invalid_preview` in the next.
+- A graduated preview's identifier remains valid as an alias for one minor release before being removed in the next.
+- A versioned preview identifier (with date suffix) deprecates the previous date when a new one ships, with the same one-minor window.
+
+This is what prevents the Anthropic `beta.*` accumulation problem — even features that "exist via preview" follow the deprecation window.
+
+## What the version number does *not* commit to
+
+| Not committed |
+|---|
+| Gateway wire-version compatibility. The SDK may need to ship 2.0 when the gateway makes a breaking change, but 1.x against the *latest* gateway is supported within reasonable limits. |
+| Internal module structure under `kovaserve._*`. Anything prefixed with `_` is implementation; not part of the public API; can change between PATCH. |
+| The shape of `httpx.Response` returned by `with_raw_response`. The wrapper is stable; the underlying `httpx.Response` is debug-only. |
+| Logging output format. Loggers exist; their level discipline is stable; the exact text format is not. |
+
+## Reading version info
+
+```python
+import kovaserve
+
+print(kovaserve.__version__)         # → "1.2.3"
+print(kovaserve.__wire_version__)    # → the gateway wire-version range this SDK supports
+```
+
+The wire version is informational — the server will return errors when the SDK's request shape doesn't match the gateway's version. Most version drift is forward-compatible (a new SDK against an older gateway works fine; an older SDK against a newer gateway works fine for known fields).
+
+## Where to go next
+
+<Cards>
+  <Card title="Previews" href="/docs/sdk/previews" description="Opt into in-flight features per request." />
+  <Card title="Type model" href="/docs/sdk/type-model" description="How forward-compat through `model_extra` works." />
+  <Card title="Configuration" href="/docs/sdk/configuration" description="`KOVASERVE_PREVIEWS` env var." />
+  <Card title="Changelog" href="/docs/changelog" description="Every API change, dated." />
+</Cards>
+
+## See also
+
+- [Logging](/docs/sdk/logging-and-tracing) — `DeprecationWarning` goes through Python's `warnings` module, not the `kovaserve` logger
+- [SemVer 2.0.0](https://semver.org/) — the underlying spec

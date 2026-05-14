@@ -1,0 +1,79 @@
+---
+title: "`kova keys create`"
+description: Issue a new Bearer Key bound to a `(tenant, project, environment)` triple. The raw key is displayed exactly once.
+---
+
+Issue a new Bearer Key. The raw value (`ks_live_...` or `ks_test_...`) is **displayed exactly once** — store it now; KovaServe never returns it again.
+
+## Synopsis
+
+```bash
+kova keys create --project-id <ID> [OPTIONS]
+```
+
+## Options
+
+| Option | Meaning |
+|---|---|
+| `--project-id <id>` | Required. The Project the Key is bound to. |
+| `--environment-id <id>` | The Environment. Defaults to the Project's default Environment. |
+| `--name <text>` | Required. Human-readable identifier (`ci-runner`, `staging-bot`, etc.). |
+| `--role <role>` | One of `admin`, `write`, `read`, `inference`. Default `inference`. |
+| `--rate-limit-rpm <n>` | Per-key rate ceiling, requests per minute. |
+| `--rate-limit-tpm <n>` | Per-key tokens-per-minute ceiling. |
+| `--expires-at <iso8601>` | Optional explicit expiry. |
+| `--json` | Emit the new Key as one JSON document (includes the raw value). |
+
+## Examples
+
+```bash
+# Inference-only key for a SaaS app
+kova keys create --project-id proj_review_bot --name customer-1234 --role inference
+
+# Write key for a CI runner with explicit expiry
+kova keys create \
+    --project-id proj_review_bot \
+    --environment-id env_prod \
+    --name ci-runner \
+    --role write \
+    --rate-limit-rpm 600 \
+    --expires-at 2027-01-01T00:00:00Z
+
+# JSON output — capture the raw key for downstream automation
+RAW=$(kova keys create --project-id proj_... --name bot --role inference --json | jq -r '.raw')
+```
+
+## Output
+
+```
+Key 01J8X9Y2Z3K4M5N6P7Q8R9KY04  ACTIVE
+Name:          ci-runner
+Project:       proj_review_bot
+Environment:   env_prod
+Role:          write
+Rate limits:   600 RPM, unlimited TPM
+Expires:       2027-01-01T00:00:00Z
+
+Raw key (displayed once — store it now):
+
+  ks_live_AKIAxxxxxxxxxxxxxxxxxx
+
+Fingerprint:   sha256:abc123...   (the SDK and the server reference the Key by fingerprint)
+```
+
+## The four roles
+
+| Role | Can do |
+|---|---|
+| `admin` | All operations, including Tenant updates, Project create/archive, Key issuance, operator cluster reads. |
+| `write` | Create / update / cancel Runs, Sessions, Budgets, Checkpoints, Handles. Read everything in scope. |
+| `read` | Read-only across the scope. |
+| `inference` | Chat completions and the implicit Runs/Sessions they imply. Cannot read or modify other resources. |
+
+The `inference` role is the right key to hand to an application. The `write` role is the right key for a CI runner. The `admin` role should be scoped narrowly — typically held by automation that provisions Projects and Keys.
+
+## See also
+
+- [`kova keys rotate`](/docs/cli/keys/rotate) — replace a Key without revoking immediately
+- [`kova keys revoke`](/docs/cli/keys/revoke) — invalidate a Key
+- [`client.tenancy.keys.create`](/docs/sdk/control/tenancy) — the SDK equivalent

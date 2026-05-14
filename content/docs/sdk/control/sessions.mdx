@@ -1,0 +1,192 @@
+---
+title: Sessions
+description: The `client.sessions` namespace — create, retrieve, list, and archive Sessions, the continuity containers that host sequential Runs and accumulate turn history.
+---
+
+The `client.sessions` namespace operates on [Sessions](/docs/concepts/continuity/sessions), the continuity containers that host one or more sequential [Runs](/docs/concepts/run-hierarchy/runs) and accumulate a turn history. Sessions are how KovaServe expresses "this is the same conversation across multiple Runs" — they survive node restarts, track the current [ContextManifest](/docs/concepts/context/context-manifests), and bind to the Cache-Aware Router for warm-prefix affinity.
+
+```python
+from kovaserve import KovaControlClient
+
+client = KovaControlClient()
+session = client.sessions.create(model="meta-llama/Llama-3-70B-Instruct")
+print(session.id, session.state)   # ses_a7f3...  OPEN
+```
+
+## Methods
+
+| Method | Wire | What it does |
+|---|---|---|
+| [`create`](#create) | `POST /v1/ks/sessions` | Allocate a new Session in `OPEN`. |
+| [`get`](#get) | `GET /v1/ks/sessions/{id}` | Fetch a Session, optionally hydrating turn history and Runs. |
+| [`list`](#list) | `GET /v1/ks/sessions` | Cursor-paginated list scoped to a Project. |
+| [`archive`](#archive) | `PATCH /v1/ks/sessions/{id}` (state=ARCHIVED) | Transition a Session to `ARCHIVED`. |
+
+## The Session shape
+
+```python
+class Session(BaseModel):
+    id: str                              # ses_<24hex> — the documented exception to ULIDs
+    tenant_id: str
+    project_id: str
+    model: str
+    state: SessionState                  # OPEN | IDLE | RESUMABLE | ARCHIVED | EXPIRED
+    turn_count: int
+    created_at: datetime
+    last_accessed_at: datetime
+    expires_at: datetime | None
+    stable_prefix_id: str | None         # most recent cache-aligned prefix observed
+    last_node_id: str | None             # node serving the most recent ModelCall
+    current_run_id: str | None           # the Run currently bound, if any
+    current_manifest_id: str | None      # the most recently admitted ContextManifest
+
+    # Populated only when expand=["turns", ...] is requested
+    turns: list[SessionTurn] | None
+```
+
+Session IDs use the format `ses_<24hex>` — e.g., `ses_a7f3c2b8d4e1f0925a1b6c3d`. This is the **single documented exception** to KovaServe's 26-character Crockford ULID convention; every other ID in the SDK is a bare ULID. The prefix carries the type signal at a glance because Sessions appear in user-facing surfaces (URL paths, error messages, log lines) where context is missing.
+
+`SessionState` follows the [Session state machine](/docs/concepts/continuity/session-state-machine): `OPEN → IDLE → RESUMABLE → ARCHIVED | EXPIRED`.
+
+## `create`
+
+```python
+session = client.sessions.create(
+    model="meta-llama/Llama-3-70B-Instruct",     # required default model
+    expires_in_hours=24,                          # optional TTL, default 24, range 1..720
+)
+```
+
+The Session starts in `OPEN` with `turn_count=0` and no Run bound. `current_run_id` and `current_manifest_id` are both `null` until the first inference call settles. The `(tenant_id, project_id)` pair is taken from the API key — Sessions are scoped to the key's tenancy and cannot cross it.
+
+The Session expires when wall-clock time crosses `created_at + expires_in_hours`. Active inference against an expired Session returns `404 session_not_found`; the expired Session row stays for audit but is no longer addressable for new Runs.
+
+## `get`
+
+```python
+session = client.sessions.get("ses_a7f3c2b8d4e1f0925a1b6c3d")
+```
+
+Without `expand`, `session.turns` is `None` — the bare Session row is returned. To hydrate turn history and recent Runs in one round trip:
+
+```python
+session = client.sessions.get(
+    "ses_a7f3c2b8d4e1f0925a1b6c3d",
+    expand=["turns", "current_run"],
+)
+
+for turn in session.turns:
+    print(turn.ordinal, turn.role, turn.step_id, turn.model_call_id)
+```
+
+The `current_run_id` field is the pointer to the active Run, but only `expand=["current_run"]` hydrates the Run object. The `current_manifest_id` field is similarly hydratable via `expand=["current_manifest"]` for inspection without a separate `client.context.manifests.get(...)` call.
+
+## `list`
+
+```python
+for session in client.sessions.list():
+    print(session.id, session.state, session.turn_count)
+```
+
+Returns an iterator that pages lazily over Sessions in the API key's `(tenant_id, project_id)` scope. Filter and order:
+
+```python
+sessions = client.sessions.list(
+    state="OPEN",                              # filter by SessionState
+    created_after="2026-05-01T00:00:00Z",      # ISO-8601
+    last_accessed_after="2026-05-13T00:00:00Z",
+    limit=20,                                  # per page; iterator paginates beyond
+)
+```
+
+`state` accepts a single value or a list — `state=["OPEN", "IDLE"]` returns Sessions in either state. See [pagination](/docs/sdk/pagination) for manual page control.
+
+## `archive`
+
+```python
+session = client.sessions.archive("ses_a7f3c2b8d4e1f0925a1b6c3d")
+assert session.state == "ARCHIVED"
+```
+
+Transitions the Session to `ARCHIVED`. The Session row is preserved for audit and historical replay; it cannot host new Runs after this transition, and existing bound Runs in non-terminal states continue to execute until they reach a terminal state on their own.
+
+Archiving is the deliberate counterpart to expiry: `EXPIRED` is reached automatically when the TTL elapses; `ARCHIVED` is reached explicitly when a runtime is done with a Session before its TTL. The two terminal states are distinct in the [Session state machine](/docs/concepts/continuity/session-state-machine) so operators can audit which Sessions were closed by intent versus by TTL sweep.
+
+## Binding Sessions to Runs
+
+A Session does not pin to a Run at creation time. A Run binds to a Session in one of two ways:
+
+```python
+# Explicit binding when creating the Run
+run = client.runs.create(
+    project_id="proj_review_bot",
+    model="meta-llama/Llama-3-70B-Instruct",
+    session_id="ses_a7f3c2b8d4e1f0925a1b6c3d",
+)
+
+# Implicit binding via the inference extension
+from kovaserve import OpenAI
+inference = OpenAI()
+response = inference.chat.completions.create(
+    model="meta-llama/Llama-3-70B-Instruct",
+    messages=[{"role": "user", "content": "Follow up"}],
+    extra_body={"kovaserve": {
+        "session_id": "ses_a7f3c2b8d4e1f0925a1b6c3d",
+        # run_id omitted — gateway auto-allocates one bound to the Session
+    }},
+)
+```
+
+A Session can host many sequential Runs, but only one Run at a time is the *current* Run. When a Run reaches a terminal state (`COMPLETED`, `FAILED`, `CANCELED`), the Session stays in `OPEN` and is ready to host the next Run. Sessions transition to `IDLE` automatically after a configurable inactivity period and to `RESUMABLE` when a Checkpoint exists on the most recent Run.
+
+## Turn history
+
+Every model call against a Session appends one or two `SessionTurn` rows — one for the request message, one for the response. Turns carry the Step and ModelCall IDs that produced them, so the conversation history is joinable to the execution graph:
+
+```python
+class SessionTurn(BaseModel):
+    id: str                              # bare ULID
+    session_id: str                      # ses_<24hex>
+    ordinal: int                         # monotonic position in the Session
+    role: str                            # "user" | "assistant" | "system" | "tool"
+    content: str
+    step_id: str | None                  # the Step that produced this turn
+    model_call_id: str | None            # the ModelCall, when role == "assistant"
+    created_at: datetime
+```
+
+For native conversation history reads, `expand=["turns"]` on `client.sessions.get(...)` is the cheapest path. For free-form filtering across many Sessions, use [events](/docs/sdk/control/events) and filter on `ks.session.*` and `ks.model_call.completed`.
+
+## Async parallel
+
+Every method is mirrored on `AsyncKovaControlClient.sessions`:
+
+```python
+import asyncio
+from kovaserve import AsyncKovaControlClient
+
+async def main() -> None:
+    client = AsyncKovaControlClient()
+    session = await client.sessions.create(model="meta-llama/Llama-3-70B-Instruct")
+    async for turn in client.sessions.get(session.id, expand=["turns"]).turns:
+        print(turn.ordinal, turn.role)
+
+asyncio.run(main())
+```
+
+## Where to go next
+
+<Cards>
+  <Card title="Runs" href="/docs/sdk/control/runs" description="The Runs that bind to a Session." />
+  <Card title="`@kova.session` decorator" href="/docs/sdk/decorators/session" description="Open a Session context around a function body." />
+  <Card title="Context manifests" href="/docs/sdk/control/context-manifests" description="The `current_manifest_id` a Session tracks." />
+  <Card title="Events" href="/docs/sdk/control/events" description="Tail `ks.session.*` lifecycle events." />
+</Cards>
+
+## See also
+
+- [Session concept](/docs/concepts/continuity/sessions) — what a Session is
+- [Session state machine](/docs/concepts/continuity/session-state-machine) — `OPEN → IDLE → RESUMABLE → ARCHIVED | EXPIRED`
+- [Current manifest](/docs/concepts/continuity/current-manifest) — the Session-level pointer
+- [API: Sessions](/docs/api/sessions/create) — the wire surface
+- [IDs](/docs/api/using-the-api/ids) — why Session IDs carry a prefix

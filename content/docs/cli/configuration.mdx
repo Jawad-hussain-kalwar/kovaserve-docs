@@ -1,0 +1,121 @@
+---
+title: Configuration
+description: Profiles, environment variables, global flags. Precedence is `flag > env var > profile > default`. The CLI reads `~/.config/kova/credentials`; the SDK does not.
+---
+
+The CLI reads configuration from three sources. The precedence is **flag > env var > profile > default** — every level can override the level below it.
+
+## Resolution order
+
+```
+1. Explicit flag on the subcommand                            (--api-key, --base-url, --profile)
+2. Environment variable                                        (KOVASERVE_API_KEY, KOVASERVE_BASE_URL, KOVA_PROFILE)
+3. The active profile in ~/.config/kova/credentials
+4. CLI defaults
+```
+
+A `KOVASERVE_API_KEY` env var wins over a credentials file profile. A `--api-key` flag wins over the env var.
+
+## Profiles
+
+`~/.config/kova/credentials` (or `%APPDATA%\kova\credentials` on Windows) is TOML with one section per profile:
+
+```toml
+[default]
+api_key = "ks_live_..."
+base_url = "https://api.kovaserve.com/v1"
+
+[staging]
+api_key = "ks_test_..."
+base_url = "https://staging.kovaserve.com/v1"
+
+[self-hosted]
+api_key = "ks_local_..."
+base_url = "https://kovaserve.internal/v1"
+```
+
+Select a profile per command or per shell:
+
+```bash
+kova --profile staging runs list
+# Or
+export KOVA_PROFILE=staging
+kova runs list
+```
+
+The `default` profile is what loads when no profile is specified. To make a non-default profile the default, edit the file directly — there is no `kova auth use-default` subcommand; the credentials file is the source of truth.
+
+[`kova auth login`](/docs/cli/auth) writes profiles; you typically don't edit the file by hand unless you're scripting a deployment.
+
+## Environment variables
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `KOVASERVE_API_KEY` | — | The bearer token. Overrides any profile. |
+| `KOVASERVE_BASE_URL` | `https://api.kovaserve.com/v1` | Gateway URL. Overrides any profile. |
+| `KOVASERVE_LOG` | `off` | Logger level for the CLI's internal logging — `debug` / `info` / `warn` / `off`. |
+| `KOVASERVE_TIMEOUT` | `60` | Request timeout in seconds. |
+| `KOVASERVE_MAX_RETRIES` | `2` | Retry count for transient failures. |
+| `KOVA_PROFILE` | `default` | Profile to select from the credentials file. |
+| `KOVA_MAX_TREE_DEPTH` | `5` | Cap on nested-tree rendering depth in table output. |
+| `NO_COLOR` | — | Set to any value to disable ANSI colour (cross-tool convention). |
+
+The `KOVASERVE_*` env vars are shared with the SDK. The `KOVA_*` env vars are CLI-only — they don't affect Python SDK behaviour.
+
+## Global flags
+
+Every subcommand accepts these flags:
+
+| Flag | Effect |
+|---|---|
+| `--profile <name>` | Use the named profile from the credentials file. |
+| `--api-key <key>` | Override the bearer key for this command. |
+| `--base-url <url>` | Override the gateway URL for this command. |
+| `--json` | Emit one JSON document (or one JSON-line per item for `tail`-shaped commands). |
+| `--no-color` | Disable ANSI colour in table output. |
+| `--quiet` / `-q` | Suppress non-essential output. |
+| `--verbose` / `-v` | Verbose output. Repeat to raise level: `-v` → info, `-vv` → debug. |
+| `--help` / `-h` | Subcommand help. |
+
+## Combining sources
+
+Common patterns:
+
+```bash
+# CI — env var, no profile
+export KOVASERVE_API_KEY=ks_ci_...
+kova runs list --status RUNNING --json
+
+# Multi-environment scripting — switch profile per call
+kova --profile staging runs list
+kova --profile prod runs list
+
+# Override base URL for one call — useful for testing a self-hosted instance
+kova --base-url https://kovaserve.internal/v1 runs list
+
+# Override API key for one call — useful for impersonation in operator contexts
+kova --api-key ks_admin_... tenants get
+```
+
+## File permissions
+
+On POSIX systems, the credentials file is created with mode `0600` (owner read/write only). If you copy the file or change its permissions to something more permissive, the CLI emits a warning at every subcommand invocation:
+
+```
+WARNING: ~/.config/kova/credentials has permission mode 0644; should be 0600.
+         Fix with: chmod 0600 ~/.config/kova/credentials
+```
+
+The warning fires once per subcommand to remain visible without spamming.
+
+## Where to go next
+
+<Cards>
+  <Card title="`kova auth login`" href="/docs/cli/auth" description="First-time setup writes the profile." />
+  <Card title="Output" href="/docs/cli/output" description="`--json` and table rendering." />
+  <Card title="SDK configuration" href="/docs/sdk/configuration" description="The SDK side of the shared env vars." />
+</Cards>
+
+## See also
+
+- [CLI overview](/docs/cli) — every subcommand at a glance

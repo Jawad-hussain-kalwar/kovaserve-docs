@@ -1,0 +1,188 @@
+---
+title: Composition
+description: Stacking order is binding — `@kova.budget` outermost, `@kova.run` next, `@kova.session` innermost when stacked. `@kova.step` and `@kova.checkpoint` nest inside `@kova.run`. The order is enforced statically and at decoration time.
+---
+
+The five SDK decorators stack in a **fixed outer-to-inner order**. The order is binding because admission must happen before allocation. The SDK enforces the rule both **at type-check time** (`mypy` flags reversed stacking via `Concatenate`-typed signatures) and **at decoration time** (`DecoratorOrderError`) as a runtime backup.
+
+## The canonical stack
+
+```python
+@kova.budget(cost_cents="500.0000", tokens=100_000)       # 1. outermost — admission applies first
+@kova.run(project="proj_review_bot", model="...")         # 2. Run binds inside the Budget
+@kova.session(model="...")                                # 3. innermost when stacked on the same function
+def review_pr(pr_url: str) -> str:
+    @kova.checkpoint(trigger="before_file_write")         # 4. nests inside @kova.run
+    def write_review(content):
+        @kova.step(type="FILE_WRITE", name="persist")      # 5. nests inside @kova.checkpoint
+        def persist():
+            ...
+        persist()
+    ...
+```
+
+Two rules govern the layout:
+
+| Rule | Why |
+|---|---|
+| `@kova.budget` is outermost. | Budget admission must run **before** Run allocation. A hard-stop at admission must not orphan a `RUNNING` Run. |
+| `@kova.session` is innermost when stacked on the same function. | Stacked together, every call opens a Session, then a Run, then runs the body. To host multiple sequential Runs under one Session — the [Session](/docs/concepts/continuity/sessions) → many [Runs](/docs/concepts/run-hierarchy/runs) relationship — apply `@kova.session` to an *enclosing* function that calls multiple `@kova.run`-decorated inner functions, or pass `session=existing_session_id` to `@kova.run` and skip the Session decorator. |
+
+Then within the body:
+
+| Rule | Why |
+|---|---|
+| `@kova.step` and `@kova.checkpoint` nest **inside** `@kova.run`. | Both look up the active Run from a `contextvars.ContextVar`. Outside any `@kova.run`, they raise `NoActiveRunError` at call time. |
+| `@kova.checkpoint` can wrap `@kova.step` or vice versa. | The order matters semantically, not for correctness — see below. |
+
+## What is *not* a decorator
+
+Two operations are deliberately not decorators:
+
+- **`@kova.branch`** — does not exist. Use `client.runs.branch(...)` directly. Wrapping a function with `@kova.branch` would imply the body *is* the branched Run *and* whatever computation the user wrote — two semantics fighting.
+- **`@kova.resume`** — does not exist. Use `client.checkpoints.restore(...)` directly. Same reason.
+
+Both are one-shot operations. They take a single ID and produce a single new entity. There is no "scope of code that is the branch" — once branched, the new Run is just a Run.
+
+## Reversed stacking is caught statically and at decoration time
+
+The decorators carry `Concatenate`-typed return values that encode the order. `mypy` flags violations:
+
+```python
+@kova.session(model="...")                # ❌ order reversed
+@kova.run(project="proj_review_bot")
+@kova.budget(cost_cents="500.0000")
+def review_pr(...):
+    ...
+
+# error: Decorator stacking order is invalid. `@kova.budget` must wrap
+#        `@kova.run`, which must wrap `@kova.session`. Got the reverse.
+```
+
+`mypy` catches the error at type-check time. As a runtime backup for codebases that aren't type-checked, the decorators **also** raise `DecoratorOrderError` at decoration time when the import is loaded. The two checks agree on the rule; either one fires before any application code runs.
+
+## Step and Checkpoint nesting
+
+Inside `@kova.run`, the order of `@kova.step` and `@kova.checkpoint` is your choice — both are correct but mean different things:
+
+### `@kova.checkpoint` outside `@kova.step`
+
+```python
+@kova.checkpoint(trigger="before_file_write")
+@kova.step(type="FILE_WRITE", name="persist")
+def persist(content):
+    Path("review.md").write_text(content)
+```
+
+Order of events:
+
+1. Checkpoint captures (on entry).
+2. Step row is created.
+3. Body executes.
+4. Step transitions to terminal.
+5. Checkpoint capture-on-exit (if set).
+
+This is the **right pattern when the Checkpoint is the load-bearing boundary** — you want the Checkpoint to be recoverable even if the Step row never lands.
+
+### `@kova.step` outside `@kova.checkpoint`
+
+```python
+@kova.step(type="FILE_WRITE", name="persist")
+@kova.checkpoint(trigger="before_file_write")
+def persist(content):
+    Path("review.md").write_text(content)
+```
+
+Order of events:
+
+1. Step row is created.
+2. Checkpoint captures (on entry).
+3. Body executes.
+4. Checkpoint capture-on-exit (if set).
+5. Step transitions to terminal.
+
+This is the **right pattern when the Step is the load-bearing record** — the Step row exists even if the Checkpoint fails to capture for some reason.
+
+Both forms are valid. The `@kova.checkpoint` outside `@kova.step` form is the more common default — Checkpoints are recovery artifacts; you usually want them as robust as possible.
+
+## Mixing with the control client
+
+Decorators and the imperative `KovaControlClient` mix cleanly:
+
+```python
+@kova.run(project="proj_review_bot", model="meta-llama/Llama-3-70B-Instruct")
+def review_pr(pr_url: str):
+    run = kova.current_run()
+    client = kova.current_run_client()
+
+    # Imperative budget creation inside a decorated Run
+    budget = client.budgets.create(
+        run_id=run.id,
+        cost_limit_cents="500.0000",    # 500 cents = $5
+        token_limit=100_000,
+    )
+
+    # Continue with decorator-driven steps
+    @kova.step(type="TOOL_EXECUTE", name="fetch_pr")
+    def fetch():
+        return github.get_pr(pr_url)
+
+    pr = fetch()
+    return summarize(pr)
+```
+
+The two surfaces agree on the server side — a Budget created imperatively and a Budget opened via `@kova.budget` are the same entity with the same lifecycle.
+
+## Mixing with framework adapters
+
+Framework adapters (`KovaMiddleware`, `KovaInterceptor`, `KovaRunHooks`) operate **alongside** decorators. The middleware opens its own Run on `before_agent`; a `@kova.run` inside a node bodies sees the active Run via ContextVar and binds to it as an inner scope rather than creating a new Run.
+
+```python
+from kovaserve.adapters.langgraph import KovaMiddleware
+from langgraph.graph import StateGraph
+
+graph = StateGraph(MyState)
+graph.set_middleware([KovaMiddleware(client=ks_client, project_id="proj_review_bot")])
+
+@kova.run(project="proj_review_bot", model="...")
+def node_body(state):
+    # KovaMiddleware already opened a Run. @kova.run sees it via the contextvar
+    # and binds to it as the active Run rather than creating a new one.
+    ...
+```
+
+The decorator's `client.runs.create` is skipped when a Run is already active in the context; it transparently becomes a "bind to active" operation. See [LangGraph adapter](/docs/sdk/adapters/langgraph) for the integration shape.
+
+## Async
+
+Async stacking follows the same rules. Concurrent `asyncio.gather` calls each see their own task-scoped ContextVar, so per-task decorators don't cross-talk:
+
+```python
+async def main() -> None:
+    # Each task gets its own Run / Budget / Session.
+    await asyncio.gather(
+        review_pr("https://github.com/foo/bar/pull/41"),
+        review_pr("https://github.com/foo/bar/pull/42"),
+        review_pr("https://github.com/foo/bar/pull/43"),
+    )
+
+@kova.budget(cost_cents="500.0000")
+@kova.run(project="proj_review_bot", model="...")
+async def review_pr(url: str) -> str:
+    ...
+```
+
+## Where to go next
+
+<Cards>
+  <Card title="`@kova.run`" href="/docs/sdk/decorators/run" description="The Run decorator — middle of the stack." />
+  <Card title="`@kova.session`" href="/docs/sdk/decorators/session" description="The Session decorator — innermost." />
+  <Card title="`@kova.budget`" href="/docs/sdk/decorators/budget" description="The Budget decorator — outermost." />
+  <Card title="Framework adapters" href="/docs/sdk/adapters" description="How adapters compose with decorators." />
+</Cards>
+
+## See also
+
+- [Decorators overview](/docs/sdk/decorators) — the lifecycle contract every decorator follows
+- [Hooks](/docs/sdk/hooks) — `RunHooks` composition order
+- [SDK overview](/docs/sdk) — the three SDK surfaces

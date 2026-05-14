@@ -1,0 +1,173 @@
+---
+title: KovaControlClient
+description: The native Python client for the KovaServe control plane — resource-oriented namespaces for Runs, Sessions, Budgets, Checkpoints, Handles, Context, Metering, Events, Cluster, and Tenancy.
+---
+
+The **`KovaControlClient`** is the typed Python client for the `/v1/ks/*` control-plane surface. Where the [OpenAI re-export](/docs/sdk/inference/openai-compat) handles inference, the control client handles everything else: launching and tracking [Runs](/docs/concepts/run-hierarchy/runs), creating [Sessions](/docs/concepts/continuity/sessions), enforcing [Budgets](/docs/concepts/policy/budgets), capturing and restoring [Checkpoints](/docs/concepts/recovery/checkpoints), inspecting [ContextManifests](/docs/concepts/context/context-manifests), uploading [ContextArtifacts](/docs/concepts/context/context-artifacts), tailing events, and reading metering data.
+
+```python
+from kovaserve import KovaControlClient
+
+client = KovaControlClient()    # reads KOVASERVE_API_KEY + KOVASERVE_BASE_URL
+
+run = client.runs.create(
+    project_id="proj_review_bot",
+    model="meta-llama/Llama-3-70B-Instruct",
+)
+print(run.id, run.status)         # → 01J8X9Y2Z3K4M5N6P7Q8R9S0T1  CREATED
+```
+
+The control client is resource-oriented: every wire endpoint lives under a namespace named after the resource it operates on. There is no flat `client.do_thing(resource, ...)` API — that's the [boto3 trap](/docs/sdk) the SDK deliberately avoids.
+
+## Resource namespaces
+
+Every namespace maps 1:1 to a section of the [REST API](/docs/api). The method names follow the wire shape — `list`, `get`, `create`, `update`, `cancel`, plus resource-specific verbs like `branch`, `restore`, `share`, `prewarm`.
+
+| Namespace | Operations | Resource |
+|---|---|---|
+| [`client.runs`](/docs/sdk/control/runs) | `create`, `get`, `list`, `update`, `cancel`, `steps`, `timeline`, `branch`, `stream` | [Runs](/docs/concepts/run-hierarchy/runs) — the durable execution objective |
+| [`client.sessions`](/docs/sdk/control/sessions) | `create`, `get`, `list`, `archive` | [Sessions](/docs/concepts/continuity/sessions) — continuity containers across turns |
+| [`client.budgets`](/docs/sdk/control/budgets) | `create`, `get`, `list`, `update` | Run-level [Budgets](/docs/concepts/policy/budgets) governing cost, tokens, steps, time, tools |
+| [`client.checkpoints`](/docs/sdk/control/checkpoints) | `create`, `get`, `list`, `restore` | [Checkpoints](/docs/concepts/recovery/checkpoints) — logical-context-first resumable snapshots |
+| [`client.handles`](/docs/sdk/control/handles) | `create`, `get`, `list`, `delete`, `share` | Typed [StateHandles](/docs/concepts/recovery/state-handles) — `kv_prefix`, `context_manifest`, `checkpoint`, `artifact_bundle`, `runtime_state` |
+| [`client.context.manifests`](/docs/sdk/control/context-manifests) | `get`, `list` | [ContextManifests](/docs/concepts/context/context-manifests) — the durable per-call audit anchor |
+| [`client.context.segments`](/docs/sdk/control/context-segments) | `get` | [ContextSegments](/docs/concepts/context/context-segments) — typed fragments composing a manifest |
+| [`client.context.artifacts`](/docs/sdk/control/context-artifacts) | `upload`, `get`, `list`, `delete` | [ContextArtifacts](/docs/concepts/context/context-artifacts) — object-storage-backed offload |
+| [`client.context.budgets`](/docs/sdk/control/context-budgets) | `create`, `get`, `update`, `admit` | [ContextBudgets](/docs/concepts/policy/context-budgets) — context-size admission control |
+| [`client.context.compaction`](/docs/sdk/control/compaction) | `compact`, `records` | [CompactionRecords](/docs/concepts/context/compaction-records) — lineage from source to summarized segments |
+| [`client.cache`](/docs/sdk/control/cache) | `prewarm`, `salt` | KV cache operations — pre-fill warm placements; override the multi-tenant `cache_salt` |
+| [`client.metering`](/docs/sdk/control/metering) | `usage`, `export` | Per-Run / per-Project / per-Tenant cost and token aggregates |
+| [`client.events`](/docs/sdk/control/events) | `list`, `tail` | The eight execution event streams |
+| [`client.cluster`](/docs/sdk/control/cluster) | `nodes`, `cache_lookup`, `routing_plan` | Operator-scope cluster introspection |
+| [`client.tenancy`](/docs/sdk/control/tenancy) | `tenants`, `projects`, `environments`, `keys` | The `Tenant → Project → Environment → Deployment` hierarchy and the credential surface |
+
+The `client.context.*` and `client.tenancy.*` sub-namespaces group related resources behind a logical parent — every method still lives one level deep, never deeper than `client.<namespace>.<sub>.<method>`.
+
+## Construction
+
+The client reads `KOVASERVE_API_KEY` and `KOVASERVE_BASE_URL` from the environment. Override either with kwargs:
+
+```python
+client = KovaControlClient(
+    api_key="ks_live_...",
+    base_url="https://kovaserve.internal/v1",
+    timeout=60.0,
+    max_retries=2,
+)
+```
+
+See [configuration](/docs/sdk/configuration) for every kwarg and the full precedence chain. Construct one client per credential / deployment pairing and reuse it; the `httpx` connection pool inside the client is a real resource.
+
+## Sync and async parallel
+
+`AsyncKovaControlClient` is the async sibling — identical methods, async transport.
+
+```python
+from kovaserve import AsyncKovaControlClient
+
+client = AsyncKovaControlClient()
+run = await client.runs.get("01J8X9Y2Z3K4M5N6P7Q8R9S0T1")
+async for step in client.runs.steps(run.id):
+    print(step.ordinal, step.step_type)
+```
+
+See [sync vs async](/docs/sdk/sync-vs-async) for picking one. The two clients do not bridge implicitly.
+
+## Hydrating the graph in one round trip
+
+KovaServe's resource graph is naturally nested — a Run contains Steps, a Step contains ModelCalls, a ModelCall references a ContextManifest, a ContextManifest contains Segments. Walking the graph with four sequential GETs is the obvious approach but the slow one. Use the `expand=` kwarg to hydrate nested resources in a single request:
+
+```python
+run = client.runs.get(
+    "01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    expand=["steps.model_calls.context_manifest"],
+)
+
+for step in run.steps:
+    for call in step.model_calls:
+        print(call.context_manifest.stable_context_id)
+```
+
+`expand=` accepts dotted paths up to four levels deep. The server validates each path against an allow-list and returns `400 invalid_request` with `details.allowed` when a path is not recognized. See [`expand=` parameter](/docs/sdk/expand-parameter) for the complete contract.
+
+## Cross-cutting behaviour
+
+Every namespace inherits the same cross-cutting behaviour from the base client:
+
+| Behaviour | Default | Customize through |
+|---|---|---|
+| [Pagination](/docs/sdk/pagination) | Cursor-based, auto-iterating `for x in client.runs.list(...)`. | `limit=`, `after=`, `before=` kwargs; manual paging via `page.has_next_page()`. |
+| [Retries](/docs/sdk/retries-and-idempotency) | Up to 2 retries on retriable failures, jittered exponential backoff, honours `Retry-After`. | `max_retries=` kwarg on the client. |
+| [Idempotency](/docs/sdk/retries-and-idempotency) | Auto-generated UUIDv4 per POST, reused across retries. | `idempotency_key="..."` kwarg per call. |
+| [Errors](/docs/sdk/errors) | `KovaError` subclass selected by HTTP status; feature subclass selected by `error_code`. | Catch the status class or the feature subclass. |
+| [Streaming](/docs/sdk/streaming) | Naive iterator and accumulating context manager; reconnects on `Last-Event-ID`. | `stream=True` on `client.runs.stream`, `client.events.tail`. |
+| [Logging](/docs/sdk/logging-and-tracing) | Off by default. | `KOVASERVE_LOG=debug` env var or `logging.getLogger("kovaserve")`. |
+| [Tracing](/docs/sdk/logging-and-tracing) | Compatible with `opentelemetry-instrumentation-httpx`. Opt-in GenAI semantic conventions. | `KOVASERVE_OTEL_GENAI=1` env var. |
+| [Escape hatches](/docs/sdk/escape-hatches) | — | `with_raw_response`, `with_streaming_response`, `extra_body`, `extra_headers`, `extra_query`. |
+
+The cross-cutting behaviour is identical on `KovaControlClient` and `AsyncKovaControlClient`.
+
+## Type model
+
+Every method returns a Pydantic v2 model from `kovaserve.types`. Request shapes are `TypedDict`s — autocomplete-friendly, no mandatory model construction.
+
+```python
+from kovaserve.types import Run, RunStatus
+
+run: Run = client.runs.create(
+    project_id="proj_review_bot",
+    model="meta-llama/Llama-3-70B-Instruct",
+)
+assert run.status == RunStatus.CREATED
+
+raw = run.model_dump()                                # → dict
+serialized = run.model_dump_json()                    # → bytes
+restored = Run.model_validate_json(serialized)        # → Run
+```
+
+The type model is hand-mirrored from the canonical wire schemas and CI-guarded for drift. Responses carry `model_extra` for forward-compatibility: new fields the server adds appear automatically without an SDK upgrade. See [type model](/docs/sdk/type-model) for the complete contract.
+
+## Coexisting with the inference client
+
+The control client and the OpenAI re-export are designed to coexist in the same process. They hold independent connection pools and read independent credentials. A typical agent uses both:
+
+```python
+from kovaserve import OpenAI, KovaControlClient
+
+inference = OpenAI()                # for chat completions
+control = KovaControlClient()       # for Runs, Budgets, Checkpoints, etc.
+
+run = control.runs.create(project_id="proj_review_bot", model="meta-llama/Llama-3-70B-Instruct")
+control.budgets.create(run_id=run.id, cost_limit_cents="500.0000", token_limit=100_000)
+
+response = inference.chat.completions.create(
+    model="meta-llama/Llama-3-70B-Instruct",
+    messages=[{"role": "user", "content": "Review PR #42"}],
+    extra_body={"kovaserve": {"run_id": run.id}},
+)
+
+run = control.runs.get(run.id, expand=["steps.model_calls"])
+print(f"steps: {len(run.steps)}, total cost: {run.total_cost_cents}¢")
+```
+
+You can drive most use cases purely through the inference client by attaching all metadata in `extra_body`. Reach for the control client when you want explicit, typed CRUD over the canonical entities — for example, creating a Budget before any inference call lands, or restoring from a Checkpoint, or pulling a metering aggregate.
+
+## Where to go next
+
+<Cards>
+  <Card title="Runs" href="/docs/sdk/control/runs" description="The most-used namespace — durable execution objectives." />
+  <Card title="Sessions" href="/docs/sdk/control/sessions" description="Continuity containers across multiple Runs." />
+  <Card title="Budgets" href="/docs/sdk/control/budgets" description="Cost / token / step / time / tool limits with active enforcement." />
+  <Card title="Checkpoints" href="/docs/sdk/control/checkpoints" description="Logical-context-first resumable snapshots." />
+  <Card title="Handles" href="/docs/sdk/control/handles" description="Typed StateHandles for cross-session state reuse." />
+  <Card title="Context manifests" href="/docs/sdk/control/context-manifests" description="The durable per-call audit anchor." />
+  <Card title="Events" href="/docs/sdk/control/events" description="Tail the eight execution event streams." />
+  <Card title="Tenancy" href="/docs/sdk/control/tenancy" description="Tenants, Projects, Environments, API keys." />
+</Cards>
+
+## See also
+
+- [SDK overview](/docs/sdk) — the three SDK surfaces in context
+- [`expand=` parameter](/docs/sdk/expand-parameter) — hydrating the graph in one round trip
+- [Errors](/docs/sdk/errors) — the `KovaError` hierarchy
+- [API reference](/docs/api) — the wire surface every method resolves to

@@ -1,0 +1,91 @@
+---
+title: "`kova context manifests`"
+description: List and inspect ContextManifests — the durable per-call audit anchor for budgets, routing, checkpoints, and resume.
+---
+
+List and inspect [ContextManifests](/docs/concepts/context/context-manifests).
+
+## Subcommands
+
+| Subcommand | What it does |
+|---|---|
+| `kova context manifests list` | Cursor-paginated list scoped to a Run, Session, or Project. |
+| `kova context manifests get <ID>` | Fetch one manifest. `--expand segments` hydrates the segment list. |
+
+## Examples
+
+```bash
+# Every manifest for a Run, oldest first
+kova context manifests list --run-id 01J8X9Y2Z3K4M5N6P7Q8R9S0T1
+
+# Filter to specific admission decisions
+kova context manifests list --run-id 01J... --decision DEGRADE --decision HARD_STOP
+
+# Fetch a manifest with segments
+kova context manifests get 01J8X9Y2Z3K4M5N6P7Q8R9SCM07 --expand segments
+
+# Find all calls with one stable_context_id (cache-hit analysis)
+kova context manifests list --stable-context-id sha256:7e44...
+```
+
+## `manifests list` options
+
+| Option | Meaning |
+|---|---|
+| `--run-id <id>` | The common filter. |
+| `--session-id <id>` | Filter to a Session. |
+| `--project-id <id>` | Broader Project scope. |
+| `--stable-context-id <hash>` | Find calls sharing a context identity. |
+| `--decision <value>` | Filter by admission decision. Accept-multiple: `--decision WARN --decision DEGRADE`. |
+| `--created-after <iso8601>` / `--created-before <iso8601>` | Time window. |
+| `--limit <n>` | Per-page count. |
+| `--order <asc\|desc>` | Sort by `created_at`. |
+| `--all` | Fetch every page. |
+| `--json` | Emit a JSON array. |
+
+## `manifests get` options
+
+| Option | Meaning |
+|---|---|
+| `--expand <path>` | Valid: `segments`, `model_call`. |
+| `--json` | Emit the manifest as one JSON document. |
+
+## Output — `list`
+
+```
+ID                                RUN                            DECISION    ACTIVE   OFFLOADED  CREATED
+01J8X9Y2Z3K4M5N6P7Q8R9SCM07       01J8X9Y2Z3K4M5N6P7Q8R9S0T1     OFFLOAD_REQUIRED  2152  7400      2026-05-15T11:42:01Z
+01J8X9Y2Z3K4M5N6P7Q8R9SCM08       01J8X9Y2Z3K4M5N6P7Q8R9S0T1     ALLOW             1840    0       2026-05-15T11:43:14Z
+```
+
+## Output — `get` with `--expand segments`
+
+```
+Manifest 01J8X9Y2Z3K4M5N6P7Q8R9SCM07
+Run:           01J8X9Y2Z3K4M5N6P7Q8R9S0T1
+ModelCall:     01J8X9Y2Z3K4M5N6P7Q8R9MC02
+Stable prefix: sha256:9a1c…
+Stable ctx:    sha256:7e44…
+Renderer:      v3
+Model:         qwen3-coder-30b
+Tokenizer:     sha256:9f2c…
+
+Tokens: stable=1840 volatile=312 active=2152 offloaded=7400
+Bytes:  artifacts=3 145 728
+
+Admission: OFFLOAD_REQUIRED → admitted
+  - artifact_offload: segment 01J...07 → artifact 01J...AR03
+
+Segments (canonical order):
+  0  persistent_context  digest=sha256:…       tokens=240
+  1  system_prompt       digest=sha256:…       tokens=80
+  2  session_history     digest=sha256:…       tokens=1500
+  3  summary             digest=sha256:…       tokens=20
+  4  tool_result         artifact=01J...AR03   tokens=312 (preview rendered inline)
+```
+
+## See also
+
+- [`kova context segments get`](/docs/cli/context/segments) — fetch one segment
+- [`client.context.manifests`](/docs/sdk/control/context-manifests) — the SDK equivalent
+- [ContextManifest concept](/docs/concepts/context/context-manifests)

@@ -1,0 +1,8 @@
+{
+  "title": "keys",
+  "pages": [
+    "create",
+    "rotate",
+    "revoke"
+  ]
+}

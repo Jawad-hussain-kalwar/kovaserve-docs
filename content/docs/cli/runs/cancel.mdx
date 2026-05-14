@@ -1,0 +1,54 @@
+---
+title: "`kova runs cancel`"
+description: Cancel a Run from any non-terminal state. Transitions the Run to `CANCELED` and returns the updated row.
+---
+
+Cancel a [Run](/docs/concepts/run-hierarchy/runs) from any non-terminal state. The Run transitions to `CANCELED` regardless of its current state. Cancelling an already-terminal Run is a no-op.
+
+## Synopsis
+
+```bash
+kova runs cancel <RUN_ID> [OPTIONS]
+```
+
+## Options
+
+| Option | Meaning |
+|---|---|
+| `--reason <text>` | Free-form reason stored on the Run metadata; surfaces in audit. |
+| `--json` | Emit the updated Run as one JSON document. |
+
+## Examples
+
+```bash
+kova runs cancel 01J8X9Y2Z3K4M5N6P7Q8R9S0T1
+
+kova runs cancel 01J... --reason "Operator-initiated; PR was withdrawn"
+
+kova runs cancel 01J... --json | jq '.status'      # → "CANCELED"
+```
+
+## Output
+
+Table by default:
+
+```
+Run 01J8X9Y2Z3K4M5N6P7Q8R9S0T1
+Status:   RUNNING → CANCELED
+Project:  proj_review_bot
+Steps:    3 (latest: TOOL_EXECUTE, STARTED → CANCELED)
+```
+
+`--json` returns the updated Run row.
+
+## What happens to in-flight ModelCalls
+
+Cancelling a Run **does not kill in-flight ModelCalls**. The substrate continues to execute any ModelCall that has already dispatched, and metering still records the cost. The Run state flip is the durable cancellation signal; downstream runtimes are responsible for terminating worker processes and ignoring outputs.
+
+For Runs managed by a [framework adapter](/docs/sdk/adapters), the adapter's lifecycle hooks fire on cancellation — the Workflow / Graph / Agent receives the cancellation through its native mechanism.
+
+## See also
+
+- [`kova runs list`](/docs/cli/runs/list) — find Runs to cancel
+- [`client.runs.cancel`](/docs/sdk/control/runs) — the SDK equivalent
+- [Run state machine](/docs/concepts/run-hierarchy/run-state-machine) — the 12-state lifecycle

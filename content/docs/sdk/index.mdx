@@ -1,0 +1,134 @@
+---
+title: SDK reference
+description: The Python `kovaserve` SDK — a drop-in OpenAI replacement, the KovaControlClient native client, decorators, hooks, context primitives, framework adapters, and the `kova` CLI in one package.
+---
+
+The **`kovaserve`** package is the Python SDK for KovaServe. It is the canonical client surface: a drop-in OpenAI replacement for inference, the **`KovaControlClient`** for the control plane, decorators for registration sugar, hooks for reactivity, context primitives for cache-aware prompt shaping, framework adapters for LangGraph / Pydantic AI / OpenAI Agents SDK / Temporal, and the **`kova`** CLI — all installed by a single `pip install kovaserve`.
+
+The SDK speaks the same canonical entities as the rest of KovaServe: [Run](/docs/concepts/run-hierarchy/runs), [Session](/docs/concepts/continuity/sessions), [Step](/docs/concepts/run-hierarchy/steps), [ModelCall](/docs/concepts/run-hierarchy/model-calls), [ContextManifest](/docs/concepts/context/context-manifests), [Budget](/docs/concepts/policy/budgets), [Checkpoint](/docs/concepts/recovery/checkpoints), [StateHandle](/docs/concepts/recovery/state-handles), [PolicyScope](/docs/concepts/policy/policy-scopes). Anything you can do over the [REST API](/docs/api) you can do through the SDK with typed Python objects.
+
+## The three surfaces
+
+The package exposes three layers of value. You can adopt any of them independently — the inference path alone is enough to migrate from OpenAI; you add the control plane and decorators when you want durable runs, budgets, checkpoints, and run-aware execution.
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│  Inference path           — `from kovaserve import OpenAI`             │
+│  Drop-in OpenAI re-export. Every OpenAI feature, every Anthropic-      │
+│  style cache hit, every cost header — for free. Migration is two       │
+│  lines.                                                                │
+├────────────────────────────────────────────────────────────────────────┤
+│  Control plane            — `KovaControlClient` / `AsyncKovaControlClient` │
+│  Resource-oriented native client over `/v1/ks/*`: runs, sessions,      │
+│  budgets, checkpoints, handles, context manifests, segments,           │
+│  artifacts, context budgets, compaction lineage, metering, events,     │
+│  cluster, tenancy, cache prewarm.                                      │
+├────────────────────────────────────────────────────────────────────────┤
+│  Registration sugar       — `@kova.run`, `@kova.session`, `@kova.budget`, │
+│                             `@kova.step`, `@kova.checkpoint`           │
+│  Decorators that open a Run / Session / Budget / Step / Checkpoint     │
+│  context around a function body. `RunHooks` for reactivity.            │
+│  `ContextBuilder` / `ArtifactClient` / `ContextBudgetClient` /         │
+│  `CompactionClient` for context-engineering primitives.                │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+## A two-line migration
+
+The inference path is a pure re-export of the official `openai` SDK with KovaServe's base URL and API key defaulted. Every feature that ships in `openai` — streaming, tool calls, structured outputs, async, idempotency, the file-upload helpers, the beta namespace — works without an SDK change on KovaServe's side. Migrating from OpenAI is two lines:
+
+```python
+# before
+from openai import OpenAI
+client = OpenAI()
+
+# after
+from kovaserve import OpenAI
+client = OpenAI()        # KOVASERVE_API_KEY + base_url defaulted from env
+```
+
+The KovaServe execution-control envelope rides on the standard `extra_body` kwarg the OpenAI SDK already accepts, so you opt into Runs, Sessions, Budgets, and the rest by adding metadata rather than changing the call shape:
+
+```python
+response = client.chat.completions.create(
+    model="meta-llama/Llama-3-70B-Instruct",
+    messages=[{"role": "user", "content": "Review PR #42"}],
+    extra_body={"kovaserve": {"run_id": "01J8X9Y2Z3K4M5N6P7Q8R9S0T1"}},
+)
+```
+
+A request without the `kovaserve` key uses the stateless path verbatim — no execution rows, no extra headers, no latency cost. Add the key (even as `{}`) to opt into Run / Step / ModelCall recording, [ContextManifest](/docs/concepts/context/context-manifests) assembly, [Budget](/docs/concepts/policy/budgets) admission, and the rest of the control plane.
+
+## Package map
+
+| Surface | Where it lives | When to reach for it |
+|---|---|---|
+| OpenAI re-export | `from kovaserve import OpenAI, AsyncOpenAI` | Inference path. The minimum viable migration from OpenAI. |
+| KovaServe extension fields | `kovaserve.types.KovaServeExtension` | Typed shape of `extra_body["kovaserve"]`. |
+| Streaming cost helper | `from kovaserve import accumulate_stream_cost` | Capture `cost_cents`, `cache_savings_cents`, `cost_status` from the final SSE chunk. |
+| Native client | `from kovaserve import KovaControlClient, AsyncKovaControlClient` | The control plane — Runs, Sessions, Budgets, Checkpoints, Handles, Context, Metering, Events, Cluster, Tenancy. |
+| Decorators | `from kovaserve import kova` → `@kova.run`, `@kova.session`, `@kova.budget`, `@kova.step`, `@kova.checkpoint` | Wrap a function body in a Run / Session / Budget / Step / Checkpoint context with no boilerplate. |
+| Hooks | `from kovaserve import RunHooks` | Reactivity surface — subclass and override `on_step_start`, `on_budget_warning`, `on_compact_required`, etc. |
+| Context primitives | `from kovaserve.context import ContextBuilder, ArtifactClient` | Shape the request to maximise cache reuse; offload large content to [ContextArtifacts](/docs/concepts/context/context-artifacts). |
+| Framework adapters | `kovaserve.adapters.langgraph`, `kovaserve.adapters.pydantic_ai`, `kovaserve.adapters.openai_agents`, `kovaserve.adapters.temporal` | Install with `pip install kovaserve[langgraph]` (etc.). Integrate KovaServe under your existing runtime. |
+| Type model | `kovaserve.types.*` | Pydantic v2 response models, `TypedDict` request shapes. `py.typed` ships in the wheel. |
+| CLI | `kova` console script | Every resource namespace mirrored 1:1 as a subcommand. Same auth, same retries, same code path. |
+
+## Sync and async are parallel
+
+`KovaControlClient` and `AsyncKovaControlClient` are sibling classes with identical method names; you pick one and stay with it. The OpenAI re-export follows the same pattern (`OpenAI` and `AsyncOpenAI`). They share URL construction, retries, idempotency, and error handling; only the HTTP transport differs.
+
+```python
+# sync
+from kovaserve import KovaControlClient
+client = KovaControlClient()
+run = client.runs.get("01J8X9Y2Z3K4M5N6P7Q8R9S0T1")
+
+# async
+from kovaserve import AsyncKovaControlClient
+client = AsyncKovaControlClient()
+run = await client.runs.get("01J8X9Y2Z3K4M5N6P7Q8R9S0T1")
+```
+
+The two clients do not share a transport at runtime, so a sync program does not pay the async runtime cost and an async program does not block its event loop on a sync HTTP call. See [sync vs async](/docs/sdk/sync-vs-async) for the full contract.
+
+## Wire format is the contract
+
+The SDK is a thin, typed projection of the [REST API](/docs/api). Field names, status enums, error codes, ID conventions, and cost precision are identical to the wire format:
+
+- IDs are bare 26-character Crockford ULIDs (e.g. `01J8X9Y2Z3K4M5N6P7Q8R9S0T1`), with Session IDs as the documented exception (`ses_<24hex>`).
+- Status enums are upper-case strings (`OPEN`, `RUNNING`, `SUCCEEDED`, `HARD_STOP`).
+- Cost is a decimal string with four fractional digits (`"0.0420"`).
+- Datetimes are ISO 8601.
+- Errors on `/v1/*` follow the OpenAI envelope; errors on `/v1/ks/*` carry `error_code` + `message` + `details` + `request_id`.
+
+Responses are Pydantic v2 models with `.model_dump()`, `.model_validate_json()`, and `model_extra` for forward-compat. Requests are `TypedDict`s so you get autocomplete without mandatory model construction.
+
+## What the SDK is not
+
+The SDK is the typed interface to KovaServe. It does not replace what your runtime already does.
+
+- **Not a workflow engine.** Use Temporal, Inngest, or your own orchestrator. KovaServe records Runs and Steps; it does not schedule them.
+- **Not an agent framework.** Use LangGraph, Pydantic AI, OpenAI Agents SDK, or a custom loop. KovaServe routes ModelCalls; it does not author them.
+- **Not a prompt composer.** `ContextBuilder` shapes the *request* for maximum cache reuse and audit fidelity. It does not pick what goes in the prompt — your runtime does.
+- **Not a memory authoring API.** [ContextArtifacts](/docs/concepts/context/context-artifacts) and [ContextSegments](/docs/concepts/context/context-segments) are durable storage primitives. The retention semantics live on the [memory class](/docs/concepts/context/segment-types) label; the curation decisions live in your runtime.
+- **Not an observability platform.** The SDK emits OpenTelemetry spans and surfaces execution events. Trace storage, dashboards, and alerting live in your existing stack (Datadog, Grafana, Langfuse, Honeycomb).
+
+## Where to go next
+
+<Cards>
+  <Card title="Install" href="/docs/sdk/install" description="`pip install kovaserve`; framework extras." />
+  <Card title="Configuration" href="/docs/sdk/configuration" description="`KOVASERVE_API_KEY`, base URL, log levels, client kwargs." />
+  <Card title="OpenAI compatibility" href="/docs/sdk/inference/openai-compat" description="The drop-in re-export contract." />
+  <Card title="Extension envelope" href="/docs/sdk/inference/extension-envelope" description="`extra_body={'kovaserve': {...}}` field reference." />
+  <Card title="KovaControlClient" href="/docs/sdk/control" description="The native client over `/v1/ks/*`." />
+  <Card title="Decorators" href="/docs/sdk/decorators" description="`@kova.run`, `@kova.session`, `@kova.budget`, `@kova.step`, `@kova.checkpoint`." />
+  <Card title="Hooks" href="/docs/sdk/hooks" description="`RunHooks` — the reactivity surface." />
+  <Card title="Framework adapters" href="/docs/sdk/adapters" description="LangGraph, Pydantic AI, OpenAI Agents SDK, Temporal." />
+</Cards>
+
+## See also
+
+- [API reference](/docs/api) — the wire surface every SDK call resolves to
+- [CLI reference](/docs/cli) — the `kova` console script, same code path as the SDK
+- [Concepts](/docs/concepts) — the canonical entities the SDK speaks

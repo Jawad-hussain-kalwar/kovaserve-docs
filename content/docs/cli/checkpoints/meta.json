@@ -1,0 +1,8 @@
+{
+  "title": "checkpoints",
+  "pages": [
+    "list",
+    "get",
+    "restore"
+  ]
+}

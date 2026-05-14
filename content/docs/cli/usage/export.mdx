@@ -1,0 +1,82 @@
+---
+title: "`kova usage export`"
+description: Streaming JSONL export of raw `usage_records` rows. One row per ModelCall with pricing snapshots so each row is self-contained for audit.
+---
+
+Streaming JSONL export of raw `usage_records` rows. One row per ModelCall, each carrying the input / output / discount pricing snapshots so historical replays return identical numbers even after a price change.
+
+## Synopsis
+
+```bash
+kova usage export [OPTIONS]
+```
+
+## Options
+
+| Option | Meaning |
+|---|---|
+| `--start <iso8601>` | Time window start. Required. |
+| `--end <iso8601>` | Time window end. Required. |
+| `--project-id <id>` | Filter to a single Project. |
+| `--run-id <id>` | Filter to a single Run. |
+| `--model <id>` | Filter to a single model. |
+| `--include-anonymous / --no-include-anonymous` | Whether to include anonymous-mode traffic. Default include. |
+| `--output <path>` | Write to a file. Default `-` (stdout). |
+
+## Examples
+
+```bash
+# May export to stdout
+kova usage export --start 2026-05-01T00:00:00Z --end 2026-06-01T00:00:00Z > usage-may.jsonl
+
+# Project-scoped export to a file
+kova usage export \
+    --project-id proj_review_bot \
+    --start 2026-05-01T00:00:00Z --end 2026-06-01T00:00:00Z \
+    --output ./usage-review-may.jsonl
+
+# Pipe directly to jq for analytics
+kova usage export --start 2026-05-15T00:00:00Z --end 2026-05-16T00:00:00Z \
+    | jq -s 'group_by(.model_id) | map({model: .[0].model_id, calls: length, cost: (map(.cost_cents | tonumber) | add)})'
+```
+
+## Output
+
+One JSON object per line. Each object is a complete `usage_records` row:
+
+```json
+{"id":"01J8X9Y2Z3K4M5N6P7Q8R9UR01","tenant_id":"01J8...","project_id":"01J8...","run_id":"01J8...","step_id":"01J8...","model_call_id":"01J8...","model_id":"meta-llama/Llama-3-70B-Instruct","node_id":"node-3","prompt_tokens":1247,"completion_tokens":312,"cached_tokens":940,"cost_cents":"0.0420","gross_cost_cents":"0.0600","cache_savings_cents":"0.0180","cache_hit_ratio":0.754,"input_price_snapshot":"3.0000","output_price_snapshot":"15.0000","discount_snapshot":0.50,"timestamp":"2026-05-15T11:42:01.480Z","is_anonymous":false}
+{"id":"01J8X9Y2Z3K4M5N6P7Q8R9UR02", ...}
+...
+```
+
+## Self-contained rows
+
+Each row carries the **pricing snapshot columns**:
+
+| Column | Meaning |
+|---|---|
+| `input_price_snapshot` | The price per 1K input tokens applied at call time. Decimal string. |
+| `output_price_snapshot` | The price per 1K output tokens applied at call time. Decimal string. |
+| `discount_snapshot` | The cache-discount fraction applied (typically 0.50 for 50% off cached tokens). |
+
+This makes every row **self-contained for audit** — no join against the live `model_pricing` table is required to reproduce the cost, and historical costs remain stable across price changes.
+
+## Anonymous traffic
+
+By default `--include-anonymous` is on. Anonymous-mode calls (no `kovaserve` extension on the request) produce usage records attributed at the Tenant + Project + model level with `run_id`, `step_id`, and `model_call_id` set to null. The `is_anonymous` field on the row makes filtering trivial:
+
+```bash
+kova usage export --start ... --end ... | jq 'select(.is_anonymous == false)'
+```
+
+## Streaming
+
+The export is streamed from the server with internal cursor pagination — the CLI transparently follows the cursor and yields lines until the stream ends. Memory pressure on the consuming side scales with line buffering, not total result count. For very large windows, narrow the time bounds.
+
+## See also
+
+- [`kova usage query`](/docs/cli/usage/query) — typed aggregates instead of raw rows
+- [`client.metering.export`](/docs/sdk/control/metering) — the SDK equivalent
+- [Cost model](/docs/concepts/cost/cost-model) — gross / net / cache-savings identity
+- [Pricing snapshots](/docs/concepts/cost/pricing-snapshots) — per-row audit columns

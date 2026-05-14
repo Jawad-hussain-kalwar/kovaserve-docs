@@ -1,0 +1,75 @@
+---
+title: "`kova runs branch`"
+description: Branch into a new Run from an existing Checkpoint. The new Run inherits the Checkpoint's logical context and starts in `CREATED` under the same Project.
+---
+
+Create a new [Run](/docs/concepts/run-hierarchy/runs) as a [branch](/docs/concepts/recovery/branches) from a [Checkpoint](/docs/concepts/recovery/checkpoints) on an existing Run. The new Run inherits the Checkpoint's frozen logical context and starts in `CREATED`. The parent Run is unaffected.
+
+## Synopsis
+
+```bash
+kova runs branch <PARENT_RUN_ID> [OPTIONS]
+```
+
+## Options
+
+| Option | Meaning |
+|---|---|
+| `--from-checkpoint <id>` | Required. The Checkpoint to branch from. Must belong to the parent Run. |
+| `--project-id <id>` | Override the Project. Defaults to the parent Run's Project. |
+| `--task-override <text>` | Free-form string the runtime can use to change the branch goal. Surfaces on `Run.metadata.task_override`. |
+| `--budget-from-parent` | Inherit the parent's Budget config (bounded copy, fresh counters). |
+| `--json` | Emit the new Run as one JSON document. |
+
+## Examples
+
+```bash
+# Branch from a specific Checkpoint
+kova runs branch 01J8X9Y2Z3K4M5N6P7Q8R9S0T1 \
+    --from-checkpoint 01J8X9Y2Z3K4M5N6P7Q8R9S0T7
+
+# Branch with a new task and parent budget
+kova runs branch 01J... \
+    --from-checkpoint 01J... \
+    --task-override "Continue review but focus on test coverage" \
+    --budget-from-parent
+
+# JSON output
+kova runs branch 01J... --from-checkpoint 01J... --json | jq '.id'
+```
+
+## Output
+
+Table by default:
+
+```
+Run 01J8X9Y2Z3K4M5N6P7Q8R9NEW1  CREATED
+Project:         proj_review_bot
+Model:           meta-llama/Llama-3-70B-Instruct
+Branched from:
+  parent_run_id:    01J8X9Y2Z3K4M5N6P7Q8R9S0T1
+  checkpoint_id:    01J8X9Y2Z3K4M5N6P7Q8R9S0T7
+  branch_step_id:   01J8X9Y2Z3K4M5N6P7Q8R9S0T6
+Task override:   Continue review but focus on test coverage
+Budget:          (inherited from parent) ACTIVE
+```
+
+`--json` returns the full new Run row, including the `branch_from` lineage object.
+
+## Branch lineage
+
+The new Run carries a populated `branch_from` field with three keys:
+
+| Key | Meaning |
+|---|---|
+| `run_id` | The parent Run. |
+| `checkpoint_id` | The Checkpoint the branch restored from. |
+| `branch_step_id` | The Step on the parent Run that emitted the branch event. |
+
+Branch lineage is queryable — `kova runs list --branch-from <parent_id>` lists every direct branch of a parent.
+
+## See also
+
+- [`kova checkpoints restore`](/docs/cli/checkpoints/restore) — restore the parent Run from the same Checkpoint instead of branching
+- [`client.runs.branch`](/docs/sdk/control/runs) — the SDK equivalent
+- [Branches](/docs/concepts/recovery/branches) — the `BRANCH` Step and `BRANCHING` Run state

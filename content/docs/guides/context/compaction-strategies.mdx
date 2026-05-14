@@ -1,0 +1,140 @@
+---
+title: Compaction strategies
+description: When and how to summarize older turns. The runtime decides what to compact and produces the summary; KovaServe records the lineage so resume reconstructs logical context.
+---
+
+Compaction is the lineage contract that lets a long-running run survive its context window. The runtime decides what to compact and produces the summary; KovaServe records the lineage atomically so future runs (and resumes) reconstruct the logical context. **Lineage is infrastructure (always KovaServe); summarization quality is application (always the runtime).** KovaServe owns the durable record, not the prompt-side decision.
+
+## When compaction triggers
+
+Three triggers:
+
+1. **`COMPACT_REQUIRED` admission decision.** The ContextBudget admission service returns `COMPACT_REQUIRED` when the assembled manifest crosses `compaction_required_threshold`. The runtime is asked to compact before the next request.
+2. **Pre-emptive runtime decision.** The runtime tracks token counts and decides to compact proactively at known boundaries (end of a phase, between turns).
+3. **Operator-driven.** An external system instructs the runtime to compact before a long-running phase.
+
+## The reactive pattern — driven by admission
+
+The most common pattern uses [`RunHooks`](/docs/sdk/hooks) to react to admission:
+
+```python
+from kovaserve import KovaControlClient, RunHooks
+from kovaserve.context import CompactionClient
+
+client = KovaControlClient()
+compaction = CompactionClient(client)
+
+class AutoCompactHooks(RunHooks):
+    def on_compact_required(self, decision):
+        manifest = client.context.manifests.get(decision.manifest_id, expand=["segments"])
+
+        # Pick older session_history segments to compact
+        source_ids = [s.id for s in manifest.segments
+                      if s.context_type == "session_history"][:5]
+
+        # Runtime produces the summary
+        summary = my_llm.summarize([s.content_inline for s in manifest.segments if s.id in source_ids])
+
+        # Report the lineage to KovaServe
+        compaction.report(
+            run_id=manifest.run_id,
+            source_segment_ids=source_ids,
+            summary=summary.text,
+            model_id="meta-llama/Llama-3-70B-Instruct",
+        )
+```
+
+After the report lands, re-issue the chat completion — admission sees the reduced manifest and returns `ALLOW`.
+
+## The proactive pattern — runtime-managed
+
+For runtimes with their own context-management logic:
+
+```python
+manifest = client.context.manifests.get(run.current_manifest_id, expand=["segments"])
+active_tokens = manifest.token_counts.active_tokens
+
+if active_tokens > 6000:
+    # Time to compact
+    source_ids = [s.id for s in manifest.segments
+                  if s.context_type == "session_history" and s.token_count > 400]
+    summary = my_llm.summarize_segments(source_ids)
+    compaction.report(
+        run_id=run.id,
+        source_segment_ids=source_ids,
+        summary=summary,
+        model_id="meta-llama/Llama-3-70B-Instruct",
+    )
+```
+
+## The all-in-one helper
+
+```python
+def my_compactor(source_segments):
+    return my_llm.summarize(s.content_inline for s in source_segments)
+
+response = compaction.reduce_and_retry(
+    run_id=run.id,
+    decision=admission_decision,
+    compactor=my_compactor,
+    model_id="meta-llama/Llama-3-70B-Instruct",
+)
+```
+
+`reduce_and_retry`:
+
+1. Reads source segment IDs from the admission decision.
+2. Fetches the source segments.
+3. Calls `compactor(source_segments)` to produce the summary.
+4. Reports the CompactionRecord.
+5. Returns the updated admission decision.
+
+The runtime is responsible for re-issuing the failed inference call after `reduce_and_retry` returns.
+
+## What gets compacted, what stays
+
+| Segment type | Compact? |
+|---|---|
+| `persistent_context` (tools, RAG documents) | Rarely — anchors the cache prefix. |
+| `system_prompt` | Never — stable prefix. |
+| `session_history` | Yes — the most common compaction target. |
+| `summary` | Recursively, if needed. |
+| `agent_state` | Volatile — drop, don't compact. |
+| `tool_result` | Volatile — offload to artifacts when large; don't compact. |
+
+The Compaction Lineage Service archives the source segments as a [ContextArtifact](/docs/sdk/control/context-artifacts) bundle so resume from a checkpoint after compaction can reconstruct logical context.
+
+## Quality flags
+
+The runtime can attach `quality_flags` to a CompactionRecord — coverage, fidelity, custom labels:
+
+```python
+compaction.report(
+    run_id=run.id,
+    source_segment_ids=source_ids,
+    summary=summary,
+    model_id="meta-llama/Llama-3-70B-Instruct",
+    quality_flags={"coverage": 0.95, "fidelity": "high", "model_temperature": 0.0},
+)
+```
+
+KovaServe records the flags; it does not evaluate them. Summarization quality is the runtime's responsibility.
+
+## Auditing compaction lineage
+
+```bash
+kova context manifests list --run-id 01J... --json | jq '.[] | {id, decision: .admission.decision}'
+
+# All compaction events on a Run
+for record in client.context.compaction.records(run_id=run.id):
+    print(record.created_at, record.token_count_before, "→", record.token_count_after)
+```
+
+## Where to go next
+
+<Cards>
+  <Card title="Authoring context manifests" href="/docs/guides/context/authoring-context-manifests" description="What gets compacted." />
+  <Card title="Managing artifacts" href="/docs/guides/context/managing-artifacts" description="Source-segment bundles preserved for resume." />
+  <Card title="CompactionClient" href="/docs/sdk/primitives/compaction-client" description="Primitive reference." />
+  <Card title="Context budgets" href="/docs/guides/policy/context-budgets" description="The admission service that triggers `COMPACT_REQUIRED`." />
+</Cards>

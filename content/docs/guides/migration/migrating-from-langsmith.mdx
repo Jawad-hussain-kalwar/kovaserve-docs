@@ -1,0 +1,109 @@
+---
+title: Migrating from LangSmith
+description: LangSmith records LLM traces; KovaServe records managed agent runs. The two are complementary — but if you want execution control plus observability in one place, KovaServe replaces LangSmith's trace-only model.
+---
+
+LangSmith records LLM traces. KovaServe records **managed agent runs** — durable execution, cost attribution, budget enforcement, checkpoints, and resume, with observability as a natural consequence of those primitives. This guide walks you from LangSmith-as-observability to KovaServe-as-execution-cloud.
+
+This page applies equally to similar trace-only tooling — Helicone, Langfuse, Phoenix, and other LLM-call observability platforms.
+
+## What LangSmith does, what KovaServe does
+
+| Layer | LangSmith | KovaServe |
+|---|---|---|
+| LLM call traces | ✅ | ✅ |
+| Token / cost attribution per call | ✅ | ✅ |
+| Replay / debug a trace | ✅ | ✅ |
+| **Durable agent runs** | — | ✅ |
+| **Active budget enforcement** | — | ✅ |
+| **Checkpoint / resume on failure** | — | ✅ |
+| **Tool / policy governance** | — | ✅ |
+| **Private / sovereign deployment** | partial | ✅ |
+| **One audit trail across model + tool + state** | — | ✅ |
+
+LangSmith answers *"what happened?"*. KovaServe answers *"how does this execution stay durable, governed, recoverable, and economically controlled?"*. The two overlap on observability; only KovaServe adds the execution control plane.
+
+## When to switch entirely
+
+You're a good fit for migrating *off* LangSmith when:
+
+- You need active budget enforcement, not just retrospective cost dashboards.
+- You're running agents that should recover from failure rather than fail-and-replay-by-hand.
+- You're moving to private / sovereign deployment and don't want a separate observability SaaS in the data path.
+- Your customers ask for one audit surface across model calls, tool calls, policy decisions, and outcomes — not LLM-only traces.
+
+## When LangSmith stays
+
+If your goal is *"what was the model doing inside that call"* — token-level trace replay, prompt experimentation, evaluation suites — LangSmith remains the more focused tool. KovaServe and LangSmith coexist cleanly when both observability surfaces matter; KovaServe emits OpenTelemetry traces that LangSmith and similar tools can ingest.
+
+## The migration in five steps
+
+### 1. Stop wiring LangSmith into every chat completion
+
+```python
+# Before — LangSmith client wrapping
+from langsmith import wrap_openai
+from openai import OpenAI
+client = wrap_openai(OpenAI())
+
+# After — KovaServe re-export, no wrapping
+from kovaserve import OpenAI
+client = OpenAI()
+```
+
+The `kovaserve` extension carries every piece of metadata you'd attach to a LangSmith trace, and the gateway records it on the canonical run.
+
+### 2. Replace your trace dashboard with the run explorer
+
+Where you used to open LangSmith to see a trace tree, use the KovaServe run explorer (in the web portal) or the CLI:
+
+```bash
+kova runs get 01J8X9Y2Z3K4M5N6P7Q8R9S0T1 --expand steps.model_calls.context_manifest
+```
+
+The Run timeline shows everything a LangSmith trace shows, plus the framework-level run / step / model-call hierarchy that LangSmith doesn't surface.
+
+### 3. Replace ad-hoc evaluations with the event stream
+
+LangSmith evaluations replay traces against a scoring function. KovaServe's [event stream](/docs/sdk/control/events) lets you do the same against the canonical execution graph:
+
+```bash
+kova events tail \
+    --streams execution \
+    --event-types "ks.model_call.completed" \
+    --json \
+    | your-eval-script.py
+```
+
+Same shape, same observability outcome, different infrastructure boundary.
+
+### 4. Migrate evaluation history
+
+For historical traces in LangSmith you want to preserve as audit, export them to JSONL and store separately. KovaServe doesn't import LangSmith traces — but its own audit trail (every model call, every step, every cost) is canonical going forward.
+
+### 5. Replace LangSmith experiments with explicit runs + branches
+
+LangSmith experiments group related runs for comparison. KovaServe's [branch lineage](/docs/concepts/recovery/branches) gives you a stronger version — branch from a checkpoint, the new run inherits identity bounded by an `branch_from` reference, and you compare entire run trees rather than collections of unconnected traces.
+
+```python
+new_run = client.runs.branch(
+    parent_run_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T1",
+    from_checkpoint_id="01J8X9Y2Z3K4M5N6P7Q8R9S0T7",
+    task_override="Try a different prompt strategy",
+)
+```
+
+Compare the two runs by ID; the branch lineage links them.
+
+## Hybrid setup — both in one stack
+
+If you're not ready to migrate fully, the SDK's [OpenTelemetry export](/docs/guides/observability/opentelemetry-export) sends LLM call spans to your existing trace collector while KovaServe records the canonical run on the side. Both stacks see the same data; you operate one going forward.
+
+## Where to go next
+
+<Cards>
+  <Card title="Your first managed run" href="/docs/quickstart/first-run" description="The view that replaces a LangSmith trace tree." />
+  <Card title="Reading run timelines" href="/docs/guides/observability/reading-run-timelines" description="The dashboard replacement." />
+  <Card title="OpenTelemetry export" href="/docs/guides/observability/opentelemetry-export" description="Keep LangSmith side-by-side if you want to." />
+  <Card title="Consuming events" href="/docs/guides/observability/consuming-events" description="Replace ad-hoc evaluations with canonical streams." />
+</Cards>
