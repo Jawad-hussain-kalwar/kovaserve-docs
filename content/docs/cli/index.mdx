@@ -1,6 +1,7 @@
 ---
 title: CLI reference
-description: The `kova` command-line interface — ships with the `kovaserve` Python package. Every resource namespace mirrored 1:1 as a subcommand. Same auth, same retries, same code path as the SDK.
+description: >-
+  The `kova` command-line interface — ships with the `kovaserve` Python package. Every resource namespace mirrored 1:1 as a subcommand. Same auth, same retries, same code path as the SDK.
 ---
 
 The **`kova`** CLI is the command-line surface for KovaServe. It is installed by the `kovaserve` Python package — there is no separate binary — and mirrors the SDK's [resource namespaces](/docs/sdk/control) 1:1: `kova runs list` calls `client.runs.list()` under the hood. Same auth, same retries, same idempotency, same error hierarchy.

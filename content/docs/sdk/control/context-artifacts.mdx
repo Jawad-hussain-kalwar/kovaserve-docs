@@ -1,6 +1,7 @@
 ---
 title: Context artifacts
-description: The `client.context.artifacts` namespace — upload, retrieve, list, and delete object-storage-backed ContextArtifacts (tool outputs, file diffs, retrieved documents, workspace snapshots, large transcripts).
+description: >-
+  The `client.context.artifacts` namespace — upload, retrieve, list, and delete object-storage-backed ContextArtifacts (tool outputs, file diffs, retrieved documents, workspace snapshots, large transcripts).
 ---
 
 The `client.context.artifacts` namespace operates on [ContextArtifacts](/docs/concepts/context/context-artifacts), the object-storage-backed entities that hold externalized context bytes. When a [ContextSegment](/docs/sdk/control/context-segments) carries large or low-value content — a 100 KB tool output, a file diff, a retrieved document, a workspace snapshot — KovaServe stores the payload in object storage as an artifact and references it from the segment via `artifact_ref_id`. The segment renders only the artifact's `preview` text into the manifest; the model never sees the full bytes inline.

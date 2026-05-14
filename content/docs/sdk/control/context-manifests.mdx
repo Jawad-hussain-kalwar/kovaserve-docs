@@ -1,6 +1,7 @@
 ---
 title: Context manifests
-description: The `client.context.manifests` namespace — retrieve and list durable ContextManifests, the per-call audit anchor for budgets, routing, checkpoints, and resume.
+description: >-
+  The `client.context.manifests` namespace — retrieve and list durable ContextManifests, the per-call audit anchor for budgets, routing, checkpoints, and resume.
 ---
 
 The `client.context.manifests` namespace operates on [ContextManifests](/docs/concepts/context/context-manifests), the durable per-call record of the exact context that was dispatched to the model. Every successful [ModelCall](/docs/concepts/run-hierarchy/model-calls) binds to exactly one ContextManifest via `context_manifest_id` — the manifest is the audit anchor that every other context-engineering primitive references.

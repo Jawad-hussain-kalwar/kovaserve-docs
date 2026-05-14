@@ -1,6 +1,7 @@
 ---
 title: Logging and tracing
-description: Standard `logging` module via the `kovaserve` logger tree. OpenTelemetry compatible via `opentelemetry-instrumentation-httpx`. Opt-in GenAI semantic conventions and W3C `traceparent` auto-propagation.
+description: >-
+  Standard `logging` module via the `kovaserve` logger tree. OpenTelemetry compatible via `opentelemetry-instrumentation-httpx`. Opt-in GenAI semantic conventions and W3C `traceparent` auto-propagation.
 ---
 
 The SDK logs through Python's standard `logging` module and emits OpenTelemetry spans through `httpx` instrumentation when configured. W3C `traceparent` is propagated end-to-end so KovaServe events and your own traces join cleanly.

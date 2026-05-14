@@ -1,6 +1,7 @@
 ---
 title: LangGraph adapter
-description: Three components — `KovaCheckpointer`, `KovaStore`, and `KovaMiddleware` — that plug into LangGraph's native interfaces. KovaServe stores graph state as ContextArtifacts; LangGraph stays the source of graph semantics.
+description: >-
+  Three components — `KovaCheckpointer`, `KovaStore`, and `KovaMiddleware` — that plug into LangGraph's native interfaces. KovaServe stores graph state as ContextArtifacts; LangGraph stays the source of graph semantics.
 ---
 
 The **LangGraph adapter** integrates KovaServe under an existing LangGraph application by plugging into three of LangGraph's native extension interfaces: `BaseCheckpointSaver`, `BaseStore`, and the LangChain 1.0 `AgentMiddleware`. Install with `pip install "kovaserve[langgraph]"`.

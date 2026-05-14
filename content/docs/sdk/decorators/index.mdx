@@ -1,6 +1,7 @@
 ---
 title: Decorators
-description: Five decorators — `@kova.run`, `@kova.session`, `@kova.budget`, `@kova.step`, `@kova.checkpoint` — open a canonical-entity context around a function body. Registration sugar, not orchestration.
+description: >-
+  Five decorators — `@kova.run`, `@kova.session`, `@kova.budget`, `@kova.step`, `@kova.checkpoint` — open a canonical-entity context around a function body. Registration sugar, not orchestration.
 ---
 
 The decorators are the SDK's **registration sugar**: thin context managers that open a [Run](/docs/concepts/run-hierarchy/runs), [Session](/docs/concepts/continuity/sessions), [Budget](/docs/concepts/policy/budgets), [Step](/docs/concepts/run-hierarchy/steps), or [Checkpoint](/docs/concepts/recovery/checkpoints) around a function body. They never invent execution semantics; they wrap a function call in the lifecycle of one canonical entity and let everything inside the body run normally.

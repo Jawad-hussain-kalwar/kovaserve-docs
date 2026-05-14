@@ -1,6 +1,7 @@
 ---
 title: "`kova sessions archive`"
-description: Archive a Session — transitions state to `ARCHIVED`. The Session row is preserved for audit; it cannot host new Runs after archival.
+description: >-
+  Archive a Session — transitions state to `ARCHIVED`. The Session row is preserved for audit; it cannot host new Runs after archival.
 ---
 
 Archive a [Session](/docs/concepts/continuity/sessions) — transitions state to `ARCHIVED`. The Session row remains queryable for audit and replay; it stops accepting new Runs. Existing bound Runs in non-terminal states continue executing.

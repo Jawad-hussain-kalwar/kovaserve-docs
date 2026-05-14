@@ -1,6 +1,7 @@
 ---
 title: Per-run budgets
-description: Attach a multi-dimensional Budget to a Run — cost, tokens, steps, time, tools. Admission applies on every model call; transitions through `ACTIVE → WARNING → DEGRADED_ALLOWED | HARD_STOP → CLOSED`.
+description: >-
+  Attach a multi-dimensional Budget to a Run — cost, tokens, steps, time, tools. Admission applies on every model call; transitions through `ACTIVE → WARNING → DEGRADED_ALLOWED | HARD_STOP → CLOSED`.
 ---
 
 A run-level [Budget](/docs/concepts/policy/budgets) attaches to a Run and enforces five dimensions: cost, tokens, steps, time, and tool calls. Admission runs in the gateway hot path on every model call. When the strictest dimension crosses the hard-stop threshold, the next call rejects with `429 budget_exceeded`.

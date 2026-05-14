@@ -1,6 +1,7 @@
 ---
 title: Streaming
-description: Two streaming modes — the naive iterator and the accumulating context manager — plus `Last-Event-ID` reconnection and multi-mode emission for tail-shaped endpoints.
+description: >-
+  Two streaming modes — the naive iterator and the accumulating context manager — plus `Last-Event-ID` reconnection and multi-mode emission for tail-shaped endpoints.
 ---
 
 The SDK exposes streaming responses through two patterns, both built on `httpx`'s SSE iterator. Inference responses arrive token-by-token; the event tail iterator yields events as they happen; both follow the WHATWG SSE reconnection contract transparently.

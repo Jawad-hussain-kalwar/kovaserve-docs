@@ -1,6 +1,7 @@
 ---
 title: Sync vs async
-description: The `kovaserve` SDK ships parallel sync and async clients with identical method names. Pick one and stay with it — they do not bridge implicitly.
+description: >-
+  The `kovaserve` SDK ships parallel sync and async clients with identical method names. Pick one and stay with it — they do not bridge implicitly.
 ---
 
 The SDK exposes every client as a sibling pair: `OpenAI` and `AsyncOpenAI`, `KovaControlClient` and `AsyncKovaControlClient`. Same method names, same return shapes, same error hierarchy, same retry and idempotency behaviour. Only the HTTP transport differs.

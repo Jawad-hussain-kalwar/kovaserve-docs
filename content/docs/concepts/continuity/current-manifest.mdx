@@ -1,6 +1,7 @@
 ---
 title: Current manifest
-description: The `current_manifest_id` pointer on a Session — what it points at, when it advances, and the bounded manifest history that travels alongside it across Run binds.
+description: >-
+  The `current_manifest_id` pointer on a Session — what it points at, when it advances, and the bounded manifest history that travels alongside it across Run binds.
 ---
 
 The **current manifest** is the [ContextManifest](/docs/concepts/context/context-manifests) that produced the most recent [ModelCall](/docs/concepts/run-hierarchy/model-calls) on a [Session](/docs/concepts/continuity/sessions). It is exposed as `current_manifest_id` on the Session row, and it is the entry point for every resume, branch, or routing decision that needs to know "what was this Session thinking about most recently?"

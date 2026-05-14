@@ -1,6 +1,7 @@
 ---
 title: Cluster
-description: The `client.cluster` operator namespace — list nodes, look up cached prefixes in the KV Index, and inspect the Router's placement plan for a given manifest.
+description: >-
+  The `client.cluster` operator namespace — list nodes, look up cached prefixes in the KV Index, and inspect the Router's placement plan for a given manifest.
 ---
 
 The `client.cluster` namespace is the operator surface. It exposes three read-only operations against the cluster's live state: enumerate the inference nodes, look up where a stable prefix or context identity is cached, and ask the Cache-Aware Router how it would place a hypothetical request. These operations require operator-scope API keys; ordinary keys see `403 permission_denied`.

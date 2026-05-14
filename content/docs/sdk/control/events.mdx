@@ -1,6 +1,7 @@
 ---
 title: Events
-description: The `client.events` namespace — list historical events across the eight streams, or live-tail an SSE feed filtered by stream and entity.
+description: >-
+  The `client.events` namespace — list historical events across the eight streams, or live-tail an SSE feed filtered by stream and entity.
 ---
 
 The `client.events` namespace operates on the eight event streams KovaServe emits through NATS JetStream and persists for replay. Every state transition in the control plane — Run created, Step completed, Budget warning, ContextBudget admission, Checkpoint validated, KV state stored — produces a typed event with a standard envelope and a stream-specific payload. The SDK surfaces two operations: paginated `list` for historical queries and `tail` for live consumption.

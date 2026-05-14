@@ -1,6 +1,7 @@
 ---
 title: Type model
-description: Pydantic v2 response models, `TypedDict` request shapes, `py.typed` marker. Hand-mirrored from the canonical wire schemas, CI-guarded for drift.
+description: >-
+  Pydantic v2 response models, `TypedDict` request shapes, `py.typed` marker. Hand-mirrored from the canonical wire schemas, CI-guarded for drift.
 ---
 
 The SDK's typed surface is **Pydantic v2 responses + `TypedDict` requests**. Responses are full Pydantic models with `.model_dump()`, `.model_validate_json()`, and forward-compat `model_extra` on every class. Requests are `TypedDict`s with `total=False` and `NotRequired[T]` so you get autocomplete without mandatory model construction.

@@ -1,6 +1,7 @@
 ---
 title: Policy scopes
-description: PolicyScope is the normalized governance binding across Tenant / Project / Environment / deployment. It carries `context_share_scope`, `data_boundary`, and tool policy references.
+description: >-
+  PolicyScope is the normalized governance binding across Tenant / Project / Environment / deployment. It carries `context_share_scope`, `data_boundary`, and tool policy references.
 ---
 
 A [PolicyScope](/docs/concepts/policy/policy-scopes) is the governance binding every Run is evaluated against. One PolicyScope per Run, resolved from the request's identity at admission time. PolicyScope is what determines:

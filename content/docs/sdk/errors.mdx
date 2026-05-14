@@ -1,6 +1,7 @@
 ---
 title: Errors
-description: The `KovaError` exception hierarchy. Status-code subclasses for catch-by-class; feature subclasses for catch-by-cause. OpenAI exceptions remain on `/v1/*`; KovaServe exceptions on `/v1/ks/*`.
+description: >-
+  The `KovaError` exception hierarchy. Status-code subclasses for catch-by-class; feature subclasses for catch-by-cause. OpenAI exceptions remain on `/v1/*`; KovaServe exceptions on `/v1/ks/*`.
 ---
 
 The SDK uses a two-pronged exception model. Inference calls through the OpenAI re-export raise **`openai.*` exceptions** — the SDK never rewraps them, preserving the OpenAI-passthrough backward-compat guarantee. Control-plane calls through `KovaControlClient` raise **`kovaserve.Kova*` exceptions** — a status-code tree with feature subclasses where catch-granularity matters.

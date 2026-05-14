@@ -1,6 +1,7 @@
 ---
 title: Sessions
-description: The `client.sessions` namespace — create, retrieve, list, and archive Sessions, the continuity containers that host sequential Runs and accumulate turn history.
+description: >-
+  The `client.sessions` namespace — create, retrieve, list, and archive Sessions, the continuity containers that host sequential Runs and accumulate turn history.
 ---
 
 The `client.sessions` namespace operates on [Sessions](/docs/concepts/continuity/sessions), the continuity containers that host one or more sequential [Runs](/docs/concepts/run-hierarchy/runs) and accumulate a turn history. Sessions are how KovaServe expresses "this is the same conversation across multiple Runs" — they survive node restarts, track the current [ContextManifest](/docs/concepts/context/context-manifests), and bind to the Cache-Aware Router for warm-prefix affinity.

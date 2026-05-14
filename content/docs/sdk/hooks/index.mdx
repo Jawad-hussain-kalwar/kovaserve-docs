@@ -1,6 +1,6 @@
 ---
 title: Hooks
-description: `RunHooks` is the canonical reactivity surface — subclass and override `on_step_start`, `on_budget_warning`, `on_compact_required`, and the other on_x methods to react to execution events as they happen on the SDK side.
+description: RunHooks is the canonical reactivity surface — subclass and override on_step_start, on_budget_warning, on_compact_required, and the other on_x methods to react to execution events as they happen on the SDK side.
 ---
 
 `RunHooks` is the SDK's **reactivity surface**: a subclassable class with a fixed set of `on_x` methods. Override the methods you care about, attach an instance to a client / decorator / per-call kwarg, and the SDK invokes your method when the corresponding event happens. Hooks fire **after** the SDK commits the state to the server but **before** the next outgoing call, so they're the right place to alert, metric, or compute reactive side effects.

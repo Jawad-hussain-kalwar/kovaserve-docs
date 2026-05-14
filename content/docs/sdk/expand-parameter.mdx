@@ -1,6 +1,7 @@
 ---
 title: "`expand=` parameter"
-description: Stripe-style graph hydration. Collapse multiple round trips into one by expanding nested resources inline — `expand=["steps.model_calls.context_manifest"]`.
+description: >-
+  Stripe-style graph hydration. Collapse multiple round trips into one by expanding nested resources inline — `expand=["steps.model_calls.context_manifest"]`.
 ---
 
 The SDK ships **`expand=`** on every read endpoint that returns a resource with related entities. Pass a list of dotted paths; the server hydrates the named subresources inline and returns one document. This collapses four round trips into one for a typical Run + Steps + ModelCalls + ContextManifest query.

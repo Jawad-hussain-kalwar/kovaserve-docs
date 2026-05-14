@@ -1,6 +1,7 @@
 ---
 title: Extension envelope
-description: The `kovaserve` extension field — the typed envelope you attach via `extra_body={"kovaserve": {...}}` to opt a chat completion into Runs, Sessions, Budgets, ContextManifests, Checkpoints, and the rest of the control plane.
+description: >-
+  The kovaserve extension field — the typed envelope you attach via extra_body={"kovaserve": {...}} to opt a chat completion into Runs, Sessions, Budgets, ContextManifests, Checkpoints, and the rest of the control plane.
 ---
 
 The KovaServe inference path uses the OpenAI SDK's `extra_body` kwarg to carry a single key — `"kovaserve"` — whose value is a typed envelope of execution-control metadata. The envelope is the entire mechanism by which a chat completion opts into the control plane.

@@ -1,6 +1,7 @@
 ---
 title: Pricing snapshots
-description: The `input_price_snapshot`, `output_price_snapshot`, and `discount_snapshot` columns on `usage_records` — frozen rates that make every row self-contained for audit.
+description: >-
+  The `input_price_snapshot`, `output_price_snapshot`, and `discount_snapshot` columns on `usage_records` — frozen rates that make every row self-contained for audit.
 ---
 
 A **pricing snapshot** is the trio of columns — `input_price_snapshot`, `output_price_snapshot`, `discount_snapshot` — that freeze the model-pricing rates onto every `usage_records` row at compute time. They make each row independently auditable: an auditor can re-derive `cost_cents` from the row alone, without consulting the `model_pricing` table.

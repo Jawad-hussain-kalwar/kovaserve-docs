@@ -1,6 +1,6 @@
 ---
 title: Pydantic AI adapter
-description: `KovaDeps` typed dependency injection through Pydantic AI's `RunContext[T]` mechanism — the cleanest typed integration in the SDK. No middleware, no wrappers, no monkey-patching.
+description: KovaDeps typed dependency injection through Pydantic AI's RunContext[T] mechanism — the cleanest typed integration in the SDK. No middleware, no wrappers, no monkey-patching.
 ---
 
 The **Pydantic AI adapter** integrates through Pydantic AI's native typed-dependency-injection mechanism — `RunContext[T]`. There is no middleware, no decorator stack, no monkey-patching. Pydantic AI calls every tool function with a `RunContext[KovaDeps]`; you read the KovaServe state off the deps directly. Install with `pip install "kovaserve[pydantic-ai]"`.

@@ -1,6 +1,7 @@
 ---
 title: Metering
-description: The `client.metering` namespace — query per-Run, per-Project, and per-Tenant usage aggregates with cost and cache-savings breakdowns; export raw usage records as JSONL.
+description: >-
+  The `client.metering` namespace — query per-Run, per-Project, and per-Tenant usage aggregates with cost and cache-savings breakdowns; export raw usage records as JSONL.
 ---
 
 The `client.metering` namespace operates on usage and cost data. Every ModelCall that opts into the control plane produces a `usage_records` row attributed to the Run, Project, and Tenant — with real vLLM token counts, real `cached_tokens` accounting, and per-row pricing snapshots so historical replays return identical numbers even after a price change. The metering namespace surfaces two operations: a typed `usage` aggregate query and a streaming `export` for downstream warehousing.

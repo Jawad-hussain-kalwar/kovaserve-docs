@@ -1,6 +1,7 @@
 ---
 title: Tenancy
-description: The `client.tenancy` namespace — manage Tenants, Projects, Environments, and Bearer Keys. The hierarchy is `Tenant → Project → Environment → Deployment`; Keys are an orthogonal credential surface.
+description: >-
+  The `client.tenancy` namespace — manage Tenants, Projects, Environments, and Bearer Keys. The hierarchy is `Tenant → Project → Environment → Deployment`; Keys are an orthogonal credential surface.
 ---
 
 The `client.tenancy` namespace operates on the four-level hierarchy that scopes every resource in KovaServe: **Tenant → Project → Environment → Deployment**. Bearer Keys are the orthogonal credential surface — every key binds to a `(tenant, project, environment)` triple, and every API call resolves through that binding. Keys are not a level in the hierarchy; they are the way callers prove which level they are operating in.

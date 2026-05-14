@@ -1,6 +1,7 @@
 ---
 title: Context budget state machine
-description: The ContextBudget FSM — `ACTIVE` plus the five advisory states `WARN`, `OFFLOAD_REQUIRED`, `COMPACT_REQUIRED`, `DEGRADE`, and the terminal `HARD_STOP → CLOSED`.
+description: >-
+  The ContextBudget FSM — `ACTIVE` plus the five advisory states `WARN`, `OFFLOAD_REQUIRED`, `COMPACT_REQUIRED`, `DEGRADE`, and the terminal `HARD_STOP → CLOSED`.
 ---
 
 The **ContextBudget state machine** is the lifecycle every [ContextBudget](/docs/concepts/policy/context-budgets) travels per ModelCall. Unlike most FSMs in KovaServe, it is dominated by **transient advisories** — five non-`ACTIVE` states that the runtime applies a transformation to and re-admits, returning to `ACTIVE`. Only `HARD_STOP` is terminal.

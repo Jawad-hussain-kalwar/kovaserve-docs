@@ -1,6 +1,7 @@
 ---
 title: ContextBuilder
-description: The four-tier prompt builder. Snaps inputs to the canonical `tools → system → history-prefix → summary` order, refuses dynamic content in early slots, and produces the manifest envelope the gateway consumes.
+description: >-
+  The four-tier prompt builder. Snaps inputs to the canonical `tools → system → history-prefix → summary` order, refuses dynamic content in early slots, and produces the manifest envelope the gateway consumes.
 ---
 
 `ContextBuilder` is the SDK's highest-leverage primitive. It shapes the request to maximise cache reuse and audit fidelity — it does not decide *what to put in the prompt*. The runtime supplies the content; the builder enforces the canonical order, computes deterministic identity inputs, and produces the `kovaserve` extension envelope the gateway consumes.

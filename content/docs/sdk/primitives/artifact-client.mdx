@@ -1,6 +1,7 @@
 ---
 title: ArtifactClient
-description: The ergonomic wrapper around `client.context.artifacts` — `upload_path` auto-detects mime, `upload_content` accepts bytes directly, `download` and `download_to_path` resolve the body when needed.
+description: >-
+  The ergonomic wrapper around `client.context.artifacts` — `upload_path` auto-detects mime, `upload_content` accepts bytes directly, `download` and `download_to_path` resolve the body when needed.
 ---
 
 `ArtifactClient` is the ergonomic primitive for working with [ContextArtifacts](/docs/sdk/control/context-artifacts) — the object-storage-backed entities that hold externalized context bytes. The raw `client.context.artifacts.upload(...)` method works for every case; `ArtifactClient` adds path-based upload, automatic mime detection, and download helpers on top.

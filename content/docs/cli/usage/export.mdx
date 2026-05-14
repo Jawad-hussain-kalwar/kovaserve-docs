@@ -1,6 +1,7 @@
 ---
 title: "`kova usage export`"
-description: Streaming JSONL export of raw `usage_records` rows. One row per ModelCall with pricing snapshots so each row is self-contained for audit.
+description: >-
+  Streaming JSONL export of raw `usage_records` rows. One row per ModelCall with pricing snapshots so each row is self-contained for audit.
 ---
 
 Streaming JSONL export of raw `usage_records` rows. One row per ModelCall, each carrying the input / output / discount pricing snapshots so historical replays return identical numbers even after a price change.

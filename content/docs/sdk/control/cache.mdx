@@ -1,6 +1,7 @@
 ---
 title: Cache
-description: The `client.cache` namespace — pre-fill a warm placement before the first real call (`prewarm`) and override the multi-tenant cache salt (`salt`).
+description: >-
+  The `client.cache` namespace — pre-fill a warm placement before the first real call (`prewarm`) and override the multi-tenant cache salt (`salt`).
 ---
 
 The `client.cache` namespace carries two operations that aren't quite resources but are too important to leave to folk knowledge. `prewarm` pre-fills a node's KV cache against a known ContextManifest so the first real call lands warm. `salt` overrides the per-tenant `cache_salt` the SDK injects on every request, for the narrow cases where the default `sha256(tenant_id)` salt isn't what you want.

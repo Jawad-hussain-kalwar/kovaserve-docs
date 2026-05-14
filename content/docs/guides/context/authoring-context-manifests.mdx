@@ -1,6 +1,7 @@
 ---
 title: Authoring context manifests
-description: Use `ContextBuilder` to shape the request for maximum cache reuse and audit fidelity. The four-tier order is canonical; the builder enforces it.
+description: >-
+  Use `ContextBuilder` to shape the request for maximum cache reuse and audit fidelity. The four-tier order is canonical; the builder enforces it.
 ---
 
 The fastest way to author a ContextManifest is to skip authoring it directly and use [`ContextBuilder`](/docs/sdk/primitives/context-builder). The builder produces the canonical 4-tier shape the [Cache-Aware Router](/docs/concepts/routing/manifest-aware-routing) expects, refuses dynamic content in early slots, computes deterministic identity, and stamps the multi-tenant `cache_salt` invisibly.

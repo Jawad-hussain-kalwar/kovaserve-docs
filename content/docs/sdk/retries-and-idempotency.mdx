@@ -1,6 +1,7 @@
 ---
 title: Retries and idempotency
-description: Auto-retry with jittered exponential backoff on transient failures. Auto-generated `Idempotency-Key` on POSTs, reused across retries. `Retry-After` honoured.
+description: >-
+  Auto-retry with jittered exponential backoff on transient failures. Auto-generated `Idempotency-Key` on POSTs, reused across retries. `Retry-After` honoured.
 ---
 
 The SDK retries transient failures automatically. Every POST gets an auto-generated `Idempotency-Key` reused across retries so a network blip mid-flight doesn't produce a duplicate resource.

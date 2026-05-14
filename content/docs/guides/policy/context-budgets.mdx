@@ -1,6 +1,7 @@
 ---
 title: Context budgets
-description: Per-request admission control over context size. Six dimensions, six decisions — `ALLOW | WARN | OFFLOAD_REQUIRED | COMPACT_REQUIRED | DEGRADE | HARD_STOP`. Distinct from run-level Budgets.
+description: >-
+  Per-request admission control over context size. Six dimensions, six decisions — `ALLOW | WARN | OFFLOAD_REQUIRED | COMPACT_REQUIRED | DEGRADE | HARD_STOP`. Distinct from run-level Budgets.
 ---
 
 A [ContextBudget](/docs/concepts/policy/context-budgets) bounds **context size per request**. The admission service evaluates the assembled ContextManifest before GPU dispatch and returns one of six decisions; transformations (offload, compaction, degradation) bring the manifest under threshold before the call proceeds.

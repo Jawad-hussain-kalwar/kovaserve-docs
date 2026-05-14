@@ -1,6 +1,6 @@
 ---
 title: OpenAI compatibility
-description: `from kovaserve import OpenAI` is a pure re-export of the official `openai` SDK with KovaServe's base URL and API key defaulted. Migration is two lines; every OpenAI feature works for free.
+description: from kovaserve import OpenAI is a pure re-export of the official openai SDK with KovaServe's base URL and API key defaulted. Migration is two lines; every OpenAI feature works for free.
 ---
 
 The KovaServe inference path is the official **`openai`** SDK with two constructor defaults — base URL and API key — pre-filled. There is no fork, no shim, no subclass adding methods. Everything that ships in `openai` (streaming, tool calls, structured outputs, async, file uploads, the beta namespace) works on KovaServe the day you `pip install --upgrade openai`.

@@ -1,6 +1,7 @@
 ---
 title: Context segments
-description: The `client.context.segments` namespace — retrieve individual ContextSegments, the typed fragments that compose a ContextManifest.
+description: >-
+  The `client.context.segments` namespace — retrieve individual ContextSegments, the typed fragments that compose a ContextManifest.
 ---
 
 The `client.context.segments` namespace operates on [ContextSegments](/docs/concepts/context/context-segments), the typed fragments of context that compose a [ContextManifest](/docs/sdk/control/context-manifests). A segment carries the smallest unit of context KovaServe reasons about: a single semantic role (tools, system prompt, history-prefix, summary, agent state, tool result) with its own digest, token count, byte count, memory class, and optional artifact reference for offloaded payloads.

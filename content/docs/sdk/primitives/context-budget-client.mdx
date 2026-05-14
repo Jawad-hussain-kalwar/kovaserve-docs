@@ -1,6 +1,7 @@
 ---
 title: ContextBudgetClient
-description: The ergonomic wrapper around `client.context.budgets` — preflight admission for an assembled manifest with a typed `AdmissionDecision` response.
+description: >-
+  The ergonomic wrapper around `client.context.budgets` — preflight admission for an assembled manifest with a typed `AdmissionDecision` response.
 ---
 
 `ContextBudgetClient` is the ergonomic primitive for working with [ContextBudgets](/docs/sdk/control/context-budgets) — the admission-control objects that evaluate context size before GPU dispatch. The wrapper adds one capability the raw client doesn't ship as ergonomically: a one-call **preflight** API that accepts a [`ContextBuilder`](/docs/sdk/primitives/context-builder) and returns a typed `AdmissionDecision`.

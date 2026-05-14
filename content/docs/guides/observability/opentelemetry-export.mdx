@@ -1,6 +1,7 @@
 ---
 title: OpenTelemetry export
-description: KovaServe emits W3C `traceparent` end-to-end and works with the standard `opentelemetry-instrumentation-httpx`. Opt-in GenAI semantic conventions add LLM-call attributes when your stack supports them.
+description: >-
+  KovaServe emits W3C `traceparent` end-to-end and works with the standard `opentelemetry-instrumentation-httpx`. Opt-in GenAI semantic conventions add LLM-call attributes when your stack supports them.
 ---
 
 KovaServe joins cleanly to OpenTelemetry tracing through two mechanisms: standard `httpx` instrumentation that the SDK rides on, and an opt-in [GenAI semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/) layer that adds LLM-specific span attributes.

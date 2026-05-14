@@ -1,6 +1,7 @@
 ---
 title: Checkpoints
-description: The `client.checkpoints` namespace — capture, retrieve, list, and restore Checkpoints. Logical-context-first; KV cache export is the optional warm path.
+description: >-
+  The `client.checkpoints` namespace — capture, retrieve, list, and restore Checkpoints. Logical-context-first; KV cache export is the optional warm path.
 ---
 
 The `client.checkpoints` namespace operates on [Checkpoints](/docs/concepts/recovery/checkpoints), the resumable snapshots that bind a Run's [ContextManifest](/docs/concepts/context/context-manifests), [ContextArtifacts](/docs/concepts/context/context-artifacts), and [CompactionRecords](/docs/concepts/context/compaction-records) — plus an optional KV cache export — so a long-running Run survives node failure, redeployment, or operator-initiated pause without losing its logical state.

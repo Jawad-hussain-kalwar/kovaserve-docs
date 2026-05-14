@@ -1,6 +1,7 @@
 ---
 title: Budget state machine
-description: The Budget FSM — `ACTIVE → WARNING → DEGRADED_ALLOWED | HARD_STOP → CLOSED` — and how each transition is driven by consumption thresholds, admission decisions, and Run termination.
+description: >-
+  The Budget FSM — `ACTIVE → WARNING → DEGRADED_ALLOWED | HARD_STOP → CLOSED` — and how each transition is driven by consumption thresholds, admission decisions, and Run termination.
 ---
 
 The **Budget state machine** is the lifecycle every [Budget](/docs/concepts/policy/budgets) travels from creation to closure. It has five states and three drivers: consumption against limits, admission decisions on each Step, and Run termination.

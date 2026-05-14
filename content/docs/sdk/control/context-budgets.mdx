@@ -1,6 +1,7 @@
 ---
 title: Context budgets
-description: The `client.context.budgets` namespace — create, retrieve, update, and run preflight admission against ContextBudgets, the per-request admission control objects for context size.
+description: >-
+  The `client.context.budgets` namespace — create, retrieve, update, and run preflight admission against ContextBudgets, the per-request admission control objects for context size.
 ---
 
 The `client.context.budgets` namespace operates on [ContextBudgets](/docs/concepts/policy/context-budgets), the admission-control objects that evaluate every assembled [ContextManifest](/docs/sdk/control/context-manifests) before GPU dispatch. A ContextBudget is **not** the same as a [Budget](/docs/sdk/control/budgets): Budgets govern cost / tokens / steps / time / tools at the Run level; ContextBudgets govern context-window admission at the request level. They coexist, return distinct decisions, and use separate Python types to prevent accidental conflation.

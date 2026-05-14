@@ -1,6 +1,7 @@
 ---
 title: Budgets
-description: The `client.budgets` namespace — create, retrieve, list, and update run-level Budgets that actively enforce cost, token, step, time, and tool limits.
+description: >-
+  The `client.budgets` namespace — create, retrieve, list, and update run-level Budgets that actively enforce cost, token, step, time, and tool limits.
 ---
 
 The `client.budgets` namespace operates on [Budgets](/docs/concepts/policy/budgets), the active execution-control objects that bind to a [Run](/docs/concepts/run-hierarchy/runs) and enforce limits across five dimensions: cost, tokens, steps, time, and tool calls. A Budget is not a billing record — it is admission control. The Budget evaluator runs in the gateway hot path before every [ModelCall](/docs/concepts/run-hierarchy/model-calls); when the strictest dimension crosses the hard-stop threshold, the next request is rejected with `429 budget_exceeded`.

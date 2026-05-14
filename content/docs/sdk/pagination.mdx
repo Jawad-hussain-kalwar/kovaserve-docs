@@ -1,6 +1,7 @@
 ---
 title: Pagination
-description: Cursor-based pagination with auto-iterating `for x in client.runs.list(...)` and manual `page.has_next_page()` / `page.get_next_page()` control.
+description: >-
+  Cursor-based pagination with auto-iterating `for x in client.runs.list(...)` and manual `page.has_next_page()` / `page.get_next_page()` control.
 ---
 
 Every list operation in the SDK returns a cursor-paginated iterator. The default — `for run in client.runs.list(...)` — pages lazily until the server reports no more results. Manual page control is available when you need it.

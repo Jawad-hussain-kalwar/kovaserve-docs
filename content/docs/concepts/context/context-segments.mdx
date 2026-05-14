@@ -1,6 +1,7 @@
 ---
 title: Context segments
-description: The ContextSegment entity — typed fragments of context with context_type, memory_class, digest, token counts, optional artifact_ref, and the `parts` wire format.
+description: >-
+  The ContextSegment entity — typed fragments of context with context_type, memory_class, digest, token counts, optional artifact_ref, and the `parts` wire format.
 ---
 
 A **ContextSegment** is a typed fragment of context inside a [ContextManifest](/docs/concepts/context/context-manifests). Each segment carries a `context_type` (its canonical position), a `memory_class` label, a content digest, token and byte counts, an optional `artifact_ref_id` for offloaded payloads, a `checkpoint_relevant` flag, and a `retention_policy`.

@@ -1,6 +1,7 @@
 ---
 title: Configuration
-description: Configure the `kovaserve` SDK through environment variables and per-client kwargs — API key, base URL, timeouts, retries, connection pool, logging, previews, and tracing.
+description: >-
+  Configure the `kovaserve` SDK through environment variables and per-client kwargs — API key, base URL, timeouts, retries, connection pool, logging, previews, and tracing.
 ---
 
 The SDK reads configuration from environment variables first and per-client kwargs second. Kwargs always win; nothing is silently merged from disk. The CLI reads `~/.config/kova/credentials`; the Python SDK does **not** — that separation keeps tests reproducible.

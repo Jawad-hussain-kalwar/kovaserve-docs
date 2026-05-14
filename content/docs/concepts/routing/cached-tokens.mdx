@@ -1,6 +1,7 @@
 ---
 title: Cached tokens
-description: The `cached_tokens` accounting field — what it measures, where it appears in the wire shape, how it relates to gross / net cost, and how it interacts with manifest token counts and substrate cache events.
+description: >-
+  The `cached_tokens` accounting field — what it measures, where it appears in the wire shape, how it relates to gross / net cost, and how it interacts with manifest token counts and substrate cache events.
 ---
 
 `cached_tokens` is the per-call count of input tokens that were served from the substrate's [KV cache](/docs/concepts/routing/kv-cache) and therefore did not pay full prefill cost. It is the accounting handle KovaServe uses to attribute cache reuse value to a specific [ModelCall](/docs/concepts/run-hierarchy/model-calls) and to drive cost savings.

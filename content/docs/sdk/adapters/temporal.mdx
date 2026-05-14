@@ -1,6 +1,7 @@
 ---
 title: Temporal adapter
-description: `@kova_activity` Activity wrapper and `KovaInterceptor` for the worker chain. The Workflow stays deterministic; Activities record ModelCalls inside KovaServe.
+description: >-
+  @kova_activity Activity wrapper and KovaInterceptor for the worker chain. The Workflow stays deterministic; Activities record ModelCalls inside KovaServe.
 ---
 
 The **Temporal adapter** integrates KovaServe under an existing Temporal application via two extension points: an `@kova_activity` decorator that wraps Activity bodies, and a `KovaInterceptor` that propagates KovaServe identity through the worker's interceptor chain. The Workflow stays deterministic — every interaction with KovaServe happens inside Activities. Install with `pip install "kovaserve[temporal]"`.

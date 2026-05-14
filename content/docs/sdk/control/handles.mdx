@@ -1,6 +1,7 @@
 ---
 title: Handles
-description: The `client.handles` namespace — create, retrieve, list, delete, and share typed StateHandles that reference reusable execution state across Sessions, Runs, and Projects.
+description: >-
+  The `client.handles` namespace — create, retrieve, list, delete, and share typed StateHandles that reference reusable execution state across Sessions, Runs, and Projects.
 ---
 
 The `client.handles` namespace operates on [StateHandles](/docs/concepts/recovery/state-handles), the typed references that point at reusable execution state. A handle is the durable, scope-checked, expiry-aware way to say *"this cached prefix / context manifest / artifact bundle / checkpoint / runtime-state object can be reused over here"*. Handles generalize the older "activation handle" concept so cross-Session reuse extends beyond raw KV prefixes.

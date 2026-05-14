@@ -1,6 +1,7 @@
 ---
 title: "`kova auth`"
-description: Authenticate the CLI — `kova auth login` writes to `~/.config/kova/credentials`; `kova auth status` shows the active profile; `kova auth logout` revokes the stored key.
+description: >-
+  Authenticate the CLI — `kova auth login` writes to `~/.config/kova/credentials`; `kova auth status` shows the active profile; `kova auth logout` revokes the stored key.
 ---
 
 `kova auth` manages CLI credentials. The CLI reads from `~/.config/kova/credentials` (or `%APPDATA%\kova\credentials` on Windows) — a TOML file with one section per profile. The SDK does **not** read this file; only the CLI does.

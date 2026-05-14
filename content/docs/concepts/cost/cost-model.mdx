@@ -1,6 +1,7 @@
 ---
 title: Cost model
-description: How KovaServe computes per-call cost — gross cost, net cost, and cache savings — so the identity `gross = net + savings` holds exactly for every row and every aggregation.
+description: >-
+  How KovaServe computes per-call cost — gross cost, net cost, and cache savings — so the identity `gross = net + savings` holds exactly for every row and every aggregation.
 ---
 
 The **cost model** is the per-[ModelCall](/docs/concepts/run-hierarchy/model-calls) accounting that turns real token counts and pricing into three numbers: **gross cost**, **net cost**, and **cache savings**. It is owned by the **Metering / Cost / Budget Layer** and is built around a single arithmetic identity that every audit, dashboard, and aggregation depends on.

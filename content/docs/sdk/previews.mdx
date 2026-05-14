@@ -1,6 +1,7 @@
 ---
 title: Previews
-description: Opt into in-flight server features per request with `previews=[...]`. Stable promotion / removal lifecycle with a deprecation window; never overload `client.beta.*`.
+description: >-
+  Opt into in-flight server features per request with `previews=[...]`. Stable promotion / removal lifecycle with a deprecation window; never overload `client.beta.*`.
 ---
 
 The SDK exposes in-flight server features through a **previews** tier: a per-request opt-in list that tells the gateway "this client wants the preview behaviour for the named features." Previews live at `client.previews.*` for SDK-typed access and ride on the `X-Kova-Previews` header for per-call selection.

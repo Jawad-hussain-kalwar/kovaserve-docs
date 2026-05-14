@@ -1,6 +1,7 @@
 ---
 title: "`@kova.budget`"
-description: The Budget decorator — attach a multi-dimensional Budget to the wrapping Run with admission applied on entry. Budget admission must happen before Run allocation; this is why `@kova.budget` is the outermost decorator.
+description: >-
+  The Budget decorator — attach a multi-dimensional Budget to the wrapping Run with admission applied on entry. Budget admission must happen before Run allocation; this is why `@kova.budget` is the outermost decorator.
 ---
 
 `@kova.budget` attaches a [Budget](/docs/concepts/policy/budgets) to the wrapping [Run](/docs/concepts/run-hierarchy/runs). Admission is applied **on entry** — if the Budget is already at hard-stop on entry (because it was inherited from a parent context), the decorated function never executes. This is why `@kova.budget` is the **outermost** decorator: a hard-stop must not orphan a `RUNNING` Run downstream.

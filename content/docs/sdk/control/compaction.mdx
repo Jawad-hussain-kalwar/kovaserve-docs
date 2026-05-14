@@ -1,6 +1,7 @@
 ---
 title: Compaction
-description: The `client.context.compaction` namespace — report a runtime-produced summary to the Compaction Lineage Service, and list the CompactionRecords on a Run.
+description: >-
+  The `client.context.compaction` namespace — report a runtime-produced summary to the Compaction Lineage Service, and list the CompactionRecords on a Run.
 ---
 
 The `client.context.compaction` namespace operates on [CompactionRecords](/docs/concepts/context/compaction-records), the lineage objects that describe how a set of source [ContextSegments](/docs/sdk/control/context-segments) became one or more compacted segments. KovaServe's compaction model is a **lineage contract, not a service**: the runtime decides when to compact and produces the summary; KovaServe records the lineage, atomically swaps the segments on the manifest, and exposes the lineage for resume and audit. The same contract supports a future KovaServe-managed summarizer without changing the wire surface.

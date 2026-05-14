@@ -1,6 +1,7 @@
 ---
 title: Cost and streaming
-description: Cost headers on non-streaming responses; the final SSE chunk that carries cost on streaming responses; the `accumulate_stream_cost` helper for the common "I want the final cost" case.
+description: >-
+  Cost headers on non-streaming responses; the final SSE chunk that carries cost on streaming responses; the `accumulate_stream_cost` helper for the common "I want the final cost" case.
 ---
 
 KovaServe surfaces the cost of every ModelCall through two channels: **HTTP response headers** on non-streaming responses and the **final SSE chunk** on streaming responses. The two channels are not interchangeable — headers must be sent before the response body begins, and a streaming response does not know its final cost until generation completes.

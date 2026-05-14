@@ -1,6 +1,7 @@
 ---
 title: OpenAI Agents SDK adapter
-description: Three components — `KovaSession`, `KovaRunHooks`, `KovaTracingExporter` — plug into the OpenAI Agents SDK's Session protocol, lifecycle hooks, and tracing exporter slots.
+description: >-
+  Three components — `KovaSession`, `KovaRunHooks`, `KovaTracingExporter` — plug into the OpenAI Agents SDK's Session protocol, lifecycle hooks, and tracing exporter slots.
 ---
 
 The **OpenAI Agents SDK adapter** integrates through three of the framework's official extension points: the `Session` protocol for conversation persistence, the `RunHooks` lifecycle interface for agent / tool / handoff events, and the custom tracing exporter slot for trace forwarding. Install with `pip install "kovaserve[openai-agents]"`.

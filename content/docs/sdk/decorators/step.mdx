@@ -1,6 +1,7 @@
 ---
 title: "`@kova.step`"
-description: The Step decorator — record a typed Step inside the active Run and seed `parent_step_id` on every nested ModelCall. Includes the four named aliases `@kova.tool`, `@kova.observe`, `@kova.think`, `@kova.compact`.
+description: >-
+  The Step decorator — record a typed Step inside the active Run and seed `parent_step_id` on every nested ModelCall. Includes the four named aliases `@kova.tool`, `@kova.observe`, `@kova.think`, `@kova.compact`.
 ---
 
 `@kova.step` records a [Step](/docs/concepts/run-hierarchy/steps) inside the active [Run](/docs/concepts/run-hierarchy/runs) for the duration of the decorated function. Any chat completion issued from inside the body inherits `parent_step_id` from this Step automatically — the resulting `MODEL_CALL` Step nests under your Step in the timeline.

@@ -1,6 +1,7 @@
 ---
 title: Composition
-description: Stacking order is binding — `@kova.budget` outermost, `@kova.run` next, `@kova.session` innermost when stacked. `@kova.step` and `@kova.checkpoint` nest inside `@kova.run`. The order is enforced statically and at decoration time.
+description: >-
+  Stacking order is binding — `@kova.budget` outermost, `@kova.run` next, `@kova.session` innermost when stacked. `@kova.step` and `@kova.checkpoint` nest inside `@kova.run`. The order is enforced statically and at decoration time.
 ---
 
 The five SDK decorators stack in a **fixed outer-to-inner order**. The order is binding because admission must happen before allocation. The SDK enforces the rule both **at type-check time** (`mypy` flags reversed stacking via `Concatenate`-typed signatures) and **at decoration time** (`DecoratorOrderError`) as a runtime backup.

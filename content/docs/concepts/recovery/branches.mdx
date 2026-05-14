@@ -1,6 +1,7 @@
 ---
 title: Branches
-description: The Branch concept — `BRANCHING` state on the Run FSM, child Run lineage, and inherited-but-bounded budgets and policy.
+description: >-
+  The Branch concept — `BRANCHING` state on the Run FSM, child Run lineage, and inherited-but-bounded budgets and policy.
 ---
 
 A **Branch** is a new [Run](/docs/concepts/run-hierarchy/runs) created from a [Checkpoint](/docs/concepts/recovery/checkpoints) or a stable point on an existing Run. Where a [resume](/docs/concepts/recovery/resume-flow) replays the original Run forward as if the failure had not happened, a branch *forks* — the parent Run continues to exist (or remains terminal), and a new child Run carries on along an independent trajectory.

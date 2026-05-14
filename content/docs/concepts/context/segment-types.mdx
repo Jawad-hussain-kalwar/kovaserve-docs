@@ -1,6 +1,7 @@
 ---
 title: Segment types
-description: The canonical `context_type` enum — the six values, their canonical positions, and how they map onto the four storage tiers GCM uses for prefix breakpoints.
+description: >-
+  The canonical `context_type` enum — the six values, their canonical positions, and how they map onto the four storage tiers GCM uses for prefix breakpoints.
 ---
 
 The `context_type` field on every [ContextSegment](/docs/concepts/context/context-segments) names the segment's **canonical position** in a [ContextManifest](/docs/concepts/context/context-manifests). The set is a closed enum — there are exactly six values, in a fixed canonical order. The order is deterministic and renderer-invariant: two assemblies that consume the same input set produce the same segment ordering, which is what makes the manifest's `stable_context_id` stable.

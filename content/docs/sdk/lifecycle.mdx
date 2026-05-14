@@ -1,6 +1,7 @@
 ---
 title: SDK lifecycle
-description: Semantic Versioning for the Python API. Major breaks are preceded by at least one minor with `DeprecationWarning`. Previews follow the same deprecation window — no surprises.
+description: >-
+  Semantic Versioning for the Python API. Major breaks are preceded by at least one minor with `DeprecationWarning`. Previews follow the same deprecation window — no surprises.
 ---
 
 The SDK follows **Semantic Versioning** for the Python API surface, decoupled from the gateway wire version. The SDK can ship 1.x for a long time against wire versions that bump independently. Breaking changes always pass through a `DeprecationWarning` window first; previews follow the same rule.

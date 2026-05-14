@@ -1,6 +1,7 @@
 ---
 title: CompactionClient
-description: The ergonomic wrapper around `client.context.compaction` — report a runtime-produced summary as a CompactionRecord, list records on a Run, and orchestrate the reduce-and-retry flow on `COMPACT_REQUIRED`.
+description: >-
+  The ergonomic wrapper around `client.context.compaction` — report a runtime-produced summary as a CompactionRecord, list records on a Run, and orchestrate the reduce-and-retry flow on `COMPACT_REQUIRED`.
 ---
 
 `CompactionClient` is the ergonomic primitive for working with [CompactionRecords](/docs/sdk/control/compaction) — the lineage objects that describe how source segments became compacted segments. The wrapper adds typed helpers for the common compaction patterns: report a runtime-produced summary, orchestrate the reduce-and-retry flow when `COMPACT_REQUIRED` admission fires, and audit compaction lineage across a Run.
